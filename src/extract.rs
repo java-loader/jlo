@@ -1,10 +1,10 @@
 use flate2::bufread::GzDecoder;
-use indicatif::{ProgressBar, ProgressStyle};
 use std::error::Error;
 use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;
 use tar::Archive;
+use crate::progress_bar::setup_progress_bar;
 
 pub fn extract(file: &Path, dest: &Path) -> Result<(), Box<dyn Error>> {
     match file.extension().and_then(|s| s.to_str()) {
@@ -24,7 +24,7 @@ fn extract_tar_gz(source: &Path, dest: &Path) -> Result<(), Box<dyn Error>> {
     let metadata = file
         .metadata()
         .map_err(|err| format!("Error reading metadata of {:?}: {}", source, err))?;
-    let pb = setup_progress_bar(metadata.len());
+    let pb = setup_progress_bar("Extracting", metadata.len());
 
     let buffered_file = BufReader::new(file);
     let progress_reader = pb.wrap_read(buffered_file);
@@ -55,7 +55,7 @@ fn extract_zip(source: &Path, dest: &Path) -> Result<(), Box<dyn Error>> {
     let metadata = file
         .metadata()
         .map_err(|err| format!("Error reading metadata of {:?}: {}", source, err))?;
-    let pb = setup_progress_bar(metadata.len());
+    let pb = setup_progress_bar("Extracting", metadata.len());
 
     let buffered_file = BufReader::new(file);
     let progress_reader = pb.wrap_read(buffered_file);
@@ -78,18 +78,4 @@ fn extract_zip(source: &Path, dest: &Path) -> Result<(), Box<dyn Error>> {
     }
 
     result.map_err(|e| e.into())
-}
-
-fn setup_progress_bar(file_size: u64) -> ProgressBar {
-    let pb = ProgressBar::new(file_size);
-    pb.set_style(
-        ProgressStyle::default_bar()
-            .template(
-                "{msg}\n[{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})",
-            )
-            .unwrap()
-            .progress_chars("#>-"),
-    );
-    pb.set_message("Extracting ...");
-    pb
 }

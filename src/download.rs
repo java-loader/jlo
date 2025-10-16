@@ -1,10 +1,10 @@
-use indicatif::{ProgressBar, ProgressStyle};
 use reqwest::blocking::Client;
 use sha2::{Digest, Sha256};
 use std::error::Error;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::time::Duration;
+use crate::progress_bar::setup_progress_bar;
 
 pub fn download(
     name: &str,
@@ -22,16 +22,7 @@ pub fn download(
 
     let mut source = response;
 
-    let pb = ProgressBar::new(total_size);
-    pb.set_style(
-        ProgressStyle::default_bar()
-            .template(
-                "{msg}\n[{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})",
-            )
-            .unwrap()
-            .progress_chars("#>-"),
-    );
-    pb.set_message(format!("Downloading {} ...", name));
+    let pb = setup_progress_bar(format!("Downloading {}", name).as_str(), total_size);
 
     let mut hasher = Sha256::new();
 

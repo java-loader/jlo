@@ -2,6 +2,7 @@ mod adoptium;
 mod conf;
 mod download;
 mod extract;
+mod progress_bar;
 
 use crate::adoptium::{
     JdkMetadata, clean_jdks, fetch_metadata, find_installed_jdk, find_installed_major_versions,
