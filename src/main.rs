@@ -15,6 +15,8 @@ use std::path::{Path, PathBuf};
 use std::process::exit;
 use tempfile::tempdir;
 
+const USER_AGENT: &str = concat!("J'Lo/", env!("CARGO_PKG_VERSION"));
+
 fn main() {
     if env::args().len() < 2 {
         eprintln!("Arguments missing.");

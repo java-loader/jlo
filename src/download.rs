@@ -1,10 +1,10 @@
+use crate::USER_AGENT;
+use crate::progress_bar::setup_progress_bar;
 use reqwest::blocking::Client;
 use sha2::{Digest, Sha256};
 use std::error::Error;
 use std::fs::File;
 use std::io::{Read, Write};
-use std::time::Duration;
-use crate::progress_bar::setup_progress_bar;
 
 pub fn download(
     name: &str,
@@ -12,8 +12,7 @@ pub fn download(
     expected_checksum: &str,
     file: &mut File,
 ) -> Result<(), Box<dyn Error>> {
-    let client = Client::builder().timeout(Duration::from_secs(60)).build()?;
-
+    let client = Client::builder().user_agent(USER_AGENT).build()?;
     let response = client.get(url).send()?;
 
     let total_size = response
