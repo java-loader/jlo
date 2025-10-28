@@ -11,7 +11,7 @@ serial_test = "3"
 
 [dependencies]
 reqwest = { version = "0.12.23", features = ["blocking", "json"] }
-indicatif = "0.18.0"
+indicatif = "0.18.2"
 flate2 = "1.1.4"
 tar = "0.4"
 tempfile = "3.23.0"
