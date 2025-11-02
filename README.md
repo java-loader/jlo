@@ -5,7 +5,7 @@ It is written in Rust, with a main focus on simplicity and ease of use.
 
 J'Lo currently supports Linux (x86_64) and macOS (arm64).
 
-At the moment, only the Eclipse Temurin distribution is available.
+At the moment, only the [Eclipse Temurin](https://adoptium.net/de/temurin/releases) distribution is available.
 Java versions are supported starting from Java 8, with all newer versions working automatically.
 
 ## Installing J'Lo
@@ -56,22 +56,97 @@ jlo env
 JDKs are installed to `~/.jdks/` on Linux and `~/Library/Java/JavaVirtualMachines/` on macOS.
 This allows automatic discovery of installed JDKs by IDEs like IntelliJ IDEA.
 
-## Command Reference
+# J’Lo Command Reference
 
-| Command          | Description                                                                                                                                                                                   |
-|------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `jlo env`        | Set up the environment for the Java version specified in the `.jlorc` file.                                                                                                                   |
-| `jlo env 25`     | Set up the environment for the Java version given as an argument. Ignore `.jlorc` file.                                                                                                       |
-| `jlo init`       | Create a `.jlorc` file that pins the **latest available** Java version.                                                                                                                       |
-| `jlo init 25`    | Create a `.jlorc` file that pins the given Java version. Ignore `.jlorc` file.                                                                                                                |
-| `jlo update`     | Update the Java version from the `.jlorc` file to the latest minor release.                                                                                                                   |
-| `jlo update 25`  | Update the specified Java version to the latest minor version. Ignore `.jlorc` file.<br>Multiple versions can be specified, e.g. `jlo update 8 11 17`.<br>Missing versions will be installed. |
-| `jlo update all` | Update all installed Java versions to their latest minor releases. Ignore `.jlorc` file.                                                                                                      |
-| `jlo clean`      | Keep only the latest minor version of each installed major version, remove all others.                                                                                                        |
-| `jlo selfupdate` | Update J'Lo itself to the latest version.                                                                                                                                                     |
-| `jlo version`    | Print the currently installed J'Lo version.                                                                                                                                                   |
+## Table of Contents
 
-## Uninstalling J'Lo
+1. [Environment Setup](#environment-setup)
+2. [Initialization](#initialization)
+3. [Updating Java Versions](#updating-java-versions)
+4. [Cleaning Installed Versions](#cleaning-installed-versions)
+5. [Managing J’Lo Itself](#managing-jlo-itself)
+
+## Environment Setup
+
+The command `jlo env` configures the current shell session by setting the `JAVA_HOME` and `PATH` environment variables
+to point to the desired JDK installation.
+
+**Behavior:**
+- If the current directory contains a `.jlorc` file, `jlo env` uses the version it specifies.
+- Otherwise, it falls back to `~/.jlo/default.jlorc`.
+- If the requested Java version is not installed, it will be downloaded and installed automatically.
+- If neither config file exists, `jlo env` uses the latest installed Java; if no JDKs are installed, it installs and uses the latest available release.
+- This command affects only the current shell session.
+
+**Usage examples:**
+```shell
+# set environment based on .jlorc (fallbacks described above)
+jlo env
+
+# set environment for Java 25
+jlo env 25
+````
+
+## Initialization
+
+The command `jlo init` creates a `.jlorc` file in the current directory that pins a specific Java version.
+The file is used by `jlo env` to determine which Java version to set up.
+
+Specifying a version is optional; if omitted, the latest available Java version will be used.
+
+This command fails if a `.jlorc` file already exists in the current directory.
+
+**Usage examples:**
+```shell
+# create .jlorc that pins Java 25
+jlo init 25
+
+# create .jlorc that pins the latest available Java version
+jlo init
+```
+
+**Example `.jlorc` file content:**
+```
+# Java version configured by J'Lo - https://github.com/java-loader/jlo
+25
+```
+
+## Updating Java Versions
+
+The command `jlo update` updates installed Java versions to their latest minor releases.
+
+**Behavior:**
+- Multiple versions can be specified as arguments; each will be updated to its latest minor release.
+  Missing versions will be installed automatically.
+- A special argument `all` updates all installed Java versions.
+- If no arguments are provided, it updates the Java version specified in the `.jlorc` file in the current directory.
+
+**Usage examples:**
+```shell
+# update Java version specified in .jlorc
+jlo update
+
+# update Java versions 21 and 25
+jlo update 21 25
+
+# update all installed Java versions
+jlo update all
+```
+
+## Cleaning Installed Versions
+
+The command `jlo clean` removes older minor versions of installed Java versions, keeping only the latest minor
+release for each major version.
+
+Only installations at `~/.jdks/` (or `~/Library/Java/JavaVirtualMachines/` on macOS) managed by J’Lo are
+affected.
+
+## Managing J’Lo Itself
+
+- The command `jlo version` prints the currently installed J’Lo version.
+- The command `jlo selfupdate` updates J’Lo itself to the latest version.
+
+# Uninstalling J'Lo
 
 To uninstall J'Lo, simply remove the `~/.jlo/` directory and the lines you added to your shell profile during
 installation.
