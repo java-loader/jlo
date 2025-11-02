@@ -1,10 +1,10 @@
+use crate::progress_bar::setup_progress_bar;
 use flate2::bufread::GzDecoder;
 use std::error::Error;
 use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;
 use tar::Archive;
-use crate::progress_bar::setup_progress_bar;
 
 pub fn extract(file: &Path, dest: &Path) -> Result<(), Box<dyn Error>> {
     match file.extension().and_then(|s| s.to_str()) {

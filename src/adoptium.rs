@@ -1,8 +1,8 @@
+use crate::USER_AGENT;
+use reqwest::blocking::Client;
 use semver_rs::compare;
 use std::env;
 use std::path::{Path, PathBuf};
-use reqwest::blocking::Client;
-use crate::USER_AGENT;
 
 const MARKER_FILE: &str = ".jlo-managed";
 
@@ -134,7 +134,9 @@ pub fn fetch_metadata(java_version: &String) -> Result<JdkMetadata, String> {
         os = jdk_os()
     );
 
-    let client = Client::builder().user_agent(USER_AGENT).build()
+    let client = Client::builder()
+        .user_agent(USER_AGENT)
+        .build()
         .map_err(|e| format!("Could not build HTTP client: {}", e))?;
     let metadata_response = client
         .get(&api_url)
@@ -287,7 +289,9 @@ fn jdk_arch() -> &'static str {
 }
 
 pub fn find_latest_jdk() -> Result<String, String> {
-    let client = Client::builder().user_agent(USER_AGENT).build()
+    let client = Client::builder()
+        .user_agent(USER_AGENT)
+        .build()
         .map_err(|e| format!("Could not build HTTP client: {}", e))?;
     let response = client
         .get("https://api.adoptium.net/v3/info/available_releases")

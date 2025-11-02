@@ -62,9 +62,10 @@ This allows automatic discovery of installed JDKs by IDEs like IntelliJ IDEA.
 
 1. [Environment Setup](#environment-setup)
 2. [Initialization](#initialization)
-3. [Updating Java Versions](#updating-java-versions)
-4. [Cleaning Installed Versions](#cleaning-installed-versions)
-5. [Managing J’Lo Itself](#managing-jlo-itself)
+3. [Default](#default)
+4. [Updating Java Versions](#updating-java-versions)
+5. [Cleaning Installed Versions](#cleaning-installed-versions)
+6. [Managing J’Lo Itself](#managing-jlo-itself)
 
 ## Environment Setup
 
@@ -75,7 +76,6 @@ to point to the desired JDK installation.
 - If the current directory contains a `.jlorc` file, `jlo env` uses the version it specifies.
 - Otherwise, it falls back to `~/.jlo/default.jlorc`.
 - If the requested Java version is not installed, it will be downloaded and installed automatically.
-- If neither config file exists, `jlo env` uses the latest installed Java; if no JDKs are installed, it installs and uses the latest available release.
 - This command affects only the current shell session.
 
 **Usage examples:**
@@ -111,6 +111,16 @@ jlo init
 25
 ```
 
+## Default
+
+The command `jlo default` creates the file `~/.jlo/default.jlorc` that specifies the default Java version
+used by `jlo env` when no `.jlorc` file is found in the current directory.
+
+**Usage examples:**
+```shell
+jlo default 25
+```
+
 ## Updating Java Versions
 
 The command `jlo update` updates installed Java versions to their latest minor releases.
@@ -119,11 +129,12 @@ The command `jlo update` updates installed Java versions to their latest minor r
 - Multiple versions can be specified as arguments; each will be updated to its latest minor release.
   Missing versions will be installed automatically.
 - A special argument `all` updates all installed Java versions.
-- If no arguments are provided, it updates the Java version specified in the `.jlorc` file in the current directory.
+- If no arguments are provided, it updates the Java version specified in the `.jlorc` file in the current directory,
+  falling back to `~/.jlo/default.jlorc` if none is found.
 
 **Usage examples:**
 ```shell
-# update Java version specified in .jlorc
+# update Java version specified in .jlorc or ~/.jlo/default.jlorc
 jlo update
 
 # update Java versions 21 and 25

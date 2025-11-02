@@ -32,6 +32,9 @@ fn main() {
         "clean" => {
             cmd_clean();
         }
+        "default" => {
+            cmd_default();
+        }
         "init" => {
             cmd_init();
         }
@@ -56,7 +59,7 @@ fn main() {
 }
 
 fn print_usage_and_exit() -> ! {
-    eprintln!("Usage: jlo [ env | clean | init | update | selfupdate | version ]");
+    eprintln!("Usage: jlo [ env | clean | default | init | update | selfupdate | version ]");
     exit(1);
 }
 
@@ -64,14 +67,13 @@ fn cmd_env() {
     let java_version = if env::args().len() > 2 {
         env::args().nth(2).unwrap()
     } else {
-        conf::load().unwrap_or_else(|e| {
-            eprintln!("Error: Could not load configuration: {}", e);
+        conf::load_config_java_version().unwrap_or_else(|e| {
+            eprintln!("{}", e);
             exit(1);
         })
     };
 
     assert_java_version(&java_version);
-
     setup(&java_version);
 }
 
@@ -81,6 +83,22 @@ fn cmd_clean() {
         eprintln!("Error: Could not clean JDKs: {}", e);
         exit(1);
     })
+}
+
+fn cmd_default() {
+    let java_version = match env::args().nth(2) {
+        Some(v) => v,
+        None => {
+            eprintln!("Error: Missing argument for default command.");
+            print_usage_and_exit();
+        }
+    };
+
+    assert_java_version(&java_version);
+    conf::init_default_config(java_version).unwrap_or_else(|e| {
+        eprintln!("Error: Could not create default config file: {}", e);
+        exit(1);
+    });
 }
 
 fn cmd_init() {
@@ -95,7 +113,7 @@ fn cmd_init() {
 
     assert_java_version(&java_version);
 
-    conf::init_config(java_version).unwrap_or_else(|e| {
+    conf::init_project_config(java_version).unwrap_or_else(|e| {
         eprintln!("Error: Could not create config file: {}", e);
         exit(1);
     });
@@ -107,7 +125,7 @@ fn cmd_update() {
     let args: Vec<String> = env::args().skip(2).collect();
 
     if args.is_empty() {
-        let java_version = conf::load().unwrap_or_else(|e| {
+        let java_version = conf::load_config_java_version().unwrap_or_else(|e| {
             eprintln!("Error: Could not load configuration: {}", e);
             exit(1);
         });
@@ -229,13 +247,11 @@ fn install_jdk(jdk_base: &Path, jdk_metadata: &JdkMetadata) -> Result<PathBuf, S
 }
 
 fn jlo_home_dir() -> Result<PathBuf, String> {
-    if let Some(jlo_home) = env::var_os("JLO_HOME") {
-        Ok(PathBuf::from(jlo_home))
-    } else if let Some(home) = env::home_dir() {
-        Ok(home.join(".jlo"))
-    } else {
-        Err("Error: Could not determine home directory.".to_string())
-    }
+    let path = env::var_os("JLO_HOME")
+        .map(PathBuf::from)
+        .or_else(env::home_dir)
+        .ok_or_else(|| "Error: Could not determine home directory.".to_string())?;
+    Ok(path)
 }
 
 fn jdk_base_dir() -> PathBuf {
