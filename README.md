@@ -138,8 +138,8 @@ jlo update all
 The command `jlo clean` removes older minor versions of installed Java versions, keeping only the latest minor
 release for each major version.
 
-Only installations at `~/.jdks/` (or `~/Library/Java/JavaVirtualMachines/` on macOS) managed by J’Lo are
-affected.
+J'Lo only removes installations at `~/.jdks/` (or `~/Library/Java/JavaVirtualMachines/` on macOS) that were installed
+by J'Lo itself.
 
 ## Managing J’Lo Itself
 
