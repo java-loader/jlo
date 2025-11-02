@@ -12,4 +12,6 @@ elif [ -n "$BASH_VERSION" ]; then
 fi
 
 # Immediate call for fresh spawned shells
-jlo_after_cd
+if [ -f ".jlorc" ] || [ -f "$JLO_HOME/default.jlorc" ]; then
+  jlo env
+fi
