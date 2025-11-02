@@ -36,9 +36,11 @@ fi
 rm -f "$FQ_JLO_BUNDLE"
 
 cat <<EOF
-Successfully installed J'lo to $JLO_HOME.
+Successfully installed J'Lo to $JLO_HOME.
 
-Now, add the following lines to the end of your shell profile file (e.g., ~/.bashrc, ~/.zshrc):
+*** IMPORTANT ***
+
+Add the following lines to the end of your shell profile file (e.g., ~/.bashrc, ~/.zshrc):
 
 export JLO_HOME="\$HOME/.jlo"
 [[ -s "\$JLO_HOME/bin/jlo-init.sh" ]] && source "\$JLO_HOME/bin/jlo-init.sh"
