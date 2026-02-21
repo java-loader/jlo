@@ -1,8 +1,8 @@
 use crate::USER_AGENT;
 use crate::progress_bar::setup_progress_bar;
+use anyhow::{Context, bail};
 use reqwest::blocking::Client;
 use sha2::{Digest, Sha256};
-use std::error::Error;
 use std::fs::File;
 use std::io::{Read, Write};
 
@@ -11,13 +11,13 @@ pub fn download(
     url: &str,
     expected_checksum: &str,
     file: &mut File,
-) -> Result<(), Box<dyn Error>> {
+) -> anyhow::Result<()> {
     let client = Client::builder().user_agent(USER_AGENT).build()?;
     let response = client.get(url).send()?;
 
     let total_size = response
         .content_length()
-        .ok_or("Failed to get content length")?;
+        .context("Failed to get content length")?;
 
     let mut source = response;
 
@@ -41,11 +41,11 @@ pub fn download(
 
     let hash = hex::encode(hasher.finalize());
     if hash != expected_checksum {
-        return Err(format!(
+        bail!(
             "Checksum mismatch: expected {}, got {}.",
-            expected_checksum, hash
-        )
-        .into());
+            expected_checksum,
+            hash
+        );
     }
 
     eprintln!("✅ Download complete, checksum passed.");

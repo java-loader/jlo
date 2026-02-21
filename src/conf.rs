@@ -1,4 +1,5 @@
 use crate::jlo_home_dir;
+use anyhow::anyhow;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -6,12 +7,12 @@ use std::path::{Path, PathBuf};
 const JLO_CONFIG_FILE: &str = ".jlorc";
 const JLO_DEFAULT_CONFIG_FILE: &str = "default.jlorc";
 
-pub fn load_config_java_version() -> Result<String, String> {
+pub fn load_config_java_version() -> anyhow::Result<String> {
     // Try project config first; if any error other than NotFound, return it.
     match load(Path::new(JLO_CONFIG_FILE)) {
         Ok(v) => return Ok(v),
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
-            return Err(format!("Error: Could not load configuration: {}", e));
+            return Err(anyhow!("Error: Could not load configuration: {}", e));
         }
         Err(_) => {} // NotFound -> fall through to default config
     }
@@ -20,17 +21,17 @@ pub fn load_config_java_version() -> Result<String, String> {
     let default_path = default_jlorc_path()?;
     load(&default_path).map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
-            format!(
+            anyhow!(
                 "Neither '{}' nor the default config file found. Please run 'jlo init' to create a configuration file.",
                 JLO_CONFIG_FILE
             )
         } else {
-            format!("Error: Could not load configuration: {}", e)
+            anyhow!("Error: Could not load configuration: {}", e)
         }
     })
 }
 
-fn default_jlorc_path() -> Result<PathBuf, String> {
+fn default_jlorc_path() -> anyhow::Result<PathBuf> {
     jlo_home_dir().map(|p| p.join(JLO_DEFAULT_CONFIG_FILE))
 }
 
@@ -77,35 +78,34 @@ fn load(path: &Path) -> Result<String, std::io::Error> {
     Ok(java_version)
 }
 
-pub fn init_project_config(java_version: String) -> Result<(), String> {
+pub fn init_project_config(java_version: String) -> anyhow::Result<()> {
     let path = Path::new(JLO_CONFIG_FILE);
     init_config(path, java_version)
 }
 
-pub fn init_default_config(java_version: String) -> Result<(), String> {
+pub fn init_default_config(java_version: String) -> anyhow::Result<()> {
     let path = default_jlorc_path()?;
     init_config(&path, java_version)
 }
 
-fn init_config(path: &Path, latest_release: String) -> Result<(), String> {
+fn init_config(path: &Path, latest_release: String) -> anyhow::Result<()> {
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(path)
         .map_err(|e| {
             if e.kind() == std::io::ErrorKind::AlreadyExists {
-                format!("File '{}' already exists!", path.display())
+                anyhow!("File '{}' already exists!", path.display())
             } else {
-                e.to_string()
+                anyhow!(e)
             }
         })?;
 
     writeln!(
         file,
         "# Java version configured by J'Lo - https://github.com/java-loader/jlo"
-    )
-    .map_err(|e| e.to_string())?;
-    writeln!(file, "{}", latest_release).map_err(|e| e.to_string())?;
+    )?;
+    writeln!(file, "{}", latest_release)?;
 
     println!(
         "Created config file '{}' with Java {}",
@@ -221,6 +221,6 @@ mod tests {
         fs::write(&file, "17\n").unwrap();
 
         let err = init_config(&file, "21".to_string()).unwrap_err();
-        assert!(err.contains("already exists"));
+        assert!(err.to_string().contains("already exists"));
     }
 }

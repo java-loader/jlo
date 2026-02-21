@@ -1,17 +1,27 @@
 use crate::USER_AGENT;
+use anyhow::{Context, bail};
 use reqwest::blocking::Client;
 use semver_rs::compare;
+use std::cmp::Ordering;
 use std::env;
 use std::path::{Path, PathBuf};
 
 const MARKER_FILE: &str = ".jlo-managed";
 
-pub fn clean_jdks(jdk_base: &Path) -> Result<(), String> {
+fn sort_by_semver_desc(paths: &mut [PathBuf]) {
+    paths.sort_by(|a, b| {
+        let a_str = a.file_name().and_then(|name| name.to_str()).unwrap_or("");
+        let b_str = b.file_name().and_then(|name| name.to_str()).unwrap_or("");
+        compare(b_str, a_str, None).unwrap_or(Ordering::Equal)
+    });
+}
+
+pub fn clean_jdks(jdk_base: &Path) -> anyhow::Result<()> {
     // collector major versions
     let mut installed_jdks: std::collections::HashMap<i64, Vec<PathBuf>> =
         std::collections::HashMap::new();
     let entries = std::fs::read_dir(jdk_base)
-        .map_err(|e| format!("Can't read JDK base directory {:?}: {}", jdk_base, e))?;
+        .with_context(|| format!("Can't read JDK base directory {:?}", jdk_base))?;
 
     for entry in entries.filter_map(Result::ok) {
         let path = entry.path();
@@ -42,11 +52,7 @@ pub fn clean_jdks(jdk_base: &Path) -> Result<(), String> {
     }
 
     for (major, mut paths) in installed_jdks {
-        paths.sort_by(|a, b| {
-            let a_str = a.file_name().and_then(|name| name.to_str()).unwrap_or("");
-            let b_str = b.file_name().and_then(|name| name.to_str()).unwrap_or("");
-            compare(b_str, a_str, None).unwrap()
-        });
+        sort_by_semver_desc(&mut paths);
 
         if paths.len() <= 1 {
             continue;
@@ -89,21 +95,16 @@ pub fn find_suitable_jdk(jdk_base: &Path, required_version: &str) -> Option<Path
         })
         .collect();
 
-    matching_versions.sort_by(|a, b| {
-        let a_str = a.file_name().and_then(|name| name.to_str()).unwrap_or("");
-        let b_str = b.file_name().and_then(|name| name.to_str()).unwrap_or("");
-
-        compare(b_str, a_str, None).unwrap()
-    });
+    sort_by_semver_desc(&mut matching_versions);
 
     matching_versions.first().cloned()
 }
 
-pub fn find_installed_major_versions(jdk_base: &Path) -> Result<Vec<i64>, String> {
+pub fn find_installed_major_versions(jdk_base: &Path) -> anyhow::Result<Vec<i64>> {
     let mut major_versions = std::collections::HashSet::new();
 
     let entries = std::fs::read_dir(jdk_base)
-        .map_err(|e| format!("Can't read JDK base directory {:?}: {}", jdk_base, e))?;
+        .with_context(|| format!("Can't read JDK base directory {:?}", jdk_base))?;
 
     for entry in entries.filter_map(Result::ok) {
         let path = entry.path();
@@ -126,7 +127,7 @@ pub fn find_installed_major_versions(jdk_base: &Path) -> Result<Vec<i64>, String
     Ok(major_versions_vec)
 }
 
-pub fn fetch_metadata(java_version: &String) -> Result<JdkMetadata, String> {
+pub fn fetch_metadata(java_version: &String) -> anyhow::Result<JdkMetadata> {
     let api_url = format!(
         "https://api.adoptium.net/v3/assets/latest/{java_version}/hotspot?architecture={arch}&image_type=jdk&os={os}&vendor=eclipse",
         java_version = java_version,
@@ -137,32 +138,32 @@ pub fn fetch_metadata(java_version: &String) -> Result<JdkMetadata, String> {
     let client = Client::builder()
         .user_agent(USER_AGENT)
         .build()
-        .map_err(|e| format!("Could not build HTTP client: {}", e))?;
+        .context("Could not build HTTP client")?;
     let metadata_response = client
         .get(&api_url)
         .send()
-        .map_err(|e| format!("Could not fetch metadata from API: {}", e))?;
+        .context("Could not fetch metadata from API")?;
 
     if !metadata_response.status().is_success() {
-        return Err(format!(
+        bail!(
             "Failed to fetch metadata from API: HTTP {}",
             metadata_response.status()
-        ));
+        );
     }
 
     let json: serde_json::Value = metadata_response
         .json()
-        .map_err(|e| format!("Failed to parse JSON response: {}", e))?;
+        .context("Failed to parse JSON response")?;
 
     let json_array = json
         .as_array()
-        .ok_or_else(|| "Unexpected JSON structure received from API.".to_string())?;
+        .context("Unexpected JSON structure received from API.")?;
 
     if json_array.is_empty() {
-        return Err(format!(
+        bail!(
             "No matching JDK found for the specified version and system architecture.\nTried to fetch metadata from: {}",
             api_url
-        ));
+        );
     }
 
     let root_node = json_array.first().unwrap();
@@ -184,7 +185,7 @@ pub fn fetch_metadata(java_version: &String) -> Result<JdkMetadata, String> {
         || download_link.is_empty()
         || checksum.is_empty()
     {
-        return Err("Incomplete metadata received from API.".to_string());
+        bail!("Incomplete metadata received from API.");
     }
     Ok(JdkMetadata {
         semver: semver.to_string(),
@@ -199,25 +200,30 @@ pub fn install_jdk(
     jdk_metadata: &JdkMetadata,
     source_dir: &Path,
     dest_dir: &Path,
-) -> Result<(), String> {
+) -> anyhow::Result<()> {
     // Validate extracted path
-    let extracted_jdk_path = find_jdk_path(jdk_metadata, source_dir)
-        .map_err(|e| format!("Could not find JDK directory: {}", e))?;
+    let extracted_jdk_path =
+        find_jdk_path(jdk_metadata, source_dir).context("Could not find JDK directory")?;
 
     // Create destination directory
     eprintln!("Installing JDK to {:?}", dest_dir);
-    std::fs::create_dir_all(dest_dir.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(
+        dest_dir
+            .parent()
+            .context("destination directory has no parent")?,
+    )
+    .context("could not create destination directory")?;
 
     // Move extracted JDK to final location
-    std::fs::rename(extracted_jdk_path, dest_dir).unwrap();
+    std::fs::rename(extracted_jdk_path, dest_dir).context("could not move JDK to destination")?;
 
     // touch a file to indicate that this directory is managed by jlo
-    std::fs::File::create(dest_dir.join(MARKER_FILE)).unwrap();
+    std::fs::File::create(dest_dir.join(MARKER_FILE)).context("could not create marker file")?;
 
     Ok(())
 }
 
-fn find_jdk_path(jdk_metadata: &JdkMetadata, temp_dest: &Path) -> Result<PathBuf, String> {
+fn find_jdk_path(jdk_metadata: &JdkMetadata, temp_dest: &Path) -> anyhow::Result<PathBuf> {
     let mut extracted_jdk_path = temp_dest.join(&jdk_metadata.release_name);
 
     // On macOS, the JDK is inside Contents/Home
@@ -228,18 +234,12 @@ fn find_jdk_path(jdk_metadata: &JdkMetadata, temp_dest: &Path) -> Result<PathBuf
     if env::consts::OS == "windows" {
         let java_bin = extracted_jdk_path.join("bin").join("java.exe");
         if !java_bin.exists() {
-            return Err(format!(
-                "Error: java executable is missing at: {:?}",
-                java_bin
-            ));
+            bail!("Error: java executable is missing at: {:?}", java_bin);
         }
     } else {
         let java_bin = extracted_jdk_path.join("bin").join("java");
         if !java_bin.exists() {
-            return Err(format!(
-                "Error: java executable is missing at: {:?}",
-                java_bin
-            ));
+            bail!("Error: java executable is missing at: {:?}", java_bin);
         }
     }
 
@@ -288,36 +288,28 @@ fn jdk_arch() -> &'static str {
     }
 }
 
-pub fn find_latest_jdk() -> Result<String, String> {
+pub fn find_latest_jdk() -> anyhow::Result<String> {
     let client = Client::builder()
         .user_agent(USER_AGENT)
         .build()
-        .map_err(|e| format!("Could not build HTTP client: {}", e))?;
-    let response = client
+        .context("Could not build HTTP client")?;
+    let releases = client
         .get("https://api.adoptium.net/v3/info/available_releases")
-        .send();
+        .send()
+        .context("Could not fetch available releases from API")?;
 
-    match response {
-        Ok(releases) => {
-            let json: serde_json::Value = releases
-                .json()
-                .map_err(|e| format!("Failed to parse JSON response: {}", e))?;
-            let available_releases = json["available_releases"]
-                .as_array()
-                .ok_or("Unexpected JSON structure received from API.")?;
+    let json: serde_json::Value = releases.json().context("Failed to parse JSON response")?;
+    let available_releases = json["available_releases"]
+        .as_array()
+        .context("Unexpected JSON structure received from API.")?;
 
-            let latest = match available_releases.iter().filter_map(|v| v.as_i64()).max() {
-                Some(v) => v,
-                None => return Err("No available releases found.".to_string()),
-            };
+    let latest = available_releases
+        .iter()
+        .filter_map(|v| v.as_i64())
+        .max()
+        .context("No available releases found.")?;
 
-            Ok(latest.to_string())
-        }
-        Err(e) => Err(format!(
-            "Could not fetch available releases from API: {}",
-            e
-        )),
-    }
+    Ok(latest.to_string())
 }
 
 #[cfg(test)]
@@ -548,7 +540,12 @@ mod tests {
 
         let result = find_jdk_path(&metadata, dir.path());
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("java executable is missing"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("java executable is missing")
+        );
     }
 
     // -- install_jdk --

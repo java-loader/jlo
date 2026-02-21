@@ -8,6 +8,7 @@ use crate::adoptium::{
     JdkMetadata, clean_jdks, fetch_metadata, find_installed_jdk, find_installed_major_versions,
     find_latest_jdk, find_suitable_jdk,
 };
+use anyhow::Context;
 use std::collections::HashSet;
 use std::env;
 use std::fs::File;
@@ -68,19 +69,22 @@ fn cmd_env() {
         env::args().nth(2).unwrap()
     } else {
         conf::load_config_java_version().unwrap_or_else(|e| {
-            eprintln!("{}", e);
+            eprintln!("{:#}", e);
             exit(1);
         })
     };
 
     assert_java_version(&java_version);
-    setup(&java_version);
+    if let Err(e) = setup(&java_version) {
+        eprintln!("Error: {:#}", e);
+        exit(1);
+    }
 }
 
 fn cmd_clean() {
     let jdk_base = jdk_base_dir();
     clean_jdks(&jdk_base).unwrap_or_else(|e| {
-        eprintln!("Error: Could not clean JDKs: {}", e);
+        eprintln!("Error: Could not clean JDKs: {:#}", e);
         exit(1);
     })
 }
@@ -96,7 +100,7 @@ fn cmd_default() {
 
     assert_java_version(&java_version);
     conf::init_default_config(java_version).unwrap_or_else(|e| {
-        eprintln!("Error: Could not create default config file: {}", e);
+        eprintln!("Error: Could not create default config file: {:#}", e);
         exit(1);
     });
 }
@@ -106,7 +110,7 @@ fn cmd_init() {
         env::args().nth(2).unwrap()
     } else {
         find_latest_jdk().unwrap_or_else(|e| {
-            eprintln!("Error: Could not fetch latest JDK version: {}", e);
+            eprintln!("Error: Could not fetch latest JDK version: {:#}", e);
             exit(1);
         })
     };
@@ -114,7 +118,7 @@ fn cmd_init() {
     assert_java_version(&java_version);
 
     conf::init_project_config(java_version).unwrap_or_else(|e| {
-        eprintln!("Error: Could not create config file: {}", e);
+        eprintln!("Error: Could not create config file: {:#}", e);
         exit(1);
     });
 }
@@ -126,7 +130,7 @@ fn cmd_update() {
 
     if args.is_empty() {
         let java_version = conf::load_config_java_version().unwrap_or_else(|e| {
-            eprintln!("Error: Could not load configuration: {}", e);
+            eprintln!("Error: Could not load configuration: {:#}", e);
             exit(1);
         });
         versions_to_install.insert(java_version);
@@ -134,7 +138,7 @@ fn cmd_update() {
         if args.iter().any(|arg| arg == "all") {
             find_installed_major_versions(&jdk_base_dir())
                 .unwrap_or_else(|e| {
-                    eprintln!("Error: Could not determine installed JDK versions: {}", e);
+                    eprintln!("Error: Could not determine installed JDK versions: {:#}", e);
                     exit(1);
                 })
                 .into_iter()
@@ -168,7 +172,7 @@ fn cmd_update() {
 
 fn update(java_version: &String) {
     let jdk_metadata = fetch_metadata(java_version).unwrap_or_else(|e| {
-        eprintln!("Error: Could not fetch JDK metadata: {}", e);
+        eprintln!("Error: Could not fetch JDK metadata: {:#}", e);
         exit(1);
     });
 
@@ -182,19 +186,22 @@ fn update(java_version: &String) {
         );
     } else {
         install_jdk(&jdk_base, &jdk_metadata).unwrap_or_else(|e| {
-            eprintln!("Error: Could not install JDK: {}", e);
+            eprintln!("Error: Could not install JDK: {:#}", e);
             exit(1);
         });
     }
 }
 
-fn setup(java_version: &String) {
+fn setup(java_version: &String) -> anyhow::Result<()> {
     let jdk_base = jdk_base_dir();
 
-    let java_home = find_suitable_jdk(&jdk_base, java_version).unwrap_or_else(|| {
-        let metadata = &fetch_metadata(java_version).unwrap();
-        install_jdk(&jdk_base, metadata).unwrap()
-    });
+    let java_home = match find_suitable_jdk(&jdk_base, java_version) {
+        Some(path) => path,
+        None => {
+            let metadata = fetch_metadata(java_version)?;
+            install_jdk(&jdk_base, &metadata)?
+        }
+    };
 
     let mut updates = false;
 
@@ -206,7 +213,7 @@ fn setup(java_version: &String) {
 
     let java_bin_path = java_home.join("bin").to_string_lossy().into_owned();
     let current_path = env::var("PATH").unwrap_or_default();
-    let jlo_base = jlo_home_dir().unwrap();
+    let jlo_base = jlo_home_dir()?;
     if let Some(updated_path) = update_path(&java_bin_path, &current_path, &jlo_base) {
         updates = true;
         println!("export PATH=\"{}\"", updated_path);
@@ -215,13 +222,15 @@ fn setup(java_version: &String) {
     if updates {
         eprintln!("Use Java from {}", java_home.to_string_lossy());
     }
+
+    Ok(())
 }
 
-fn install_jdk(jdk_base: &Path, jdk_metadata: &JdkMetadata) -> Result<PathBuf, String> {
+fn install_jdk(jdk_base: &Path, jdk_metadata: &JdkMetadata) -> anyhow::Result<PathBuf> {
     // Download JDK
-    let temp_dir = tempdir().unwrap();
+    let temp_dir = tempdir().context("could not create temporary directory")?;
     let temp_file = temp_dir.path().join(&jdk_metadata.package_name);
-    let file = &mut File::create(&temp_file).unwrap();
+    let file = &mut File::create(&temp_file).context("could not create temporary file")?;
     let artifact_description = format!(
         "JDK {} ({})",
         jdk_metadata.semver, jdk_metadata.package_name
@@ -231,15 +240,13 @@ fn install_jdk(jdk_base: &Path, jdk_metadata: &JdkMetadata) -> Result<PathBuf, S
         &jdk_metadata.download_link,
         &jdk_metadata.checksum,
         file,
-    )
-    .unwrap();
+    )?;
 
     // Extract JDK to temp dir
-    extract::extract(&temp_file, temp_dir.path()).unwrap();
+    extract::extract(&temp_file, temp_dir.path())?;
 
     let dest_dir = jdk_base.join(&jdk_metadata.semver);
-    adoptium::install_jdk(jdk_metadata, temp_dir.path(), dest_dir.as_path())
-        .map_err(|e| format!("Error: Could not install JDK: {}", e))?;
+    adoptium::install_jdk(jdk_metadata, temp_dir.path(), dest_dir.as_path())?;
 
     temp_dir.close().unwrap_or_else(|err| {
         eprintln!("Warning: Could not delete temporary directory: {}", err);
@@ -248,11 +255,11 @@ fn install_jdk(jdk_base: &Path, jdk_metadata: &JdkMetadata) -> Result<PathBuf, S
     Ok(dest_dir)
 }
 
-fn jlo_home_dir() -> Result<PathBuf, String> {
+fn jlo_home_dir() -> anyhow::Result<PathBuf> {
     let path = env::var_os("JLO_HOME")
         .map(PathBuf::from)
         .or_else(env::home_dir)
-        .ok_or_else(|| "Error: Could not determine home directory.".to_string())?;
+        .context("Could not determine home directory.")?;
     Ok(path)
 }
 
