@@ -205,7 +205,9 @@ fn setup(java_version: &String) {
     }
 
     let java_bin_path = java_home.join("bin").to_string_lossy().into_owned();
-    if let Some(updated_path) = update_path(&java_bin_path) {
+    let current_path = env::var("PATH").unwrap_or_default();
+    let jlo_base = jlo_home_dir().unwrap();
+    if let Some(updated_path) = update_path(&java_bin_path, &current_path, &jlo_base) {
         updates = true;
         println!("export PATH=\"{}\"", updated_path);
     }
@@ -262,13 +264,10 @@ fn jdk_base_dir() -> PathBuf {
     }
 }
 
-fn update_path(java_path: &str) -> Option<String> {
-    let current_path = env::var("PATH").unwrap_or_default();
-
+fn update_path(java_path: &str, current_path: &str, jlo_base: &Path) -> Option<String> {
     // Remove any existing J'Lo paths to avoid duplicates
-    let jlo_base = jlo_home_dir().unwrap();
-    let mut path_vector: Vec<_> = env::split_paths(&current_path)
-        .filter(|p| !p.starts_with(&jlo_base))
+    let mut path_vector: Vec<_> = env::split_paths(current_path)
+        .filter(|p| !p.starts_with(jlo_base))
         .collect();
 
     // Insert the new path at the beginning
@@ -296,5 +295,66 @@ fn assert_java_version(java_version: &str) {
             java_version
         );
         exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn update_path_inserts_at_front() {
+        let jlo_base = Path::new("/home/user/.jlo");
+        let result = update_path("/new/java/bin", "/usr/bin:/usr/local/bin", jlo_base);
+        assert_eq!(result.unwrap(), "/new/java/bin:/usr/bin:/usr/local/bin");
+    }
+
+    #[test]
+    fn update_path_removes_existing_jlo_paths() {
+        let jlo_base = Path::new("/home/user/.jlo");
+        let current = "/home/user/.jlo/old/bin:/usr/bin";
+        let result = update_path("/new/java/bin", current, jlo_base);
+        assert_eq!(result.unwrap(), "/new/java/bin:/usr/bin");
+    }
+
+    #[test]
+    fn update_path_returns_none_when_unchanged() {
+        let jlo_base = Path::new("/home/user/.jlo");
+        // java_path starts with jlo_base, so it gets filtered then re-inserted — net no change
+        let current = "/home/user/.jlo/jdks/21/bin:/usr/bin";
+        let result = update_path("/home/user/.jlo/jdks/21/bin", current, jlo_base);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn update_path_handles_empty_path() {
+        let jlo_base = Path::new("/home/user/.jlo");
+        let result = update_path("/new/java/bin", "", jlo_base);
+        assert_eq!(result.unwrap(), "/new/java/bin:");
+    }
+
+    #[test]
+    fn jdk_base_dir_returns_plausible_path() {
+        let base = jdk_base_dir();
+        let path_str = base.to_string_lossy();
+        if cfg!(target_os = "macos") {
+            assert!(path_str.contains("Library/Java/JavaVirtualMachines"));
+        } else {
+            assert!(path_str.ends_with("jdks"));
+        }
+    }
+
+    #[test]
+    fn jlo_home_dir_uses_env_var() {
+        let dir = tempdir().unwrap();
+        unsafe {
+            env::set_var("JLO_HOME", dir.path());
+        }
+        let result = jlo_home_dir().unwrap();
+        assert_eq!(result, dir.path());
+        unsafe {
+            env::remove_var("JLO_HOME");
+        }
     }
 }

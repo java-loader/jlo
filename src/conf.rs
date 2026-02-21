@@ -1,4 +1,4 @@
-use crate::{jlo_home_dir};
+use crate::jlo_home_dir;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -11,7 +11,7 @@ pub fn load_config_java_version() -> Result<String, String> {
     match load(Path::new(JLO_CONFIG_FILE)) {
         Ok(v) => return Ok(v),
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
-            return Err(format!("Error: Could not load configuration: {}", e))
+            return Err(format!("Error: Could not load configuration: {}", e));
         }
         Err(_) => {} // NotFound -> fall through to default config
     }
@@ -120,5 +120,107 @@ pub fn is_valid_version(version: &str) -> bool {
         ver >= 8
     } else {
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[test]
+    fn valid_versions() {
+        assert!(is_valid_version("8"));
+        assert!(is_valid_version("11"));
+        assert!(is_valid_version("17"));
+        assert!(is_valid_version("21"));
+        assert!(is_valid_version("25"));
+    }
+
+    #[test]
+    fn invalid_versions() {
+        assert!(!is_valid_version("7"));
+        assert!(!is_valid_version("0"));
+        assert!(!is_valid_version(""));
+        assert!(!is_valid_version("abc"));
+        assert!(!is_valid_version("-1"));
+        assert!(!is_valid_version("8.0"));
+    }
+
+    #[test]
+    fn load_valid_version() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join(".jlorc");
+        fs::write(&file, "21\n").unwrap();
+        assert_eq!(load(&file).unwrap(), "21");
+    }
+
+    #[test]
+    fn load_with_comments_and_blanks() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join(".jlorc");
+        fs::write(&file, "# comment\n\n  # another comment\n  17  \n").unwrap();
+        assert_eq!(load(&file).unwrap(), "17");
+    }
+
+    #[test]
+    fn load_empty_file() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join(".jlorc");
+        fs::write(&file, "").unwrap();
+        let err = load(&file).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn load_only_comments() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join(".jlorc");
+        fs::write(&file, "# just a comment\n# another\n").unwrap();
+        let err = load(&file).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn load_invalid_version_in_file() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join(".jlorc");
+        fs::write(&file, "7\n").unwrap();
+        let err = load(&file).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn load_missing_file() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("nonexistent");
+        let err = load(&file).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn init_config_creates_file() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join(".jlorc");
+        init_config(&file, "21".to_string()).unwrap();
+
+        let content = fs::read_to_string(&file).unwrap();
+        let lines: Vec<_> = content.lines().collect();
+        assert_eq!(
+            lines[0],
+            "# Java version configured by J'Lo - https://github.com/java-loader/jlo"
+        );
+        assert_eq!(lines[1], "21");
+    }
+
+    #[test]
+    fn init_config_fails_if_exists() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join(".jlorc");
+        fs::write(&file, "17\n").unwrap();
+
+        let err = init_config(&file, "21".to_string()).unwrap_err();
+        assert!(err.contains("already exists"));
     }
 }

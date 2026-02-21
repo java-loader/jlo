@@ -319,3 +319,277 @@ pub fn find_latest_jdk() -> Result<String, String> {
         )),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::tempdir;
+
+    fn create_jdk_dir(base: &Path, version: &str, managed: bool) {
+        let dir = base.join(version);
+        fs::create_dir_all(dir.join("bin")).unwrap();
+        // Create a fake java binary
+        fs::write(dir.join("bin").join("java"), "").unwrap();
+        if managed {
+            fs::File::create(dir.join(MARKER_FILE)).unwrap();
+        }
+    }
+
+    // -- jdk_os / jdk_arch smoke tests --
+
+    #[test]
+    fn jdk_os_returns_known_value() {
+        let os = jdk_os();
+        assert!(
+            ["linux", "mac", "windows", "solaris", "aix"].contains(&os),
+            "unexpected os: {}",
+            os
+        );
+    }
+
+    #[test]
+    fn jdk_arch_returns_known_value() {
+        let arch = jdk_arch();
+        assert!(
+            [
+                "x64", "x32", "aarch64", "arm", "s390x", "ppc64", "ppc64le", "sparcv9", "riscv64"
+            ]
+            .contains(&arch),
+            "unexpected arch: {}",
+            arch
+        );
+    }
+
+    // -- find_suitable_jdk --
+
+    #[test]
+    fn find_suitable_jdk_finds_latest() {
+        let dir = tempdir().unwrap();
+        create_jdk_dir(dir.path(), "21.0.1+12", true);
+        create_jdk_dir(dir.path(), "21.0.3+9", true);
+        create_jdk_dir(dir.path(), "17.0.2+8", true);
+
+        let result = find_suitable_jdk(dir.path(), "21");
+        assert_eq!(
+            result.unwrap().file_name().unwrap().to_str().unwrap(),
+            "21.0.3+9"
+        );
+    }
+
+    #[test]
+    fn find_suitable_jdk_no_match() {
+        let dir = tempdir().unwrap();
+        create_jdk_dir(dir.path(), "17.0.2+8", true);
+
+        assert!(find_suitable_jdk(dir.path(), "21").is_none());
+    }
+
+    #[test]
+    fn find_suitable_jdk_empty_dir() {
+        let dir = tempdir().unwrap();
+        assert!(find_suitable_jdk(dir.path(), "21").is_none());
+    }
+
+    // -- find_installed_jdk --
+
+    #[test]
+    fn find_installed_jdk_exists() {
+        let dir = tempdir().unwrap();
+        create_jdk_dir(dir.path(), "21.0.3+9", true);
+
+        let metadata = JdkMetadata {
+            semver: "21.0.3+9".to_string(),
+            release_name: String::new(),
+            package_name: String::new(),
+            download_link: String::new(),
+            checksum: String::new(),
+        };
+        assert!(find_installed_jdk(&metadata, dir.path()).is_some());
+    }
+
+    #[test]
+    fn find_installed_jdk_not_exists() {
+        let dir = tempdir().unwrap();
+
+        let metadata = JdkMetadata {
+            semver: "21.0.3+9".to_string(),
+            release_name: String::new(),
+            package_name: String::new(),
+            download_link: String::new(),
+            checksum: String::new(),
+        };
+        assert!(find_installed_jdk(&metadata, dir.path()).is_none());
+    }
+
+    // -- find_installed_major_versions --
+
+    #[test]
+    fn find_installed_major_versions_discovers_majors() {
+        let dir = tempdir().unwrap();
+        create_jdk_dir(dir.path(), "21.0.1+12", true);
+        create_jdk_dir(dir.path(), "21.0.3+9", true);
+        create_jdk_dir(dir.path(), "17.0.2+8", true);
+        create_jdk_dir(dir.path(), "11.0.1+13", true);
+
+        let versions = find_installed_major_versions(dir.path()).unwrap();
+        assert_eq!(versions, vec![11, 17, 21]);
+    }
+
+    #[test]
+    fn find_installed_major_versions_ignores_non_dirs() {
+        let dir = tempdir().unwrap();
+        create_jdk_dir(dir.path(), "21.0.1+12", true);
+        // Plain file should be skipped
+        fs::write(dir.path().join("some-file.txt"), "").unwrap();
+
+        let versions = find_installed_major_versions(dir.path()).unwrap();
+        assert_eq!(versions, vec![21]);
+    }
+
+    #[test]
+    fn find_installed_major_versions_empty_dir() {
+        let dir = tempdir().unwrap();
+        let versions = find_installed_major_versions(dir.path()).unwrap();
+        assert!(versions.is_empty());
+    }
+
+    // -- clean_jdks --
+
+    #[test]
+    fn clean_jdks_removes_older_versions() {
+        let dir = tempdir().unwrap();
+        create_jdk_dir(dir.path(), "21.0.1+12", true);
+        create_jdk_dir(dir.path(), "21.0.3+9", true);
+        create_jdk_dir(dir.path(), "17.0.2+8", true);
+
+        clean_jdks(dir.path()).unwrap();
+
+        // 21.0.3+9 kept, 21.0.1+12 removed, 17.0.2+8 kept (only version for major 17)
+        assert!(dir.path().join("21.0.3+9").exists());
+        assert!(!dir.path().join("21.0.1+12").exists());
+        assert!(dir.path().join("17.0.2+8").exists());
+    }
+
+    #[test]
+    fn clean_jdks_ignores_unmanaged() {
+        let dir = tempdir().unwrap();
+        create_jdk_dir(dir.path(), "21.0.1+12", false); // no marker
+        create_jdk_dir(dir.path(), "21.0.3+9", true);
+
+        clean_jdks(dir.path()).unwrap();
+
+        // Unmanaged dir should not be touched
+        assert!(dir.path().join("21.0.1+12").exists());
+        assert!(dir.path().join("21.0.3+9").exists());
+    }
+
+    #[test]
+    fn clean_jdks_single_version_kept() {
+        let dir = tempdir().unwrap();
+        create_jdk_dir(dir.path(), "21.0.3+9", true);
+
+        clean_jdks(dir.path()).unwrap();
+        assert!(dir.path().join("21.0.3+9").exists());
+    }
+
+    // -- find_jdk_path --
+
+    #[test]
+    fn find_jdk_path_valid() {
+        let dir = tempdir().unwrap();
+        let release = "jdk-21.0.3+9";
+
+        let jdk_dir = if env::consts::OS == "macos" {
+            dir.path().join(release).join("Contents").join("Home")
+        } else {
+            dir.path().join(release)
+        };
+        fs::create_dir_all(jdk_dir.join("bin")).unwrap();
+        let java_name = if env::consts::OS == "windows" {
+            "java.exe"
+        } else {
+            "java"
+        };
+        fs::write(jdk_dir.join("bin").join(java_name), "").unwrap();
+
+        let metadata = JdkMetadata {
+            semver: String::new(),
+            release_name: release.to_string(),
+            package_name: String::new(),
+            download_link: String::new(),
+            checksum: String::new(),
+        };
+
+        let result = find_jdk_path(&metadata, dir.path()).unwrap();
+        assert_eq!(result, jdk_dir);
+    }
+
+    #[test]
+    fn find_jdk_path_missing_java_binary() {
+        let dir = tempdir().unwrap();
+        let release = "jdk-21.0.3+9";
+
+        let jdk_dir = if env::consts::OS == "macos" {
+            dir.path().join(release).join("Contents").join("Home")
+        } else {
+            dir.path().join(release)
+        };
+        // Create dir structure but no java binary
+        fs::create_dir_all(jdk_dir.join("bin")).unwrap();
+
+        let metadata = JdkMetadata {
+            semver: String::new(),
+            release_name: release.to_string(),
+            package_name: String::new(),
+            download_link: String::new(),
+            checksum: String::new(),
+        };
+
+        let result = find_jdk_path(&metadata, dir.path());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("java executable is missing"));
+    }
+
+    // -- install_jdk --
+
+    #[test]
+    fn install_jdk_moves_and_marks() {
+        let source_dir = tempdir().unwrap();
+        let dest_parent = tempdir().unwrap();
+        let release = "jdk-21.0.3+9";
+
+        // Create mock extracted JDK in source
+        let extracted = if env::consts::OS == "macos" {
+            source_dir
+                .path()
+                .join(release)
+                .join("Contents")
+                .join("Home")
+        } else {
+            source_dir.path().join(release)
+        };
+        fs::create_dir_all(extracted.join("bin")).unwrap();
+        let java_name = if env::consts::OS == "windows" {
+            "java.exe"
+        } else {
+            "java"
+        };
+        fs::write(extracted.join("bin").join(java_name), "").unwrap();
+
+        let metadata = JdkMetadata {
+            semver: "21.0.3+9".to_string(),
+            release_name: release.to_string(),
+            package_name: String::new(),
+            download_link: String::new(),
+            checksum: String::new(),
+        };
+
+        let dest = dest_parent.path().join("21.0.3+9");
+        install_jdk(&metadata, source_dir.path(), &dest).unwrap();
+
+        assert!(dest.exists());
+        assert!(dest.join(MARKER_FILE).exists());
+        assert!(dest.join("bin").join(java_name).exists());
+    }
+}
