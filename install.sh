@@ -4,7 +4,7 @@ set -eu
 
 JLO_HOME="$HOME/.jlo"
 JLO_BIN_DIR="$JLO_HOME/bin"
-JLO_BASE_URL="https://github.com/java-loader/jlo/releases/download/stable"
+JLO_BASE_URL="https://github.com/java-loader/jlo/releases/latest/download"
 
 OS="$(uname | tr '[:upper:]' '[:lower:]')"
 ARCH="$(uname -m)"
