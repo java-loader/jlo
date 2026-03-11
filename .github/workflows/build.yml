@@ -37,22 +37,3 @@ jobs:
         with:
           name: ${{ matrix.package }}-artifact
           path: jlo-*.tar.gz
-
-  release:
-    needs: build
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - name: Download all artifacts
-        uses: actions/download-artifact@v6
-        with:
-          merge-multiple: true
-          path: .
-      - name: Create GitHub Release and upload artifacts
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: stable
-          files: jlo-*.tar.gz
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
