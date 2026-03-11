@@ -58,7 +58,10 @@ pub fn clean_jdks(jdk_base: &Path) -> anyhow::Result<()> {
             continue;
         }
 
-        let kept = paths[0].file_name().unwrap().to_str().unwrap();
+        let kept = paths[0]
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown");
         let removed = paths[1..]
             .iter()
             .filter_map(|p| p.file_name().and_then(|n| n.to_str()))
@@ -131,8 +134,8 @@ pub fn fetch_metadata(java_version: &String) -> anyhow::Result<JdkMetadata> {
     let api_url = format!(
         "https://api.adoptium.net/v3/assets/latest/{java_version}/hotspot?architecture={arch}&image_type=jdk&os={os}&vendor=eclipse",
         java_version = java_version,
-        arch = jdk_arch(),
-        os = jdk_os()
+        arch = jdk_arch()?,
+        os = jdk_os()?
     );
 
     let client = Client::builder()
@@ -262,29 +265,29 @@ pub struct JdkMetadata {
     pub checksum: String,
 }
 
-fn jdk_os() -> &'static str {
+fn jdk_os() -> anyhow::Result<&'static str> {
     match env::consts::OS {
-        "linux" | "windows" | "solaris" | "aix" => env::consts::OS,
-        "macos" => "mac",
-        _ => panic!("Unknown OS: {}", env::consts::OS),
+        "linux" | "windows" | "solaris" | "aix" => Ok(env::consts::OS),
+        "macos" => Ok("mac"),
+        _ => bail!("Unsupported OS: {}", env::consts::OS),
     }
 }
 
-fn jdk_arch() -> &'static str {
+fn jdk_arch() -> anyhow::Result<&'static str> {
     match env::consts::ARCH {
-        "x86_64" => "x64",
-        "x86" => "x32",
+        "x86_64" => Ok("x64"),
+        "x86" => Ok("x32"),
         "powerpc64" => {
             if cfg!(target_endian = "little") {
-                "ppc64le"
+                Ok("ppc64le")
             } else {
-                "ppc64"
+                Ok("ppc64")
             }
         }
-        "s390x" | "arm" | "aarch64" => env::consts::ARCH,
-        "sparc64" => "sparcv9",
-        "riscv64" => "riscv64",
-        _ => panic!("Unknown ARCH: {}", env::consts::ARCH),
+        "s390x" | "arm" | "aarch64" => Ok(env::consts::ARCH),
+        "sparc64" => Ok("sparcv9"),
+        "riscv64" => Ok("riscv64"),
+        _ => bail!("Unsupported architecture: {}", env::consts::ARCH),
     }
 }
 
@@ -332,7 +335,7 @@ mod tests {
 
     #[test]
     fn jdk_os_returns_known_value() {
-        let os = jdk_os();
+        let os = jdk_os().unwrap();
         assert!(
             ["linux", "mac", "windows", "solaris", "aix"].contains(&os),
             "unexpected os: {}",
@@ -342,7 +345,7 @@ mod tests {
 
     #[test]
     fn jdk_arch_returns_known_value() {
-        let arch = jdk_arch();
+        let arch = jdk_arch().unwrap();
         assert!(
             [
                 "x64", "x32", "aarch64", "arm", "s390x", "ppc64", "ppc64le", "sparcv9", "riscv64"

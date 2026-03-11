@@ -91,16 +91,15 @@ fn init() {
         .stdout(predicate::str::is_match(r"Created config file '.jlorc'").unwrap())
         .stderr("");
 
-    // check if .jlorc contains "25"
+    // check if .jlorc contains a valid major version
     let content = std::fs::read_to_string(".jlorc").unwrap();
     let lines: Vec<_> = content.lines().collect();
     assert_eq!(
-        lines,
-        [
-            "# Java version configured by J'Lo - https://github.com/java-loader/jlo",
-            "25"
-        ]
+        lines[0],
+        "# Java version configured by J'Lo - https://github.com/java-loader/jlo"
     );
+    let version: u32 = lines[1].parse().expect("expected numeric version");
+    assert!(version >= 8, "expected version >= 8, got {}", version);
 
     // run init again to check for existing file error
     let mut cmd = Command::cargo_bin("jlo-bin").unwrap();

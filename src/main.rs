@@ -82,7 +82,10 @@ fn cmd_env() {
 }
 
 fn cmd_clean() {
-    let jdk_base = jdk_base_dir();
+    let jdk_base = jdk_base_dir().unwrap_or_else(|e| {
+        eprintln!("Error: {:#}", e);
+        exit(1);
+    });
     clean_jdks(&jdk_base).unwrap_or_else(|e| {
         eprintln!("Error: Could not clean JDKs: {:#}", e);
         exit(1);
@@ -136,15 +139,18 @@ fn cmd_update() {
         versions_to_install.insert(java_version);
     } else {
         if args.iter().any(|arg| arg == "all") {
-            find_installed_major_versions(&jdk_base_dir())
-                .unwrap_or_else(|e| {
-                    eprintln!("Error: Could not determine installed JDK versions: {:#}", e);
-                    exit(1);
-                })
-                .into_iter()
-                .for_each(|v| {
-                    versions_to_install.insert(v.to_string());
-                });
+            find_installed_major_versions(&jdk_base_dir().unwrap_or_else(|e| {
+                eprintln!("Error: {:#}", e);
+                exit(1);
+            }))
+            .unwrap_or_else(|e| {
+                eprintln!("Error: Could not determine installed JDK versions: {:#}", e);
+                exit(1);
+            })
+            .into_iter()
+            .for_each(|v| {
+                versions_to_install.insert(v.to_string());
+            });
         }
 
         args.into_iter().filter(|arg| arg != "all").for_each(|v| {
@@ -176,13 +182,16 @@ fn update(java_version: &String) {
         exit(1);
     });
 
-    let jdk_base = jdk_base_dir();
+    let jdk_base = jdk_base_dir().unwrap_or_else(|e| {
+        eprintln!("Error: {:#}", e);
+        exit(1);
+    });
 
     if let Some(path) = find_installed_jdk(&jdk_metadata, &jdk_base) {
         eprintln!(
             "Most recent version of JDK {} is already installed at: {}",
             java_version,
-            path.to_str().unwrap()
+            path.to_string_lossy()
         );
     } else {
         install_jdk(&jdk_base, &jdk_metadata).unwrap_or_else(|e| {
@@ -193,7 +202,7 @@ fn update(java_version: &String) {
 }
 
 fn setup(java_version: &String) -> anyhow::Result<()> {
-    let jdk_base = jdk_base_dir();
+    let jdk_base = jdk_base_dir()?;
 
     let java_home = match find_suitable_jdk(&jdk_base, java_version) {
         Some(path) => path,
@@ -214,7 +223,7 @@ fn setup(java_version: &String) -> anyhow::Result<()> {
     let java_bin_path = java_home.join("bin").to_string_lossy().into_owned();
     let current_path = env::var("PATH").unwrap_or_default();
     let jlo_base = jlo_home_dir()?;
-    if let Some(updated_path) = update_path(&java_bin_path, &current_path, &jlo_base) {
+    if let Some(updated_path) = update_path(&java_bin_path, &current_path, &jlo_base)? {
         updates = true;
         println!("export PATH=\"{}\"", updated_path);
     }
@@ -263,15 +272,19 @@ fn jlo_home_dir() -> anyhow::Result<PathBuf> {
     Ok(path)
 }
 
-fn jdk_base_dir() -> PathBuf {
-    let home = env::home_dir().expect("Could not determine home directory");
-    match env::consts::OS {
+fn jdk_base_dir() -> anyhow::Result<PathBuf> {
+    let home = env::home_dir().context("Could not determine home directory")?;
+    Ok(match env::consts::OS {
         "macos" => home.join("Library/Java/JavaVirtualMachines"),
         _ => home.join("jdks"),
-    }
+    })
 }
 
-fn update_path(java_path: &str, current_path: &str, jlo_base: &Path) -> Option<String> {
+fn update_path(
+    java_path: &str,
+    current_path: &str,
+    jlo_base: &Path,
+) -> anyhow::Result<Option<String>> {
     // Remove any existing J'Lo paths to avoid duplicates
     let mut path_vector: Vec<_> = env::split_paths(current_path)
         .filter(|p| !p.starts_with(jlo_base))
@@ -282,16 +295,16 @@ fn update_path(java_path: &str, current_path: &str, jlo_base: &Path) -> Option<S
 
     // Join paths back into a single string
     let new_path = env::join_paths(path_vector)
-        .unwrap()
+        .context("Could not join PATH components")?
         .to_str()
-        .unwrap()
+        .context("PATH contains non-UTF-8 characters")?
         .to_string();
 
     // Only return if the path has changed
     if new_path == current_path {
-        None
+        Ok(None)
     } else {
-        Some(new_path)
+        Ok(Some(new_path))
     }
 }
 
@@ -313,7 +326,7 @@ mod tests {
     #[test]
     fn update_path_inserts_at_front() {
         let jlo_base = Path::new("/home/user/.jlo");
-        let result = update_path("/new/java/bin", "/usr/bin:/usr/local/bin", jlo_base);
+        let result = update_path("/new/java/bin", "/usr/bin:/usr/local/bin", jlo_base).unwrap();
         assert_eq!(result.unwrap(), "/new/java/bin:/usr/bin:/usr/local/bin");
     }
 
@@ -321,7 +334,7 @@ mod tests {
     fn update_path_removes_existing_jlo_paths() {
         let jlo_base = Path::new("/home/user/.jlo");
         let current = "/home/user/.jlo/old/bin:/usr/bin";
-        let result = update_path("/new/java/bin", current, jlo_base);
+        let result = update_path("/new/java/bin", current, jlo_base).unwrap();
         assert_eq!(result.unwrap(), "/new/java/bin:/usr/bin");
     }
 
@@ -330,20 +343,20 @@ mod tests {
         let jlo_base = Path::new("/home/user/.jlo");
         // java_path starts with jlo_base, so it gets filtered then re-inserted — net no change
         let current = "/home/user/.jlo/jdks/21/bin:/usr/bin";
-        let result = update_path("/home/user/.jlo/jdks/21/bin", current, jlo_base);
+        let result = update_path("/home/user/.jlo/jdks/21/bin", current, jlo_base).unwrap();
         assert!(result.is_none());
     }
 
     #[test]
     fn update_path_handles_empty_path() {
         let jlo_base = Path::new("/home/user/.jlo");
-        let result = update_path("/new/java/bin", "", jlo_base);
+        let result = update_path("/new/java/bin", "", jlo_base).unwrap();
         assert_eq!(result.unwrap(), "/new/java/bin:");
     }
 
     #[test]
     fn jdk_base_dir_returns_plausible_path() {
-        let base = jdk_base_dir();
+        let base = jdk_base_dir().unwrap();
         let path_str = base.to_string_lossy();
         if cfg!(target_os = "macos") {
             assert!(path_str.contains("Library/Java/JavaVirtualMachines"));
@@ -353,6 +366,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn jlo_home_dir_uses_env_var() {
         let dir = tempdir().unwrap();
         unsafe {
