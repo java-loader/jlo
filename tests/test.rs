@@ -269,3 +269,24 @@ fn env() {
     }
     temp_dir.close().unwrap();
 }
+
+#[test]
+fn update_reports_api_http_error() {
+    let mut server = mockito::Server::new();
+    let _m = server
+        .mock(
+            "GET",
+            mockito::Matcher::Regex(r"^/v3/assets/latest/10014/hotspot".to_string()),
+        )
+        .match_query(mockito::Matcher::Any)
+        .with_status(500)
+        .create();
+
+    Command::cargo_bin("jlo-bin")
+        .unwrap()
+        .args(["update", "10014"])
+        .env("JLO_ADOPTIUM_API_URL", server.url())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("HTTP 500"));
+}

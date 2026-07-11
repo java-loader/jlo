@@ -1,0 +1,47 @@
+[
+    {
+        "binary": {
+            "architecture": "aarch64",
+            "download_count": 488742,
+            "heap_size": "normal",
+            "image_type": "jdk",
+            "installer": {
+                "checksum": "1c1721d5df6c2ab2edd8d2801bac07a8895b051e51b1946b1897d0a712138115",
+                "checksum_link": "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.11%2B10/OpenJDK21U-jdk_aarch64_mac_hotspot_21.0.11_10.pkg.sha256.txt",
+                "download_count": 136479,
+                "link": "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.11%2B10/OpenJDK21U-jdk_aarch64_mac_hotspot_21.0.11_10.pkg",
+                "metadata_link": "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.11%2B10/OpenJDK21U-jdk_aarch64_mac_hotspot_21.0.11_10.pkg.json",
+                "name": "OpenJDK21U-jdk_aarch64_mac_hotspot_21.0.11_10.pkg",
+                "signature_link": "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.11%2B10/OpenJDK21U-jdk_aarch64_mac_hotspot_21.0.11_10.pkg.sig",
+                "size": 200539565
+            },
+            "jvm_impl": "hotspot",
+            "os": "mac",
+            "package": {
+                "checksum": "6ebcf221c9b41507b14c098e93c6ead6440b8d9bd154f8ec666c4c73abbdb201",
+                "checksum_link": "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.11%2B10/OpenJDK21U-jdk_aarch64_mac_hotspot_21.0.11_10.tar.gz.sha256.txt",
+                "download_count": 352263,
+                "link": "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.11%2B10/OpenJDK21U-jdk_aarch64_mac_hotspot_21.0.11_10.tar.gz",
+                "metadata_link": "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.11%2B10/OpenJDK21U-jdk_aarch64_mac_hotspot_21.0.11_10.tar.gz.json",
+                "name": "OpenJDK21U-jdk_aarch64_mac_hotspot_21.0.11_10.tar.gz",
+                "signature_link": "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.11%2B10/OpenJDK21U-jdk_aarch64_mac_hotspot_21.0.11_10.tar.gz.sig",
+                "size": 200030394
+            },
+            "project": "jdk",
+            "scm_ref": "jdk-21.0.11+10_adopt",
+            "updated_at": "2026-04-27T08:35:40Z"
+        },
+        "release_link": "https://github.com/adoptium/temurin21-binaries/releases/tag/jdk-21.0.11%2B10",
+        "release_name": "jdk-21.0.11+10",
+        "vendor": "eclipse",
+        "version": {
+            "build": 10,
+            "major": 21,
+            "minor": 0,
+            "openjdk_version": "21.0.11+10-LTS",
+            "optional": "LTS",
+            "security": 11,
+            "semver": "21.0.11+10.0.LTS"
+        }
+    }
+]

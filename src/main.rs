@@ -1,12 +1,11 @@
 mod adoptium;
 mod conf;
-mod download;
 mod extract;
 mod progress_bar;
 
 use crate::adoptium::{
-    JdkMetadata, clean_jdks, fetch_metadata, find_installed_jdk, find_installed_major_versions,
-    find_latest_jdk, find_suitable_jdk,
+    AdoptiumClient, JdkMetadata, clean_jdks, find_installed_jdk, find_installed_major_versions,
+    find_suitable_jdk,
 };
 use anyhow::Context;
 use std::collections::HashSet;
@@ -16,25 +15,30 @@ use std::path::{Path, PathBuf};
 use std::process::exit;
 use tempfile::tempdir;
 
-const USER_AGENT: &str = concat!("J'Lo/", env!("CARGO_PKG_VERSION"));
-
 fn main() {
     if env::args().len() < 2 {
         eprintln!("Arguments missing.");
         print_usage_and_exit()
     }
 
+    let api_url =
+        env::var("JLO_ADOPTIUM_API_URL").unwrap_or_else(|_| adoptium::ADOPTIUM_API_URL.to_string());
+    let client = AdoptiumClient::new(api_url).unwrap_or_else(|e| {
+        eprintln!("Error: {:#}", e);
+        exit(1);
+    });
+
     // Get command
     let command = &env::args().nth(1).unwrap();
     match command.as_str() {
         "env" => {
-            cmd_env();
+            cmd_env(&client);
         }
         "home" => {
-            cmd_home();
+            cmd_home(&client);
         }
         "exec" => {
-            cmd_exec();
+            cmd_exec(&client);
         }
         "clean" => {
             cmd_clean();
@@ -43,10 +47,10 @@ fn main() {
             cmd_default();
         }
         "init" => {
-            cmd_init();
+            cmd_init(&client);
         }
         "update" => {
-            cmd_update();
+            cmd_update(&client);
         }
         "selfupdate" => {
             eprintln!("Self-update is handled by the jlo shell function.");
@@ -93,24 +97,24 @@ fn resolve_java_version_from(explicit: Option<String>) -> String {
     java_version
 }
 
-fn cmd_env() {
+fn cmd_env(client: &AdoptiumClient) {
     let java_version = resolve_java_version();
-    if let Err(e) = setup(&java_version) {
+    if let Err(e) = setup(client, &java_version) {
         eprintln!("Error: {:#}", e);
         exit(1);
     }
 }
 
-fn cmd_home() {
+fn cmd_home(client: &AdoptiumClient) {
     let java_version = resolve_java_version();
-    let java_home = resolve_java_home(&java_version).unwrap_or_else(|e| {
+    let java_home = resolve_java_home(client, &java_version).unwrap_or_else(|e| {
         eprintln!("Error: {:#}", e);
         exit(1);
     });
     println!("{}", java_home.to_string_lossy());
 }
 
-fn cmd_exec() {
+fn cmd_exec(client: &AdoptiumClient) {
     let args: Vec<String> = env::args().skip(2).collect();
     let (version, command) = parse_exec_args(&args).unwrap_or_else(|e| {
         eprintln!("Error: {}", e);
@@ -118,16 +122,16 @@ fn cmd_exec() {
         exit(1);
     });
 
-    run_exec(version, command);
+    run_exec(client, version, command);
 }
 
 /// Resolve the JDK (installing on demand) and replace the current process with
 /// the command. On non-Unix targets `exec` is unsupported, so bail out *before*
 /// downloading anything.
 #[cfg(unix)]
-fn run_exec(version: Option<String>, command: Vec<String>) -> ! {
+fn run_exec(client: &AdoptiumClient, version: Option<String>, command: Vec<String>) -> ! {
     let java_version = resolve_java_version_from(version);
-    let java_home = resolve_java_home(&java_version).unwrap_or_else(|e| {
+    let java_home = resolve_java_home(client, &java_version).unwrap_or_else(|e| {
         eprintln!("Error: {:#}", e);
         exit(1);
     });
@@ -138,7 +142,7 @@ fn run_exec(version: Option<String>, command: Vec<String>) -> ! {
 // A real `execvp` is Unix-only. A native Windows build would replace this with a
 // spawn-and-wait fallback that propagates the child's exit code.
 #[cfg(not(unix))]
-fn run_exec(_version: Option<String>, _command: Vec<String>) -> ! {
+fn run_exec(_client: &AdoptiumClient, _version: Option<String>, _command: Vec<String>) -> ! {
     eprintln!("Error: 'jlo exec' is not supported on this platform.");
     exit(1);
 }
@@ -251,11 +255,11 @@ fn cmd_default() {
     });
 }
 
-fn cmd_init() {
+fn cmd_init(client: &AdoptiumClient) {
     let java_version = if env::args().len() > 2 {
         env::args().nth(2).unwrap()
     } else {
-        find_latest_jdk().unwrap_or_else(|e| {
+        client.latest_major().unwrap_or_else(|e| {
             eprintln!("Error: Could not fetch latest JDK version: {:#}", e);
             exit(1);
         })
@@ -269,7 +273,7 @@ fn cmd_init() {
     });
 }
 
-fn cmd_update() {
+fn cmd_update(client: &AdoptiumClient) {
     let mut versions_to_install: HashSet<String> = HashSet::new();
 
     let args: Vec<String> = env::args().skip(2).collect();
@@ -315,12 +319,12 @@ fn cmd_update() {
     versions_to_install.sort();
 
     for java_version in versions_to_install {
-        update(&java_version);
+        update(client, &java_version);
     }
 }
 
-fn update(java_version: &String) {
-    let jdk_metadata = fetch_metadata(java_version).unwrap_or_else(|e| {
+fn update(client: &AdoptiumClient, java_version: &str) {
+    let jdk_metadata = client.fetch_metadata(java_version).unwrap_or_else(|e| {
         eprintln!("Error: Could not fetch JDK metadata: {:#}", e);
         exit(1);
     });
@@ -337,7 +341,7 @@ fn update(java_version: &String) {
             path.to_string_lossy()
         );
     } else {
-        install_jdk(&jdk_base, &jdk_metadata).unwrap_or_else(|e| {
+        install_jdk(client, &jdk_base, &jdk_metadata).unwrap_or_else(|e| {
             eprintln!("Error: Could not install JDK: {:#}", e);
             exit(1);
         });
@@ -347,20 +351,20 @@ fn update(java_version: &String) {
 /// Resolve the JAVA_HOME for the requested major version, installing the JDK on
 /// demand if it is not already present. Diagnostics go to stderr; this returns
 /// the path so callers decide what (if anything) to print to stdout.
-fn resolve_java_home(java_version: &str) -> anyhow::Result<PathBuf> {
+fn resolve_java_home(client: &AdoptiumClient, java_version: &str) -> anyhow::Result<PathBuf> {
     let jdk_base = jdk_base_dir()?;
 
     match find_suitable_jdk(&jdk_base, java_version) {
         Some(path) => Ok(path),
         None => {
-            let metadata = fetch_metadata(&java_version.to_string())?;
-            install_jdk(&jdk_base, &metadata)
+            let metadata = client.fetch_metadata(java_version)?;
+            install_jdk(client, &jdk_base, &metadata)
         }
     }
 }
 
-fn setup(java_version: &str) -> anyhow::Result<()> {
-    let java_home = resolve_java_home(java_version)?;
+fn setup(client: &AdoptiumClient, java_version: &str) -> anyhow::Result<()> {
+    let java_home = resolve_java_home(client, java_version)?;
 
     let mut updates = false;
 
@@ -385,21 +389,16 @@ fn setup(java_version: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn install_jdk(jdk_base: &Path, jdk_metadata: &JdkMetadata) -> anyhow::Result<PathBuf> {
+fn install_jdk(
+    client: &AdoptiumClient,
+    jdk_base: &Path,
+    jdk_metadata: &JdkMetadata,
+) -> anyhow::Result<PathBuf> {
     // Download JDK
     let temp_dir = tempdir().context("could not create temporary directory")?;
     let temp_file = temp_dir.path().join(&jdk_metadata.package_name);
     let file = &mut File::create(&temp_file).context("could not create temporary file")?;
-    let artifact_description = format!(
-        "JDK {} ({})",
-        jdk_metadata.semver, jdk_metadata.package_name
-    );
-    download::download(
-        artifact_description.as_str(),
-        &jdk_metadata.download_link,
-        &jdk_metadata.checksum,
-        file,
-    )?;
+    client.download(jdk_metadata, file)?;
 
     // Extract JDK to temp dir
     extract::extract(&temp_file, temp_dir.path())?;

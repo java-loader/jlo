@@ -1,12 +1,16 @@
-use crate::USER_AGENT;
+use crate::progress_bar::setup_progress_bar;
 use anyhow::{Context, bail};
 use reqwest::blocking::Client;
 use semver_rs::compare;
+use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
 use std::env;
+use std::fs::File;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 const MARKER_FILE: &str = ".jlo-managed";
+const USER_AGENT: &str = concat!("J'Lo/", env!("CARGO_PKG_VERSION"));
 
 fn sort_by_semver_desc(paths: &mut [PathBuf]) {
     paths.sort_by(|a, b| {
@@ -130,75 +134,6 @@ pub fn find_installed_major_versions(jdk_base: &Path) -> anyhow::Result<Vec<i64>
     Ok(major_versions_vec)
 }
 
-pub fn fetch_metadata(java_version: &String) -> anyhow::Result<JdkMetadata> {
-    let api_url = format!(
-        "https://api.adoptium.net/v3/assets/latest/{java_version}/hotspot?architecture={arch}&image_type=jdk&os={os}&vendor=eclipse",
-        java_version = java_version,
-        arch = jdk_arch()?,
-        os = jdk_os()?
-    );
-
-    let client = Client::builder()
-        .user_agent(USER_AGENT)
-        .build()
-        .context("Could not build HTTP client")?;
-    let metadata_response = client
-        .get(&api_url)
-        .send()
-        .context("Could not fetch metadata from API")?;
-
-    if !metadata_response.status().is_success() {
-        bail!(
-            "Failed to fetch metadata from API: HTTP {}",
-            metadata_response.status()
-        );
-    }
-
-    let json: serde_json::Value = metadata_response
-        .json()
-        .context("Failed to parse JSON response")?;
-
-    let json_array = json
-        .as_array()
-        .context("Unexpected JSON structure received from API.")?;
-
-    if json_array.is_empty() {
-        bail!(
-            "No matching JDK found for the specified version and system architecture.\nTried to fetch metadata from: {}",
-            api_url
-        );
-    }
-
-    let root_node = json_array.first().unwrap();
-
-    let semver = root_node["version"]["semver"].as_str().unwrap_or("");
-    let release_name = root_node["release_name"].as_str().unwrap_or("");
-    let package_name = root_node["binary"]["package"]["name"]
-        .as_str()
-        .unwrap_or("");
-    let download_link = root_node["binary"]["package"]["link"]
-        .as_str()
-        .unwrap_or("");
-    let checksum = root_node["binary"]["package"]["checksum"]
-        .as_str()
-        .unwrap_or("");
-    if semver.is_empty()
-        || release_name.is_empty()
-        || package_name.is_empty()
-        || download_link.is_empty()
-        || checksum.is_empty()
-    {
-        bail!("Incomplete metadata received from API.");
-    }
-    Ok(JdkMetadata {
-        semver: semver.to_string(),
-        release_name: release_name.to_string(),
-        package_name: package_name.to_string(),
-        download_link: download_link.to_string(),
-        checksum: checksum.to_string(),
-    })
-}
-
 pub fn install_jdk(
     jdk_metadata: &JdkMetadata,
     source_dir: &Path,
@@ -257,12 +192,187 @@ pub fn find_installed_jdk(jdk_metadata: &JdkMetadata, jdk_base_path: &Path) -> O
     }
 }
 
+#[derive(Debug)]
 pub struct JdkMetadata {
     pub semver: String,
     pub release_name: String,
     pub package_name: String,
     pub download_link: String,
     pub checksum: String,
+}
+
+pub const ADOPTIUM_API_URL: &str = "https://api.adoptium.net";
+
+/// One entry of the response from `/v3/assets/latest/...` — the shape the
+/// Adoptium API promises for a JDK build.
+#[derive(serde::Deserialize)]
+struct Asset {
+    version: AssetVersion,
+    release_name: String,
+    binary: AssetBinary,
+}
+
+#[derive(serde::Deserialize)]
+struct AssetVersion {
+    semver: String,
+}
+
+#[derive(serde::Deserialize)]
+struct AssetBinary {
+    package: AssetPackage,
+}
+
+#[derive(serde::Deserialize)]
+struct AssetPackage {
+    name: String,
+    link: String,
+    checksum: String,
+}
+
+impl TryFrom<Asset> for JdkMetadata {
+    type Error = anyhow::Error;
+
+    fn try_from(asset: Asset) -> anyhow::Result<Self> {
+        let metadata = JdkMetadata {
+            semver: asset.version.semver,
+            release_name: asset.release_name,
+            package_name: asset.binary.package.name,
+            download_link: asset.binary.package.link,
+            checksum: asset.binary.package.checksum,
+        };
+        if metadata.semver.is_empty()
+            || metadata.release_name.is_empty()
+            || metadata.package_name.is_empty()
+            || metadata.download_link.is_empty()
+            || metadata.checksum.is_empty()
+        {
+            bail!("Incomplete metadata received from API.");
+        }
+        Ok(metadata)
+    }
+}
+
+/// The shape of `/v3/info/available_releases`.
+#[derive(serde::Deserialize)]
+struct AvailableReleases {
+    available_releases: Vec<i64>,
+}
+
+/// The single point of contact with Adoptium: discovering available releases,
+/// fetching JDK metadata, and downloading packages. `base_url` covers the two
+/// API endpoints; downloads follow whatever URL the metadata hands back.
+pub struct AdoptiumClient {
+    client: Client,
+    base_url: String,
+}
+
+impl AdoptiumClient {
+    pub fn new(base_url: impl Into<String>) -> anyhow::Result<Self> {
+        let client = Client::builder()
+            .user_agent(USER_AGENT)
+            .build()
+            .context("Could not build HTTP client")?;
+        Ok(Self {
+            client,
+            base_url: base_url.into(),
+        })
+    }
+
+    pub fn fetch_metadata(&self, java_version: &str) -> anyhow::Result<JdkMetadata> {
+        let api_url = format!(
+            "{base_url}/v3/assets/latest/{java_version}/hotspot?architecture={arch}&image_type=jdk&os={os}&vendor=eclipse",
+            base_url = self.base_url,
+            arch = jdk_arch()?,
+            os = jdk_os()?
+        );
+
+        let response = self
+            .client
+            .get(&api_url)
+            .send()
+            .context("Could not fetch metadata from API")?;
+
+        if !response.status().is_success() {
+            bail!(
+                "Failed to fetch metadata from API: HTTP {}",
+                response.status()
+            );
+        }
+
+        let assets: Vec<Asset> = response.json().context("Failed to parse JSON response")?;
+
+        let asset = assets.into_iter().next().with_context(|| {
+            format!(
+                "No matching JDK found for the specified version and system architecture.\nTried to fetch metadata from: {}",
+                api_url
+            )
+        })?;
+
+        asset.try_into()
+    }
+
+    pub fn latest_major(&self) -> anyhow::Result<String> {
+        let releases: AvailableReleases = self
+            .client
+            .get(format!("{}/v3/info/available_releases", self.base_url))
+            .send()
+            .context("Could not fetch available releases from API")?
+            .json()
+            .context("Failed to parse JSON response")?;
+
+        let latest = releases
+            .available_releases
+            .into_iter()
+            .max()
+            .context("No available releases found.")?;
+
+        Ok(latest.to_string())
+    }
+
+    pub fn download(&self, metadata: &JdkMetadata, file: &mut File) -> anyhow::Result<()> {
+        let mut response = self.client.get(&metadata.download_link).send()?;
+
+        let total_size = response
+            .content_length()
+            .context("Failed to get content length")?;
+
+        let pb = setup_progress_bar(
+            &format!(
+                "Downloading JDK {} ({})",
+                metadata.semver, metadata.package_name
+            ),
+            total_size,
+        );
+
+        let mut hasher = Sha256::new();
+
+        let mut downloaded: u64 = 0;
+        let mut buffer = [0; 8192];
+        while let Ok(n) = response.read(&mut buffer) {
+            if n == 0 {
+                break;
+            }
+            file.write_all(&buffer[..n])?;
+            downloaded += n as u64;
+            pb.set_position(downloaded);
+            hasher.update(&buffer[..n]);
+        }
+
+        pb.finish_and_clear();
+
+        let hash = hex::encode(hasher.finalize());
+        if hash != metadata.checksum {
+            bail!(
+                "Checksum mismatch: expected {}, got {}.",
+                metadata.checksum,
+                hash
+            );
+        }
+
+        eprintln!("✅ Download complete, checksum passed.");
+
+        Ok(())
+    }
 }
 
 fn jdk_os() -> anyhow::Result<&'static str> {
@@ -289,30 +399,6 @@ fn jdk_arch() -> anyhow::Result<&'static str> {
         "riscv64" => Ok("riscv64"),
         _ => bail!("Unsupported architecture: {}", env::consts::ARCH),
     }
-}
-
-pub fn find_latest_jdk() -> anyhow::Result<String> {
-    let client = Client::builder()
-        .user_agent(USER_AGENT)
-        .build()
-        .context("Could not build HTTP client")?;
-    let releases = client
-        .get("https://api.adoptium.net/v3/info/available_releases")
-        .send()
-        .context("Could not fetch available releases from API")?;
-
-    let json: serde_json::Value = releases.json().context("Failed to parse JSON response")?;
-    let available_releases = json["available_releases"]
-        .as_array()
-        .context("Unexpected JSON structure received from API.")?;
-
-    let latest = available_releases
-        .iter()
-        .filter_map(|v| v.as_i64())
-        .max()
-        .context("No available releases found.")?;
-
-    Ok(latest.to_string())
 }
 
 #[cfg(test)]
@@ -591,5 +677,251 @@ mod tests {
         assert!(dest.exists());
         assert!(dest.join(MARKER_FILE).exists());
         assert!(dest.join("bin").join(java_name).exists());
+    }
+}
+
+#[cfg(test)]
+mod client_tests {
+    use super::*;
+    use std::io::Read;
+
+    const ASSETS_FIXTURE: &str = include_str!("../tests/fixtures/assets_latest.json");
+    const RELEASES_FIXTURE: &str = include_str!("../tests/fixtures/available_releases.json");
+    const FAKE_PACKAGE: &[u8] = b"fake-jdk-package-bytes";
+    const FAKE_PACKAGE_CHECKSUM: &str =
+        "c24e5c702f84a86d7be63da2e942872b1cc66a2a35c0168a18042170119201b0";
+
+    fn metadata_mock(
+        server: &mut mockito::ServerGuard,
+        status: usize,
+        body: &str,
+    ) -> mockito::Mock {
+        server
+            .mock(
+                "GET",
+                mockito::Matcher::Regex(r"^/v3/assets/latest/21/hotspot".to_string()),
+            )
+            .match_query(mockito::Matcher::Any)
+            .with_status(status)
+            .with_body(body)
+            .create()
+    }
+
+    fn fixture_with_package_field(field: &str, value: serde_json::Value) -> String {
+        let mut json: serde_json::Value = serde_json::from_str(ASSETS_FIXTURE).unwrap();
+        json[0]["binary"]["package"][field] = value;
+        json.to_string()
+    }
+
+    fn fixture_without_package_field(field: &str) -> String {
+        let mut json: serde_json::Value = serde_json::from_str(ASSETS_FIXTURE).unwrap();
+        json[0]["binary"]["package"]
+            .as_object_mut()
+            .unwrap()
+            .remove(field);
+        json.to_string()
+    }
+
+    fn fake_metadata(download_link: String, checksum: &str) -> JdkMetadata {
+        JdkMetadata {
+            semver: "21.0.11+10.0.LTS".to_string(),
+            release_name: "jdk-21.0.11+10".to_string(),
+            package_name: "fake.tar.gz".to_string(),
+            download_link,
+            checksum: checksum.to_string(),
+        }
+    }
+
+    #[test]
+    fn fetch_metadata_happy_path() {
+        let mut server = mockito::Server::new();
+        let _m = metadata_mock(&mut server, 200, ASSETS_FIXTURE);
+
+        let client = AdoptiumClient::new(server.url()).unwrap();
+        let metadata = client.fetch_metadata("21").unwrap();
+
+        assert_eq!(metadata.semver, "21.0.11+10.0.LTS");
+        assert_eq!(metadata.release_name, "jdk-21.0.11+10");
+        assert_eq!(
+            metadata.package_name,
+            "OpenJDK21U-jdk_aarch64_mac_hotspot_21.0.11_10.tar.gz"
+        );
+        assert!(
+            metadata
+                .download_link
+                .starts_with("https://github.com/adoptium/temurin21-binaries/")
+        );
+        assert_eq!(
+            metadata.checksum,
+            "6ebcf221c9b41507b14c098e93c6ead6440b8d9bd154f8ec666c4c73abbdb201"
+        );
+    }
+
+    #[test]
+    fn fetch_metadata_http_error_reports_status() {
+        let mut server = mockito::Server::new();
+        let _m = metadata_mock(&mut server, 500, "boom");
+
+        let client = AdoptiumClient::new(server.url()).unwrap();
+        let err = client.fetch_metadata("21").unwrap_err();
+
+        assert!(format!("{:#}", err).contains("HTTP 500"), "got: {:#}", err);
+    }
+
+    #[test]
+    fn fetch_metadata_malformed_json_errors() {
+        let mut server = mockito::Server::new();
+        let _m = metadata_mock(&mut server, 200, "this is not json");
+
+        let client = AdoptiumClient::new(server.url()).unwrap();
+        let err = client.fetch_metadata("21").unwrap_err();
+
+        assert!(
+            format!("{:#}", err).contains("Failed to parse JSON response"),
+            "got: {:#}",
+            err
+        );
+    }
+
+    #[test]
+    fn fetch_metadata_empty_array_means_no_matching_jdk() {
+        let mut server = mockito::Server::new();
+        let _m = metadata_mock(&mut server, 200, "[]");
+
+        let client = AdoptiumClient::new(server.url()).unwrap();
+        let err = client.fetch_metadata("21").unwrap_err();
+
+        assert!(
+            format!("{:#}", err).contains("No matching JDK found"),
+            "got: {:#}",
+            err
+        );
+    }
+
+    #[test]
+    fn fetch_metadata_missing_field_names_the_field() {
+        let mut server = mockito::Server::new();
+        let body = fixture_without_package_field("checksum");
+        let _m = metadata_mock(&mut server, 200, &body);
+
+        let client = AdoptiumClient::new(server.url()).unwrap();
+        let err = client.fetch_metadata("21").unwrap_err();
+
+        assert!(format!("{:#}", err).contains("checksum"), "got: {:#}", err);
+    }
+
+    #[test]
+    fn fetch_metadata_empty_field_is_incomplete() {
+        let mut server = mockito::Server::new();
+        let body = fixture_with_package_field("checksum", serde_json::Value::String(String::new()));
+        let _m = metadata_mock(&mut server, 200, &body);
+
+        let client = AdoptiumClient::new(server.url()).unwrap();
+        let err = client.fetch_metadata("21").unwrap_err();
+
+        assert!(
+            format!("{:#}", err).contains("Incomplete metadata"),
+            "got: {:#}",
+            err
+        );
+    }
+
+    #[test]
+    fn latest_major_happy_path() {
+        let mut server = mockito::Server::new();
+        let _m = server
+            .mock("GET", "/v3/info/available_releases")
+            .with_body(RELEASES_FIXTURE)
+            .create();
+
+        let client = AdoptiumClient::new(server.url()).unwrap();
+        assert_eq!(client.latest_major().unwrap(), "26");
+    }
+
+    #[test]
+    fn latest_major_missing_key_errors() {
+        let mut server = mockito::Server::new();
+        let _m = server
+            .mock("GET", "/v3/info/available_releases")
+            .with_body("{}")
+            .create();
+
+        let client = AdoptiumClient::new(server.url()).unwrap();
+        let err = client.latest_major().unwrap_err();
+
+        assert!(
+            format!("{:#}", err).contains("available_releases"),
+            "got: {:#}",
+            err
+        );
+    }
+
+    #[test]
+    fn download_happy_path_writes_verified_file() {
+        let mut server = mockito::Server::new();
+        let _m = server
+            .mock("GET", "/pkg.tar.gz")
+            .with_body(FAKE_PACKAGE)
+            .create();
+
+        let client = AdoptiumClient::new(server.url()).unwrap();
+        let metadata = fake_metadata(
+            format!("{}/pkg.tar.gz", server.url()),
+            FAKE_PACKAGE_CHECKSUM,
+        );
+
+        let mut file = tempfile::tempfile().unwrap();
+        client.download(&metadata, &mut file).unwrap();
+
+        use std::io::Seek;
+        file.rewind().unwrap();
+        let mut content = Vec::new();
+        file.read_to_end(&mut content).unwrap();
+        assert_eq!(content, FAKE_PACKAGE);
+    }
+
+    #[test]
+    fn download_checksum_mismatch_errors() {
+        let mut server = mockito::Server::new();
+        let _m = server
+            .mock("GET", "/pkg.tar.gz")
+            .with_body(FAKE_PACKAGE)
+            .create();
+
+        let client = AdoptiumClient::new(server.url()).unwrap();
+        let metadata = fake_metadata(format!("{}/pkg.tar.gz", server.url()), "deadbeef");
+
+        let mut file = tempfile::tempfile().unwrap();
+        let err = client.download(&metadata, &mut file).unwrap_err();
+
+        assert!(
+            format!("{:#}", err).contains("Checksum mismatch"),
+            "got: {:#}",
+            err
+        );
+    }
+
+    #[test]
+    fn download_without_content_length_errors() {
+        let mut server = mockito::Server::new();
+        let _m = server
+            .mock("GET", "/pkg.tar.gz")
+            .with_chunked_body(|w| w.write_all(FAKE_PACKAGE))
+            .create();
+
+        let client = AdoptiumClient::new(server.url()).unwrap();
+        let metadata = fake_metadata(
+            format!("{}/pkg.tar.gz", server.url()),
+            FAKE_PACKAGE_CHECKSUM,
+        );
+
+        let mut file = tempfile::tempfile().unwrap();
+        let err = client.download(&metadata, &mut file).unwrap_err();
+
+        assert!(
+            format!("{:#}", err).contains("content length"),
+            "got: {:#}",
+            err
+        );
     }
 }
