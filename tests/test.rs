@@ -165,6 +165,7 @@ fn home() {
     temp_dir.close().unwrap();
 }
 
+#[cfg(unix)]
 #[test]
 #[serial]
 fn exec() {
@@ -216,7 +217,7 @@ fn exec() {
         .assert()
         .success()
         .code(0)
-        .stderr(predicate::str::contains("25"));
+        .stderr(predicate::str::contains("openjdk version \"25"));
 
     // missing '--' is a usage error
     let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
@@ -225,6 +226,14 @@ fn exec() {
         .failure()
         .code(1)
         .stderr(predicate::str::contains("expected '--'"));
+
+    // a command that cannot be launched exits 127 with an error on stderr
+    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
+    cmd.args(["exec", "25", "--", "definitely-not-a-real-command-xyz"])
+        .assert()
+        .failure()
+        .code(127)
+        .stderr(predicate::str::contains("could not execute"));
 
     // leave temp dir and clean up
     std::env::set_current_dir(std::env::temp_dir()).unwrap();

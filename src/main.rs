@@ -118,6 +118,14 @@ fn cmd_exec() {
         exit(1);
     });
 
+    run_exec(version, command);
+}
+
+/// Resolve the JDK (installing on demand) and replace the current process with
+/// the command. On non-Unix targets `exec` is unsupported, so bail out *before*
+/// downloading anything.
+#[cfg(unix)]
+fn run_exec(version: Option<String>, command: Vec<String>) -> ! {
     let java_version = resolve_java_version_from(version);
     let java_home = resolve_java_home(&java_version).unwrap_or_else(|e| {
         eprintln!("Error: {:#}", e);
@@ -125,6 +133,14 @@ fn cmd_exec() {
     });
 
     exec_command(&java_home, &command);
+}
+
+// A real `execvp` is Unix-only. A native Windows build would replace this with a
+// spawn-and-wait fallback that propagates the child's exit code.
+#[cfg(not(unix))]
+fn run_exec(_version: Option<String>, _command: Vec<String>) -> ! {
+    eprintln!("Error: 'jlo exec' is not supported on this platform.");
+    exit(1);
 }
 
 /// Split the arguments following `exec` into an optional version and the command
@@ -196,15 +212,16 @@ fn exec_command(java_home: &Path, command: &[String]) -> ! {
         .exec();
 
     eprintln!("Error: could not execute '{}': {}", program, err);
-    exit(127);
+    exit(exec_failure_code(err.kind()));
 }
 
-// A real `execvp` is Unix-only. A native Windows build would replace this with a
-// spawn-and-wait fallback that propagates the child's exit code.
-#[cfg(not(unix))]
-fn exec_command(_java_home: &Path, _command: &[String]) -> ! {
-    eprintln!("Error: 'jlo exec' is not supported on this platform.");
-    exit(1);
+/// Map a launch failure to a shell-conventional exit code: 126 for a command
+/// that exists but can't be run (e.g. not executable), 127 otherwise.
+fn exec_failure_code(kind: std::io::ErrorKind) -> i32 {
+    match kind {
+        std::io::ErrorKind::PermissionDenied => 126,
+        _ => 127,
+    }
 }
 
 fn cmd_clean() {
@@ -488,6 +505,34 @@ mod tests {
     #[test]
     fn parse_exec_args_multiple_versions_error() {
         assert!(parse_exec_args(&owned(&["21", "25", "--", "java"])).is_err());
+    }
+
+    #[test]
+    fn exec_failure_code_distinguishes_not_found_and_not_executable() {
+        use std::io::ErrorKind;
+        assert_eq!(exec_failure_code(ErrorKind::NotFound), 127);
+        assert_eq!(exec_failure_code(ErrorKind::PermissionDenied), 126);
+        assert_eq!(exec_failure_code(ErrorKind::Other), 127);
+    }
+
+    #[test]
+    fn parse_exec_args_no_args_errors() {
+        assert!(parse_exec_args(&owned(&[])).is_err());
+    }
+
+    #[test]
+    fn parse_exec_args_only_separator_errors() {
+        // "--" alone: no version, no command
+        assert!(parse_exec_args(&owned(&["--"])).is_err());
+    }
+
+    #[test]
+    fn parse_exec_args_double_dash_in_command_is_preserved() {
+        // only the first "--" separates; later ones belong to the command
+        let (version, command) =
+            parse_exec_args(&owned(&["21", "--", "sh", "-c", "--", "x"])).unwrap();
+        assert_eq!(version, Some("21".to_string()));
+        assert_eq!(command, owned(&["sh", "-c", "--", "x"]));
     }
 
     #[test]

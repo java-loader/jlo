@@ -214,7 +214,8 @@ by J'Lo itself.
 In interactive shells, `jlo` is a shell function (defined by `jlo-init.sh`) — this is what lets `jlo env` mutate your
 current session. Non-interactive shells (CI jobs, `Makefile` recipes, scripts, AI coding agents) don't load that
 function, so J'Lo's installer also places a real `jlo` binary on your `PATH` at `~/.local/bin/jlo`. Every subcommand
-except `env`/`use` (which only make sense in an interactive shell) works there directly.
+works there directly except `env`/`use` (which must mutate the current shell) and `selfupdate` (which is handled by the
+shell function) — those need the interactive shell integration.
 
 For non-interactive use, prefer `jlo exec` and `jlo home` over `jlo env`, since they don't rely on shell integration.
 `jlo exec` runs a command with the right Java on `PATH`; `jlo home` just prints the `JAVA_HOME` path. Both install the

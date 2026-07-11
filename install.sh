@@ -39,8 +39,29 @@ rm -f "$FQ_JLO_BUNDLE"
 # Expose a real 'jlo' on PATH for non-interactive shells (CI, scripts, agents).
 # The interactive shell function from jlo-init.sh still shadows this symlink and
 # keeps handling env/use, which must mutate the current shell.
-mkdir -p "$LOCAL_BIN_DIR"
-ln -sf "$JLO_BIN_DIR/jlo-bin" "$LOCAL_BIN_DIR/jlo"
+#
+# This is an optional convenience, so any failure here is a warning, not a fatal
+# error. We only ever create or refresh a symlink that already points at our own
+# binary; an unrelated file/dir/symlink at that path is left untouched.
+JLO_TARGET="$JLO_BIN_DIR/jlo-bin"
+JLO_LINK="$LOCAL_BIN_DIR/jlo"
+JLO_LINKED=0
+if [ ! -e "$JLO_LINK" ] && [ ! -L "$JLO_LINK" ]; then
+  JLO_MAY_LINK=1
+elif [ -L "$JLO_LINK" ] && [ "$(readlink "$JLO_LINK")" = "$JLO_TARGET" ]; then
+  JLO_MAY_LINK=1
+else
+  JLO_MAY_LINK=0
+  echo "Warning: '$JLO_LINK' already exists and is not managed by J'Lo; leaving it untouched." >&2
+  echo "         To put 'jlo' on PATH yourself: ln -s '$JLO_TARGET' '$JLO_LINK'" >&2
+fi
+if [ "$JLO_MAY_LINK" = 1 ]; then
+  if mkdir -p "$LOCAL_BIN_DIR" 2>/dev/null && ln -sf "$JLO_TARGET" "$JLO_LINK" 2>/dev/null; then
+    JLO_LINKED=1
+  else
+    echo "Warning: could not create '$JLO_LINK'; 'jlo' may not be available in non-interactive shells." >&2
+  fi
+fi
 
 cat <<EOF
 Successfully installed J'Lo to $JLO_HOME.
@@ -58,17 +79,19 @@ Then restart your terminal or execute the above lines in your current shell sess
 After that, you can use the 'jlo' command to manage your Java environments.
 EOF
 
-# Only nudge about PATH when ~/.local/bin isn't already on it (usually the case
-# on macOS; most Linux setups already include it).
-case ":$PATH:" in
-  *":$LOCAL_BIN_DIR:"*) ;;
-  *)
-    cat <<EOF
+# Only nudge about PATH when we actually created the symlink and ~/.local/bin
+# isn't already on PATH (usually the case on macOS; most Linux setups include it).
+if [ "$JLO_LINKED" = 1 ]; then
+  case ":${PATH-}:" in
+    *":$LOCAL_BIN_DIR:"*) ;;
+    *)
+      cat <<EOF
 
 Also add '$LOCAL_BIN_DIR' to your PATH so 'jlo' works in non-interactive
 shells (CI, scripts, AI agents) and for 'jlo home':
 
 export PATH="\$HOME/.local/bin:\$PATH"
 EOF
-    ;;
-esac
+      ;;
+  esac
+fi
