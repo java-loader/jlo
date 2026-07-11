@@ -61,11 +61,13 @@ This allows automatic discovery of installed JDKs by IDEs like IntelliJ IDEA.
 ## Table of Contents
 
 1. [Environment Setup](#environment-setup)
-2. [Initialization](#initialization)
-3. [Default](#default)
-4. [Updating Java Versions](#updating-java-versions)
-5. [Cleaning Installed Versions](#cleaning-installed-versions)
-6. [Managing J’Lo Itself](#managing-jlo-itself)
+2. [Resolving JAVA_HOME](#resolving-java_home)
+3. [Executing a Command](#executing-a-command)
+4. [Initialization](#initialization)
+5. [Default](#default)
+6. [Updating Java Versions](#updating-java-versions)
+7. [Cleaning Installed Versions](#cleaning-installed-versions)
+8. [Managing J’Lo Itself](#managing-jlo-itself)
 
 ## Environment Setup
 
@@ -86,6 +88,56 @@ jlo env
 # set environment for Java 25
 jlo env 25
 ````
+
+## Resolving JAVA_HOME
+
+The command `jlo home` prints the `JAVA_HOME` path for the requested Java version to standard output — and nothing else.
+Unlike `jlo env`, it does not modify the current shell; it just tells you where a JDK lives. This makes it suitable for
+scripts, Makefiles, CI pipelines, and other non-interactive contexts (see
+[CI / scripting / AI agents](#ci--scripting--ai-agents)).
+
+**Behavior:**
+- Version resolution is identical to `jlo env`: an explicit argument wins, otherwise the current directory's `.jlorc`,
+  otherwise `~/.jlo/default.jlorc`.
+- If the requested Java version is not installed, it will be downloaded and installed automatically.
+- Only the resolved path is written to standard output; all diagnostics (download progress, etc.) go to standard error,
+  so `$(jlo home …)` stays clean.
+
+It is the J'Lo equivalent of macOS's `/usr/libexec/java_home -v <version>`.
+
+**Usage examples:**
+```shell
+# print JAVA_HOME for the version from .jlorc / default.jlorc
+jlo home
+
+# print JAVA_HOME for Java 25
+jlo home 25
+
+# capture it into an environment variable
+export JAVA_HOME="$(jlo home 25)"
+```
+
+## Executing a Command
+
+The command `jlo exec [version] -- <command> [args...]` runs a command with `JAVA_HOME` set and the JDK's `bin`
+directory prepended to `PATH`, without changing the current shell. This is the most convenient way to run a build or
+tool against a specific Java version from CI, scripts, or an AI agent (see
+[CI / scripting / AI agents](#ci--scripting--ai-agents)). It is the J'Lo equivalent of `mise exec` / `asdf exec`.
+
+**Behavior:**
+- The literal `--` separates the optional version from the command. Version resolution is identical to `jlo env`:
+  an explicit version wins, otherwise `.jlorc`, otherwise `~/.jlo/default.jlorc`.
+- If the requested Java version is not installed, it will be downloaded and installed automatically.
+- On Unix the command replaces the J'Lo process (`execvp`), so its exit code and signals propagate transparently.
+
+**Usage examples:**
+```shell
+# run a Gradle build with Java 21
+jlo exec 21 -- ./gradlew build
+
+# use the version from .jlorc / default.jlorc (no version before --)
+jlo exec -- java -version
+```
 
 ## Initialization
 
@@ -157,10 +209,39 @@ by J'Lo itself.
 - The command `jlo version` prints the currently installed J’Lo version.
 - The command `jlo selfupdate` updates J’Lo itself to the latest version.
 
+# CI / scripting / AI agents
+
+In interactive shells, `jlo` is a shell function (defined by `jlo-init.sh`) — this is what lets `jlo env` mutate your
+current session. Non-interactive shells (CI jobs, `Makefile` recipes, scripts, AI coding agents) don't load that
+function, so J'Lo's installer also places a real `jlo` binary on your `PATH` at `~/.local/bin/jlo`. Every subcommand
+except `env`/`use` (which only make sense in an interactive shell) works there directly.
+
+For non-interactive use, prefer `jlo exec` and `jlo home` over `jlo env`, since they don't rely on shell integration.
+`jlo exec` runs a command with the right Java on `PATH`; `jlo home` just prints the `JAVA_HOME` path. Both install the
+JDK on demand if needed.
+
+```shell
+# Run a build against a specific Java version without any shell integration:
+jlo exec 21 -- ./gradlew build
+
+# Or, when you only need the path (e.g. to export it for several later commands):
+export JAVA_HOME="$(jlo home 21)"
+```
+
+```makefile
+# Makefile
+build:
+	jlo exec 21 -- ./gradlew build
+```
+
+> **Note:** `~/.local/bin` is on `PATH` by default on most Linux setups but not on macOS. If `jlo` isn't found in a
+> non-interactive shell, add `export PATH="$HOME/.local/bin:$PATH"` to your profile (the installer prints this hint when
+> needed).
+
 # Uninstalling J'Lo
 
-To uninstall J'Lo, simply remove the `~/.jlo/` directory and the lines you added to your shell profile during
-installation.
+To uninstall J'Lo, remove the `~/.jlo/` directory, the `~/.local/bin/jlo` symlink, and the lines you added to your
+shell profile during installation.
 
 You may also want to remove the `~/.jdks/` directory (or `~/Library/Java/JavaVirtualMachines/` on macOS) if you no
 longer need the installed JDKs.
