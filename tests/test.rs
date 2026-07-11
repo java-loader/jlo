@@ -290,3 +290,46 @@ fn update_reports_api_http_error() {
         .failure()
         .stderr(predicate::str::contains("HTTP 500"));
 }
+
+#[test]
+fn init_uses_latest_version_from_api() {
+    let mut server = mockito::Server::new();
+    let _m = server
+        .mock("GET", "/v3/info/available_releases")
+        .with_body(include_str!("fixtures/available_releases.json"))
+        .create();
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    Command::cargo_bin("jlo-bin")
+        .unwrap()
+        .arg("init")
+        .current_dir(temp_dir.path())
+        .env("JLO_ADOPTIUM_API_URL", server.url())
+        .assert()
+        .success();
+
+    let content = std::fs::read_to_string(temp_dir.path().join(".jlorc")).unwrap();
+    let lines: Vec<_> = content.lines().collect();
+    assert_eq!(lines[1], "26");
+}
+
+#[test]
+fn init_reports_api_http_error() {
+    let mut server = mockito::Server::new();
+    // valid body — the status alone must fail the command
+    let _m = server
+        .mock("GET", "/v3/info/available_releases")
+        .with_status(500)
+        .with_body(include_str!("fixtures/available_releases.json"))
+        .create();
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    Command::cargo_bin("jlo-bin")
+        .unwrap()
+        .arg("init")
+        .current_dir(temp_dir.path())
+        .env("JLO_ADOPTIUM_API_URL", server.url())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("HTTP 500"));
+}

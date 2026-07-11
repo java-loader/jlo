@@ -312,13 +312,21 @@ impl AdoptiumClient {
     }
 
     pub fn latest_major(&self) -> anyhow::Result<String> {
-        let releases: AvailableReleases = self
+        let response = self
             .client
             .get(format!("{}/v3/info/available_releases", self.base_url))
             .send()
-            .context("Could not fetch available releases from API")?
-            .json()
-            .context("Failed to parse JSON response")?;
+            .context("Could not fetch available releases from API")?;
+
+        if !response.status().is_success() {
+            bail!(
+                "Failed to fetch available releases from API: HTTP {}",
+                response.status()
+            );
+        }
+
+        let releases: AvailableReleases =
+            response.json().context("Failed to parse JSON response")?;
 
         let latest = releases
             .available_releases
@@ -331,6 +339,15 @@ impl AdoptiumClient {
 
     pub fn download(&self, metadata: &JdkMetadata, file: &mut File) -> anyhow::Result<()> {
         let mut response = self.client.get(&metadata.download_link).send()?;
+
+        if !response.status().is_success() {
+            bail!(
+                "Failed to download {} from {}: HTTP {}",
+                metadata.package_name,
+                metadata.download_link,
+                response.status()
+            );
+        }
 
         let total_size = response
             .content_length()
@@ -348,7 +365,10 @@ impl AdoptiumClient {
 
         let mut downloaded: u64 = 0;
         let mut buffer = [0; 8192];
-        while let Ok(n) = response.read(&mut buffer) {
+        loop {
+            let n = response
+                .read(&mut buffer)
+                .context("Could not read package data from response")?;
             if n == 0 {
                 break;
             }
@@ -923,5 +943,44 @@ mod client_tests {
             "got: {:#}",
             err
         );
+    }
+
+    #[test]
+    fn latest_major_http_error_reports_status() {
+        let mut server = mockito::Server::new();
+        // valid body — the status alone must fail the call
+        let _m = server
+            .mock("GET", "/v3/info/available_releases")
+            .with_status(500)
+            .with_body(RELEASES_FIXTURE)
+            .create();
+
+        let client = AdoptiumClient::new(server.url()).unwrap();
+        let err = client.latest_major().unwrap_err();
+
+        assert!(format!("{:#}", err).contains("HTTP 500"), "got: {:#}", err);
+    }
+
+    #[test]
+    fn download_http_error_reports_status_not_checksum() {
+        let mut server = mockito::Server::new();
+        let _m = server
+            .mock("GET", "/pkg.tar.gz")
+            .with_status(404)
+            .with_body("not found")
+            .create();
+
+        let client = AdoptiumClient::new(server.url()).unwrap();
+        let metadata = fake_metadata(
+            format!("{}/pkg.tar.gz", server.url()),
+            FAKE_PACKAGE_CHECKSUM,
+        );
+
+        let mut file = tempfile::tempfile().unwrap();
+        let err = client.download(&metadata, &mut file).unwrap_err();
+
+        let msg = format!("{:#}", err);
+        assert!(msg.contains("HTTP 404"), "got: {}", msg);
+        assert!(!msg.contains("Checksum mismatch"), "got: {}", msg);
     }
 }
