@@ -30,6 +30,12 @@ fn main() {
         "env" => {
             cmd_env();
         }
+        "home" => {
+            cmd_home();
+        }
+        "exec" => {
+            cmd_exec();
+        }
         "clean" => {
             cmd_clean();
         }
@@ -60,25 +66,145 @@ fn main() {
 }
 
 fn print_usage_and_exit() -> ! {
-    eprintln!("Usage: jlo [ env | clean | default | init | update | selfupdate | version ]");
+    eprintln!(
+        "Usage: jlo [ env | home | exec | clean | default | init | update | selfupdate | version ]"
+    );
     exit(1);
 }
 
-fn cmd_env() {
-    let java_version = if env::args().len() > 2 {
-        env::args().nth(2).unwrap()
-    } else {
+/// Determine the requested major version: explicit CLI argument if present,
+/// otherwise the project `.jlorc` / user default config.
+fn resolve_java_version() -> String {
+    let explicit = (env::args().len() > 2).then(|| env::args().nth(2).unwrap());
+    resolve_java_version_from(explicit)
+}
+
+/// Like [`resolve_java_version`] but with the explicit version supplied by the
+/// caller (used by `exec`, whose version is parsed out of its own arguments).
+fn resolve_java_version_from(explicit: Option<String>) -> String {
+    let java_version = explicit.unwrap_or_else(|| {
         conf::load_config_java_version().unwrap_or_else(|e| {
             eprintln!("{:#}", e);
             exit(1);
         })
-    };
+    });
 
     assert_java_version(&java_version);
+    java_version
+}
+
+fn cmd_env() {
+    let java_version = resolve_java_version();
     if let Err(e) = setup(&java_version) {
         eprintln!("Error: {:#}", e);
         exit(1);
     }
+}
+
+fn cmd_home() {
+    let java_version = resolve_java_version();
+    let java_home = resolve_java_home(&java_version).unwrap_or_else(|e| {
+        eprintln!("Error: {:#}", e);
+        exit(1);
+    });
+    println!("{}", java_home.to_string_lossy());
+}
+
+fn cmd_exec() {
+    let args: Vec<String> = env::args().skip(2).collect();
+    let (version, command) = parse_exec_args(&args).unwrap_or_else(|e| {
+        eprintln!("Error: {}", e);
+        eprintln!("Usage: jlo exec [version] -- <command> [args...]");
+        exit(1);
+    });
+
+    let java_version = resolve_java_version_from(version);
+    let java_home = resolve_java_home(&java_version).unwrap_or_else(|e| {
+        eprintln!("Error: {:#}", e);
+        exit(1);
+    });
+
+    exec_command(&java_home, &command);
+}
+
+/// Split the arguments following `exec` into an optional version and the command
+/// to run. The literal `--` separates them; everything before it is the version
+/// (zero or one token), everything after is the command.
+fn parse_exec_args(args: &[String]) -> Result<(Option<String>, Vec<String>), String> {
+    let sep = args
+        .iter()
+        .position(|a| a == "--")
+        .ok_or("expected '--' before the command, e.g. jlo exec 21 -- java -version")?;
+
+    let version = match &args[..sep] {
+        [] => None,
+        [v] => Some(v.clone()),
+        _ => return Err("only one version may be given before '--'".to_string()),
+    };
+
+    let command = args[sep + 1..].to_vec();
+    if command.is_empty() {
+        return Err("no command given after '--'".to_string());
+    }
+
+    Ok((version, command))
+}
+
+/// Build the child `PATH` with the JDK's `bin` directory prepended.
+fn child_path(java_bin: &str, current_path: &str) -> anyhow::Result<String> {
+    if current_path.is_empty() {
+        return Ok(java_bin.to_string());
+    }
+
+    let mut paths = vec![PathBuf::from(java_bin)];
+    paths.extend(env::split_paths(current_path));
+
+    Ok(env::join_paths(paths)
+        .context("Could not join PATH components")?
+        .to_str()
+        .context("PATH contains non-UTF-8 characters")?
+        .to_string())
+}
+
+/// Replace the current process with `command`, having set `JAVA_HOME` and
+/// prepended the JDK's `bin` to `PATH`. On Unix this is a real `execvp`, so the
+/// child's exit code and signals propagate transparently.
+#[cfg(unix)]
+fn exec_command(java_home: &Path, command: &[String]) -> ! {
+    use std::os::unix::process::CommandExt;
+    use std::process::Command;
+
+    let (program, args) = command
+        .split_first()
+        .expect("command is non-empty (checked in parse_exec_args)");
+
+    let java_bin = java_home.join("bin");
+    let new_path = child_path(
+        &java_bin.to_string_lossy(),
+        &env::var("PATH").unwrap_or_default(),
+    )
+    .unwrap_or_else(|e| {
+        eprintln!("Error: {:#}", e);
+        exit(1);
+    });
+
+    // `exec` only returns if it failed to launch the program.
+    let err = Command::new(program)
+        .args(args)
+        .env("JAVA_HOME", java_home)
+        .env("PATH", new_path)
+        .exec();
+
+    eprintln!("Error: could not execute '{}': {}", program, err);
+    exit(127);
+}
+
+// A real `execvp` is Unix-only. A native Windows build would replace this with a
+// spawn-and-wait fallback that propagates the child's exit code.
+#[cfg(not(unix))]
+fn exec_command(_java_home: &Path, _command: &[String]) -> ! {
+    eprintln!("Error: 'jlo exec' is not supported on this platform.");
+    exit(1);
 }
 
 fn cmd_clean() {
@@ -201,16 +327,23 @@ fn update(java_version: &String) {
     }
 }
 
-fn setup(java_version: &String) -> anyhow::Result<()> {
+/// Resolve the JAVA_HOME for the requested major version, installing the JDK on
+/// demand if it is not already present. Diagnostics go to stderr; this returns
+/// the path so callers decide what (if anything) to print to stdout.
+fn resolve_java_home(java_version: &str) -> anyhow::Result<PathBuf> {
     let jdk_base = jdk_base_dir()?;
 
-    let java_home = match find_suitable_jdk(&jdk_base, java_version) {
-        Some(path) => path,
+    match find_suitable_jdk(&jdk_base, java_version) {
+        Some(path) => Ok(path),
         None => {
-            let metadata = fetch_metadata(java_version)?;
-            install_jdk(&jdk_base, &metadata)?
+            let metadata = fetch_metadata(&java_version.to_string())?;
+            install_jdk(&jdk_base, &metadata)
         }
-    };
+    }
+}
+
+fn setup(java_version: &str) -> anyhow::Result<()> {
+    let java_home = resolve_java_home(java_version)?;
 
     let mut updates = false;
 
@@ -322,6 +455,53 @@ fn assert_java_version(java_version: &str) {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    fn owned(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn parse_exec_args_version_and_command() {
+        let (version, command) =
+            parse_exec_args(&owned(&["21", "--", "java", "-version"])).unwrap();
+        assert_eq!(version, Some("21".to_string()));
+        assert_eq!(command, owned(&["java", "-version"]));
+    }
+
+    #[test]
+    fn parse_exec_args_no_version_uses_none() {
+        let (version, command) = parse_exec_args(&owned(&["--", "java", "-version"])).unwrap();
+        assert_eq!(version, None);
+        assert_eq!(command, owned(&["java", "-version"]));
+    }
+
+    #[test]
+    fn parse_exec_args_missing_separator_errors() {
+        assert!(parse_exec_args(&owned(&["21", "java", "-version"])).is_err());
+    }
+
+    #[test]
+    fn parse_exec_args_empty_command_errors() {
+        assert!(parse_exec_args(&owned(&["21", "--"])).is_err());
+    }
+
+    #[test]
+    fn parse_exec_args_multiple_versions_error() {
+        assert!(parse_exec_args(&owned(&["21", "25", "--", "java"])).is_err());
+    }
+
+    #[test]
+    fn child_path_prepends_java_bin() {
+        assert_eq!(
+            child_path("/jdk/21/bin", "/usr/bin:/bin").unwrap(),
+            "/jdk/21/bin:/usr/bin:/bin"
+        );
+    }
+
+    #[test]
+    fn child_path_handles_empty_path() {
+        assert_eq!(child_path("/jdk/21/bin", "").unwrap(), "/jdk/21/bin");
+    }
 
     #[test]
     fn update_path_inserts_at_front() {

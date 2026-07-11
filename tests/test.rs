@@ -122,6 +122,120 @@ fn init() {
 
 #[test]
 #[serial]
+fn home() {
+    // create a temp dir and set its path to JLO_HOME
+    let temp_dir = tempfile::tempdir().unwrap();
+    unsafe {
+        std::env::set_var("JLO_HOME", temp_dir.path());
+    }
+
+    // switch to temp dir and create .jlorc with "25"
+    std::env::set_current_dir(&temp_dir).unwrap();
+    std::fs::write(".jlorc", "25").unwrap();
+
+    // run home (version resolved from .jlorc)
+    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
+    let assert = cmd.arg("home").assert().success().code(0);
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+
+    // stdout must be exactly one line: the JAVA_HOME path, nothing else
+    assert_eq!(stdout.lines().count(), 1, "stdout: {:?}", stdout);
+    assert!(stdout.ends_with('\n'), "stdout must be newline-terminated");
+    let java_home = stdout.trim_end();
+    assert!(
+        std::path::Path::new(java_home)
+            .join("bin")
+            .join("java")
+            .exists(),
+        "printed JAVA_HOME must contain bin/java: {}",
+        java_home
+    );
+
+    // explicit version argument resolves the same way
+    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
+    let assert = cmd.args(["home", "25"]).assert().success().code(0);
+    let stdout_explicit = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert_eq!(stdout_explicit, stdout);
+
+    // leave temp dir and clean up
+    std::env::set_current_dir(std::env::temp_dir()).unwrap();
+    unsafe {
+        std::env::remove_var("JLO_HOME");
+    }
+    temp_dir.close().unwrap();
+}
+
+#[test]
+#[serial]
+fn exec() {
+    // create a temp dir and set its path to JLO_HOME
+    let temp_dir = tempfile::tempdir().unwrap();
+    unsafe {
+        std::env::set_var("JLO_HOME", temp_dir.path());
+    }
+
+    // switch to temp dir and create .jlorc with "25"
+    std::env::set_current_dir(&temp_dir).unwrap();
+    std::fs::write(".jlorc", "25").unwrap();
+
+    // exit code of the child propagates through exec
+    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
+    cmd.args(["exec", "25", "--", "sh", "-c", "exit 7"])
+        .assert()
+        .failure()
+        .code(7);
+
+    // JAVA_HOME is set in the child and its bin is first on PATH
+    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
+    let assert = cmd
+        .args([
+            "exec",
+            "25",
+            "--",
+            "sh",
+            "-c",
+            "echo \"$JAVA_HOME\"; command -v java",
+        ])
+        .assert()
+        .success()
+        .code(0);
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let mut lines = stdout.lines();
+    let java_home = lines.next().unwrap();
+    let java_bin = lines.next().unwrap();
+    assert!(!java_home.is_empty(), "JAVA_HOME must be set in child");
+    assert_eq!(
+        java_bin,
+        format!("{}/bin/java", java_home),
+        "java must resolve to the JDK from JAVA_HOME"
+    );
+
+    // version resolved from .jlorc when omitted (no explicit version before --)
+    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
+    cmd.args(["exec", "--", "java", "-version"])
+        .assert()
+        .success()
+        .code(0)
+        .stderr(predicate::str::contains("25"));
+
+    // missing '--' is a usage error
+    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
+    cmd.args(["exec", "25", "java", "-version"])
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains("expected '--'"));
+
+    // leave temp dir and clean up
+    std::env::set_current_dir(std::env::temp_dir()).unwrap();
+    unsafe {
+        std::env::remove_var("JLO_HOME");
+    }
+    temp_dir.close().unwrap();
+}
+
+#[test]
+#[serial]
 fn env() {
     // create a temp dir and set its path to JLO_HOME
     let temp_dir = tempfile::tempdir().unwrap();
