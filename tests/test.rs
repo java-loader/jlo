@@ -333,3 +333,156 @@ fn init_reports_api_http_error() {
         .failure()
         .stderr(predicate::str::contains("HTTP 500"));
 }
+
+/// Where `jlo` installs JDKs, mirroring `jdk_base_dir()` in main.rs.
+/// IntelliJ-compatible: `~/Library/Java/JavaVirtualMachines` on macOS, `~/.jdks` elsewhere.
+fn jdk_base() -> std::path::PathBuf {
+    #[allow(deprecated)]
+    let home = std::env::home_dir().unwrap();
+    if cfg!(target_os = "macos") {
+        home.join("Library/Java/JavaVirtualMachines")
+    } else {
+        home.join(".jdks")
+    }
+}
+
+/// Pull the value out of the `export PATH="..."` line of `jlo env` output.
+fn exported_path(stdout: &str) -> Option<String> {
+    stdout
+        .lines()
+        .find_map(|l| l.strip_prefix("export PATH=\""))
+        .and_then(|l| l.strip_suffix('"'))
+        .map(str::to_string)
+}
+
+#[test]
+#[serial]
+fn env_removes_stale_jdk_bin_entries() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    unsafe {
+        std::env::set_var("JLO_HOME", temp_dir.path());
+    }
+    std::env::set_current_dir(&temp_dir).unwrap();
+    std::fs::write(".jlorc", "25").unwrap();
+
+    // A JDK bin dir jlo prepended on an earlier run, for a version we are no longer using.
+    let stale = jdk_base().join("99.0.1").join("bin");
+    let input_path = format!("{}:/usr/bin:/bin", stale.display());
+
+    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
+    let assert = cmd
+        .arg("env")
+        .env("PATH", &input_path)
+        .assert()
+        .success()
+        .code(0);
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let new_path = exported_path(&stdout).expect("env must export PATH");
+
+    assert!(
+        !new_path.split(':').any(|p| p == stale.to_str().unwrap()),
+        "stale JDK bin must be removed from PATH.\n  stale: {}\n  got:   {}",
+        stale.display(),
+        new_path
+    );
+
+    std::env::set_current_dir(std::env::temp_dir()).unwrap();
+    unsafe {
+        std::env::remove_var("JLO_HOME");
+    }
+    temp_dir.close().unwrap();
+}
+
+#[test]
+#[serial]
+fn env_without_jlo_home_keeps_unrelated_home_path_entries() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    unsafe {
+        std::env::remove_var("JLO_HOME");
+    }
+    std::env::set_current_dir(&temp_dir).unwrap();
+    std::fs::write(".jlorc", "25").unwrap();
+
+    // User-local PATH entries that have nothing to do with jlo.
+    #[allow(deprecated)]
+    let home = std::env::home_dir().unwrap();
+    let cargo_bin = home.join(".cargo").join("bin");
+    let user_bin = home.join("bin");
+    let input_path = format!(
+        "{}:{}:/usr/bin:/bin",
+        cargo_bin.display(),
+        user_bin.display()
+    );
+
+    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
+    let assert = cmd
+        .arg("env")
+        .env("PATH", &input_path)
+        .assert()
+        .success()
+        .code(0);
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let new_path = exported_path(&stdout).expect("env must export PATH");
+
+    for keep in [&cargo_bin, &user_bin] {
+        assert!(
+            new_path.split(':').any(|p| p == keep.to_str().unwrap()),
+            "PATH entry under $HOME must survive.\n  expected: {}\n  got:      {}",
+            keep.display(),
+            new_path
+        );
+    }
+
+    std::env::set_current_dir(std::env::temp_dir()).unwrap();
+    temp_dir.close().unwrap();
+}
+
+#[test]
+#[serial]
+fn env_is_idempotent() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    unsafe {
+        std::env::set_var("JLO_HOME", temp_dir.path());
+    }
+    std::env::set_current_dir(&temp_dir).unwrap();
+    std::fs::write(".jlorc", "25").unwrap();
+
+    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
+    let assert = cmd
+        .arg("env")
+        .env("PATH", "/usr/bin:/bin")
+        .assert()
+        .success()
+        .code(0);
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let first_path = exported_path(&stdout).expect("first env run must export PATH");
+    let java_home = stdout
+        .lines()
+        .find_map(|l| l.strip_prefix("export JAVA_HOME=\""))
+        .and_then(|l| l.strip_suffix('"'))
+        .expect("first env run must export JAVA_HOME")
+        .to_string();
+
+    // Second run with the environment the first run produced: nothing left to change.
+    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
+    let assert = cmd
+        .arg("env")
+        .env("PATH", &first_path)
+        .env("JAVA_HOME", &java_home)
+        .assert()
+        .success()
+        .code(0);
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+
+    assert_eq!(
+        stdout, "",
+        "re-running env in an already-configured shell must emit nothing, got: {:?}",
+        stdout
+    );
+
+    std::env::set_current_dir(std::env::temp_dir()).unwrap();
+    unsafe {
+        std::env::remove_var("JLO_HOME");
+    }
+    temp_dir.close().unwrap();
+}

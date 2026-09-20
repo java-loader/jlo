@@ -365,6 +365,7 @@ fn resolve_java_home(client: &AdoptiumClient, java_version: &str) -> anyhow::Res
 
 fn setup(client: &AdoptiumClient, java_version: &str) -> anyhow::Result<()> {
     let java_home = resolve_java_home(client, java_version)?;
+    let jdk_base = jdk_base_dir()?;
 
     let mut updates = false;
 
@@ -376,8 +377,7 @@ fn setup(client: &AdoptiumClient, java_version: &str) -> anyhow::Result<()> {
 
     let java_bin_path = java_home.join("bin").to_string_lossy().into_owned();
     let current_path = env::var("PATH").unwrap_or_default();
-    let jlo_base = jlo_home_dir()?;
-    if let Some(updated_path) = update_path(&java_bin_path, &current_path, &jlo_base)? {
+    if let Some(updated_path) = update_path(&java_bin_path, &current_path, &jdk_base)? {
         updates = true;
         println!("export PATH=\"{}\"", updated_path);
     }
@@ -423,20 +423,31 @@ fn jlo_home_dir() -> anyhow::Result<PathBuf> {
 
 fn jdk_base_dir() -> anyhow::Result<PathBuf> {
     let home = env::home_dir().context("Could not determine home directory")?;
-    Ok(match env::consts::OS {
-        "macos" => home.join("Library/Java/JavaVirtualMachines"),
-        _ => home.join("jdks"),
-    })
+    Ok(jdk_base_dir_for(env::consts::OS, &home))
 }
 
+/// JDK install location, matching IntelliJ IDEA's layout so both tools see the
+/// same JDKs. Split out from [`jdk_base_dir`] so every platform is testable from
+/// any host.
+fn jdk_base_dir_for(os: &str, home: &Path) -> PathBuf {
+    match os {
+        "macos" => home.join("Library/Java/JavaVirtualMachines"),
+        _ => home.join(".jdks"),
+    }
+}
+
+/// Prepend `java_path` to `current_path`, dropping any entry already under
+/// `jdk_base`. `jdk_base` must be the JDK install directory ([`jdk_base_dir`]) —
+/// the only tree whose PATH entries J'Lo owns. Passing a broader directory (the
+/// home directory, say) would strip unrelated user entries.
 fn update_path(
     java_path: &str,
     current_path: &str,
-    jlo_base: &Path,
+    jdk_base: &Path,
 ) -> anyhow::Result<Option<String>> {
-    // Remove any existing J'Lo paths to avoid duplicates
+    // Remove JDK bin entries from earlier runs to avoid duplicates
     let mut path_vector: Vec<_> = env::split_paths(current_path)
-        .filter(|p| !p.starts_with(jlo_base))
+        .filter(|p| !p.starts_with(jdk_base))
         .collect();
 
     // Insert the new path at the beginning
@@ -549,44 +560,102 @@ mod tests {
 
     #[test]
     fn update_path_inserts_at_front() {
-        let jlo_base = Path::new("/home/user/.jlo");
-        let result = update_path("/new/java/bin", "/usr/bin:/usr/local/bin", jlo_base).unwrap();
-        assert_eq!(result.unwrap(), "/new/java/bin:/usr/bin:/usr/local/bin");
-    }
-
-    #[test]
-    fn update_path_removes_existing_jlo_paths() {
-        let jlo_base = Path::new("/home/user/.jlo");
-        let current = "/home/user/.jlo/old/bin:/usr/bin";
-        let result = update_path("/new/java/bin", current, jlo_base).unwrap();
-        assert_eq!(result.unwrap(), "/new/java/bin:/usr/bin");
-    }
-
-    #[test]
-    fn update_path_returns_none_when_unchanged() {
-        let jlo_base = Path::new("/home/user/.jlo");
-        // java_path starts with jlo_base, so it gets filtered then re-inserted — net no change
-        let current = "/home/user/.jlo/jdks/21/bin:/usr/bin";
-        let result = update_path("/home/user/.jlo/jdks/21/bin", current, jlo_base).unwrap();
-        assert!(result.is_none());
+        let jdk_base = Path::new("/home/u/.jdks");
+        let result = update_path(
+            "/home/u/.jdks/21.0.12/bin",
+            "/usr/bin:/usr/local/bin",
+            jdk_base,
+        )
+        .unwrap();
+        assert_eq!(
+            result.unwrap(),
+            "/home/u/.jdks/21.0.12/bin:/usr/bin:/usr/local/bin"
+        );
     }
 
     #[test]
     fn update_path_handles_empty_path() {
-        let jlo_base = Path::new("/home/user/.jlo");
-        let result = update_path("/new/java/bin", "", jlo_base).unwrap();
-        assert_eq!(result.unwrap(), "/new/java/bin:");
+        let jdk_base = Path::new("/home/u/.jdks");
+        let result = update_path("/home/u/.jdks/21.0.12/bin", "", jdk_base).unwrap();
+        assert_eq!(result.unwrap(), "/home/u/.jdks/21.0.12/bin:");
     }
 
     #[test]
-    fn jdk_base_dir_returns_plausible_path() {
-        let base = jdk_base_dir().unwrap();
-        let path_str = base.to_string_lossy();
-        if cfg!(target_os = "macos") {
-            assert!(path_str.contains("Library/Java/JavaVirtualMachines"));
-        } else {
-            assert!(path_str.ends_with("jdks"));
-        }
+    fn jdk_base_dir_matches_intellij_layout_on_macos() {
+        let home = Path::new("/Users/u");
+        assert_eq!(
+            jdk_base_dir_for("macos", home),
+            home.join("Library/Java/JavaVirtualMachines")
+        );
+    }
+
+    #[test]
+    fn jdk_base_dir_matches_intellij_layout_on_linux() {
+        let home = Path::new("/home/u");
+        assert_eq!(jdk_base_dir_for("linux", home), home.join(".jdks"));
+    }
+
+    #[test]
+    fn jdk_base_dir_matches_intellij_layout_on_windows() {
+        let home = Path::new("/Users/u");
+        assert_eq!(jdk_base_dir_for("windows", home), home.join(".jdks"));
+    }
+
+    #[test]
+    fn update_path_removes_stale_jdk_entries() {
+        let jdk_base = Path::new("/home/u/.jdks");
+        let result = update_path(
+            "/home/u/.jdks/17.0.13/bin",
+            "/home/u/.jdks/21.0.12/bin:/usr/bin",
+            jdk_base,
+        )
+        .unwrap();
+        assert_eq!(
+            result.as_deref(),
+            Some("/home/u/.jdks/17.0.13/bin:/usr/bin")
+        );
+    }
+
+    #[test]
+    fn update_path_keeps_unrelated_home_entries() {
+        let jdk_base = Path::new("/home/u/.jdks");
+        let result = update_path(
+            "/home/u/.jdks/17.0.13/bin",
+            "/home/u/.cargo/bin:/home/u/bin:/usr/bin",
+            jdk_base,
+        )
+        .unwrap();
+        assert_eq!(
+            result.as_deref(),
+            Some("/home/u/.jdks/17.0.13/bin:/home/u/.cargo/bin:/home/u/bin:/usr/bin")
+        );
+    }
+
+    #[test]
+    fn update_path_is_idempotent_for_the_same_jdk() {
+        let jdk_base = Path::new("/home/u/.jdks");
+        let result = update_path(
+            "/home/u/.jdks/17.0.13/bin",
+            "/home/u/.jdks/17.0.13/bin:/usr/bin",
+            jdk_base,
+        )
+        .unwrap();
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn update_path_does_not_match_sibling_directories_by_prefix() {
+        let jdk_base = Path::new("/home/u/.jdks");
+        let result = update_path(
+            "/home/u/.jdks/17.0.13/bin",
+            "/home/u/.jdks-backup/bin:/usr/bin",
+            jdk_base,
+        )
+        .unwrap();
+        assert_eq!(
+            result.as_deref(),
+            Some("/home/u/.jdks/17.0.13/bin:/home/u/.jdks-backup/bin:/usr/bin")
+        );
     }
 
     #[test]

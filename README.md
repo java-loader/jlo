@@ -53,7 +53,8 @@ jlo env
 > If you enabled the J'Lo autoload feature during installation, J'Lo will automatically set up the Java environment
 > whenever you `cd` into a directory that contains a `.jlorc` file.
 
-JDKs are installed to `~/.jdks/` on Linux and `~/Library/Java/JavaVirtualMachines/` on macOS.
+JDKs are installed to `~/Library/Java/JavaVirtualMachines/` on macOS and `~/.jdks/` on Linux and Windows —
+the same locations IntelliJ IDEA uses, so both tools see the same JDKs.
 This allows automatic discovery of installed JDKs by IDEs like IntelliJ IDEA.
 
 # J’Lo Command Reference
