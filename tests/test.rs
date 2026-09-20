@@ -440,7 +440,8 @@ fn init_with_version() {
         .assert()
         .success()
         .code(0)
-        .stdout(predicate::str::contains("Java 21"));
+        .stderr(predicate::str::contains("Java 21"))
+        .stdout("");
 
     let content = std::fs::read_to_string(".jlorc").unwrap();
     let lines: Vec<_> = content.lines().collect();
@@ -463,8 +464,10 @@ fn init() {
         .assert()
         .success()
         .code(0)
-        .stdout(predicate::str::is_match(r"Created config file '.jlorc'").unwrap())
-        .stderr("");
+        // Status goes to stderr; stdout stays reserved for eval-able shell
+        // output, so `jlo init` contributes nothing to it.
+        .stderr(predicate::str::is_match(r"Created config file '.jlorc'").unwrap())
+        .stdout("");
 
     // check if .jlorc contains a valid major version
     let content = std::fs::read_to_string(".jlorc").unwrap();

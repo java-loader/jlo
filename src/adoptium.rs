@@ -56,7 +56,7 @@ pub(crate) fn clean_jdks(jdk_base: &Path) -> anyhow::Result<CleanReport> {
             continue;
         }
         let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
-            eprintln!("Ignoring directory with invalid name: {path:?}");
+            crate::ui::warning!("Ignoring directory with invalid name: {path:?}");
             continue;
         };
         if !path.join(MARKER_FILE).exists() {
@@ -65,7 +65,7 @@ pub(crate) fn clean_jdks(jdk_base: &Path) -> anyhow::Result<CleanReport> {
             continue;
         }
         let Ok(semver) = semver_rs::parse(file_name, None) else {
-            eprintln!("Ignoring non-semver directory: {path:?}");
+            crate::ui::warning!("Ignoring non-semver directory: {path:?}");
             continue;
         };
         installed_jdks.entry(semver.major).or_default().push(path);
@@ -470,7 +470,7 @@ impl AdoptiumClient {
                 // No build for this OS/architecture - nothing to offer.
                 Ok(None) => {}
                 // One major failing should not cost the user the whole listing.
-                Err(e) => eprintln!("Warning: could not look up JDK {major}: {e:#}"),
+                Err(e) => crate::ui::warning!("could not look up JDK {major}: {e:#}"),
             }
         }
 

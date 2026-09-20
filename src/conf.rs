@@ -106,7 +106,10 @@ fn init_config(path: &Path, latest_release: &str) -> anyhow::Result<()> {
     )?;
     writeln!(file, "{latest_release}")?;
 
-    println!(
+    // stderr, like every other status message: this module's contract is that
+    // stdout carries only shell code the caller may `eval`. Nothing sources
+    // `jlo init` today, which is exactly why the inconsistency was easy to miss.
+    crate::ui::created!(
         "Created config file '{}' with Java {}",
         path.display(),
         latest_release

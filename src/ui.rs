@@ -138,6 +138,52 @@ pub(crate) fn up_to_date(major: &str, version: &str) {
     );
 }
 
+/// Diagnostic prefixes.
+///
+/// All four write to stderr and all four are `.for_stderr()`: `console::style`
+/// decides whether to emit colour by looking at *stdout*, and the `jlo` shell
+/// function runs `. <(jlo-bin env)`, so stdout is a pipe exactly when a user is
+/// sitting at a terminal watching stderr.
+///
+/// `Error:` is bold as well as red so it still stands out in a terminal theme
+/// that is already red-heavy - on a failed run it is the one line the user is
+/// looking for.
+pub(crate) fn print_error(args: std::fmt::Arguments) {
+    eprintln!("{} {args}", style("Error:").red().bold().for_stderr());
+}
+
+pub(crate) fn print_warning(args: std::fmt::Arguments) {
+    eprintln!("{} {args}", style("Warning:").yellow().bold().for_stderr());
+}
+
+/// Advice printed *alongside* an error (a usage line, a suggested flag), so it
+/// is dimmed rather than labelled - it must not read as a second failure.
+pub(crate) fn print_hint(args: std::fmt::Arguments) {
+    eprintln!("{}", style(args.to_string()).dim().for_stderr());
+}
+
+pub(crate) fn print_created(args: std::fmt::Arguments) {
+    eprintln!("{} {args}", style("✓").green().for_stderr());
+}
+
+macro_rules! error {
+    ($($arg:tt)*) => { $crate::ui::print_error(format_args!($($arg)*)) };
+}
+
+macro_rules! warning {
+    ($($arg:tt)*) => { $crate::ui::print_warning(format_args!($($arg)*)) };
+}
+
+macro_rules! hint {
+    ($($arg:tt)*) => { $crate::ui::print_hint(format_args!($($arg)*)) };
+}
+
+macro_rules! created {
+    ($($arg:tt)*) => { $crate::ui::print_created(format_args!($($arg)*)) };
+}
+
+pub(crate) use {created, error, hint, warning};
+
 /// Report a `jlo clean` run.
 ///
 /// `clean` is the one command that destroys things, so unlike `jlo env` it

@@ -82,7 +82,7 @@ fn main() {
         cli::Command::Init { version } => cmd_init(&client, version),
         cli::Command::Default { version } => cmd_default(&version),
         cli::Command::Selfupdate => {
-            eprintln!(
+            ui::error!(
                 "Self-update is handled by the jlo shell function. Source jlo-init.sh from your shell profile, or re-run the installer."
             );
             exit(1);
@@ -108,7 +108,7 @@ fn cmd_completions(shell: clap_complete::Shell) {
 fn resolve_java_version_from(explicit: Option<String>) -> String {
     let java_version = explicit.unwrap_or_else(|| {
         conf::load_config_java_version().unwrap_or_else(|e| {
-            eprintln!("{e:#}");
+            ui::error!("{e:#}");
             exit(1);
         })
     });
@@ -120,7 +120,7 @@ fn resolve_java_version_from(explicit: Option<String>) -> String {
 fn cmd_env(client: &AdoptiumClient, version: Option<String>) {
     let java_version = resolve_java_version_from(version);
     if let Err(e) = setup(client, &java_version) {
-        eprintln!("Error: {e:#}");
+        ui::error!("{e:#}");
         exit(1);
     }
 }
@@ -128,7 +128,7 @@ fn cmd_env(client: &AdoptiumClient, version: Option<String>) {
 fn cmd_home(client: &AdoptiumClient, version: Option<String>) {
     let java_version = resolve_java_version_from(version);
     let java_home = resolve_java_home(client, &java_version).unwrap_or_else(|e| {
-        eprintln!("Error: {e:#}");
+        ui::error!("{e:#}");
         exit(1);
     });
     println!("{}", java_home.to_string_lossy());
@@ -156,8 +156,8 @@ fn cmd_exec(client: &AdoptiumClient, args: &[String]) {
     }
 
     let (version, command) = parse_exec_args(&args).unwrap_or_else(|e| {
-        eprintln!("Error: {e}");
-        eprintln!("Usage: jlo exec [VERSION] -- <COMMAND> [ARGS]...");
+        ui::error!("{e}");
+        ui::hint!("Usage: jlo exec [VERSION] -- <COMMAND> [ARGS]...");
         exit(1);
     });
 
@@ -255,7 +255,7 @@ mod exec_arg_recovery_tests {
 fn run_exec(client: &AdoptiumClient, version: Option<String>, command: &[String]) -> ! {
     let java_version = resolve_java_version_from(version);
     let java_home = resolve_java_home(client, &java_version).unwrap_or_else(|e| {
-        eprintln!("Error: {e:#}");
+        ui::error!("{e:#}");
         exit(1);
     });
 
@@ -266,7 +266,7 @@ fn run_exec(client: &AdoptiumClient, version: Option<String>, command: &[String]
 // spawn-and-wait fallback that propagates the child's exit code.
 #[cfg(not(unix))]
 fn run_exec(_client: &AdoptiumClient, _version: Option<String>, _command: &[String]) -> ! {
-    eprintln!("Error: 'jlo exec' is not supported on this platform.");
+    ui::error!("'jlo exec' is not supported on this platform.");
     exit(1);
 }
 
@@ -327,7 +327,7 @@ fn exec_command(java_home: &Path, command: &[String]) -> ! {
         &env::var("PATH").unwrap_or_default(),
     )
     .unwrap_or_else(|e| {
-        eprintln!("Error: {e:#}");
+        ui::error!("{e:#}");
         exit(1);
     });
 
@@ -338,7 +338,7 @@ fn exec_command(java_home: &Path, command: &[String]) -> ! {
         .env("PATH", new_path)
         .exec();
 
-    eprintln!("Error: could not execute '{program}': {err}");
+    ui::error!("could not execute '{program}': {err}");
     exit(exec_failure_code(err.kind()));
 }
 
@@ -360,11 +360,11 @@ fn exec_failure_code(kind: std::io::ErrorKind) -> i32 {
 /// themselves off when stdout is not a terminal, so a pipe sees plain text.
 fn cmd_list(client: &AdoptiumClient, offline: bool) {
     let jdk_base = jdk_base_dir().unwrap_or_else(|e| {
-        eprintln!("Error: {e:#}");
+        ui::error!("{e:#}");
         exit(1);
     });
     let installed = find_installed_jdks(&jdk_base).unwrap_or_else(|e| {
-        eprintln!("Error: Could not list installed JDKs: {e:#}");
+        ui::error!("Could not list installed JDKs: {e:#}");
         exit(1);
     });
 
@@ -372,8 +372,8 @@ fn cmd_list(client: &AdoptiumClient, offline: bool) {
         print_offline_list(&installed, &jdk_base);
     } else {
         let available = client.available_jdks().unwrap_or_else(|e| {
-            eprintln!("Error: Could not fetch available JDKs: {e:#}");
-            eprintln!("Use 'jlo list --offline' to list the JDKs already installed.");
+            ui::error!("Could not fetch available JDKs: {e:#}");
+            ui::hint!("Use 'jlo list --offline' to list the JDKs already installed.");
             exit(1);
         });
         print_remote_list(&available, &installed);
@@ -489,7 +489,7 @@ fn print_lines(lines: impl IntoIterator<Item = String>) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => return,
             Err(e) => {
-                eprintln!("Error: could not write to stdout: {e}");
+                ui::error!("could not write to stdout: {e}");
                 exit(1);
             }
         }
@@ -521,11 +521,11 @@ fn installed_status(jdk: &RemoteJdk, installed: &[adoptium::InstalledJdk]) -> In
 
 fn cmd_clean() {
     let jdk_base = jdk_base_dir().unwrap_or_else(|e| {
-        eprintln!("Error: {e:#}");
+        ui::error!("{e:#}");
         exit(1);
     });
     let report = clean_jdks(&jdk_base).unwrap_or_else(|e| {
-        eprintln!("Error: Could not clean JDKs: {e:#}");
+        ui::error!("Could not clean JDKs: {e:#}");
         exit(1);
     });
     ui::clean_report(&report);
@@ -534,7 +534,7 @@ fn cmd_clean() {
 fn cmd_default(java_version: &str) {
     assert_java_version(java_version);
     conf::init_default_config(java_version).unwrap_or_else(|e| {
-        eprintln!("Error: Could not create default config file: {e:#}");
+        ui::error!("Could not create default config file: {e:#}");
         exit(1);
     });
 }
@@ -542,7 +542,7 @@ fn cmd_default(java_version: &str) {
 fn cmd_init(client: &AdoptiumClient, version: Option<String>) {
     let java_version = version.unwrap_or_else(|| {
         client.latest_major().unwrap_or_else(|e| {
-            eprintln!("Error: Could not fetch latest JDK version: {e:#}");
+            ui::error!("Could not fetch latest JDK version: {e:#}");
             exit(1);
         })
     });
@@ -550,7 +550,7 @@ fn cmd_init(client: &AdoptiumClient, version: Option<String>) {
     assert_java_version(&java_version);
 
     conf::init_project_config(&java_version).unwrap_or_else(|e| {
-        eprintln!("Error: Could not create config file: {e:#}");
+        ui::error!("Could not create config file: {e:#}");
         exit(1);
     });
 }
@@ -560,18 +560,18 @@ fn cmd_update(client: &AdoptiumClient, versions: Vec<String>) {
 
     if versions.is_empty() {
         let java_version = conf::load_config_java_version().unwrap_or_else(|e| {
-            eprintln!("Error: Could not load configuration: {e:#}");
+            ui::error!("Could not load configuration: {e:#}");
             exit(1);
         });
         versions_to_install.insert(java_version);
     } else {
         if versions.iter().any(|arg| arg == "all") {
             find_installed_major_versions(&jdk_base_dir().unwrap_or_else(|e| {
-                eprintln!("Error: {e:#}");
+                ui::error!("{e:#}");
                 exit(1);
             }))
             .unwrap_or_else(|e| {
-                eprintln!("Error: Could not determine installed JDK versions: {e:#}");
+                ui::error!("Could not determine installed JDK versions: {e:#}");
                 exit(1);
             })
             .into_iter()
@@ -587,12 +587,12 @@ fn cmd_update(client: &AdoptiumClient, versions: Vec<String>) {
                 if conf::is_valid_version(&v) {
                     versions_to_install.insert(v);
                 } else {
-                    eprintln!("Skipping invalid version: '{v}'.");
+                    ui::warning!("Skipping invalid version: '{v}'.");
                 }
             });
 
         if versions_to_install.is_empty() {
-            eprintln!("No valid Java versions provided to update.");
+            ui::error!("No valid Java versions provided to update.");
             exit(1);
         }
     }
@@ -608,12 +608,12 @@ fn cmd_update(client: &AdoptiumClient, versions: Vec<String>) {
 
 fn update(client: &AdoptiumClient, java_version: &str) {
     let jdk_metadata = client.fetch_metadata(java_version).unwrap_or_else(|e| {
-        eprintln!("Error: Could not fetch JDK metadata: {e:#}");
+        ui::error!("Could not fetch JDK metadata: {e:#}");
         exit(1);
     });
 
     let jdk_base = jdk_base_dir().unwrap_or_else(|e| {
-        eprintln!("Error: {e:#}");
+        ui::error!("{e:#}");
         exit(1);
     });
 
@@ -621,7 +621,7 @@ fn update(client: &AdoptiumClient, java_version: &str) {
         ui::up_to_date(java_version, &jdk_metadata.semver);
     } else {
         install_jdk(client, &jdk_base, &jdk_metadata).unwrap_or_else(|e| {
-            eprintln!("Error: Could not install JDK: {e:#}");
+            ui::error!("Could not install JDK: {e:#}");
             exit(1);
         });
     }
@@ -708,7 +708,7 @@ fn install_jdk_inner(
     adoptium::install_jdk(jdk_metadata, temp_dir.path(), dest_dir, ui)?;
 
     temp_dir.close().unwrap_or_else(|err| {
-        eprintln!("Warning: Could not delete temporary directory: {err}");
+        ui::warning!("Could not delete temporary directory: {err}");
     });
 
     Ok(())
@@ -771,7 +771,7 @@ fn update_path(
 
 fn assert_java_version(java_version: &str) {
     if !conf::is_valid_version(java_version) {
-        eprintln!(
+        ui::error!(
             "Unsupported version: '{java_version}'. Only major versions 8, 11, ... are supported."
         );
         exit(1);
