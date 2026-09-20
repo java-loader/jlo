@@ -53,9 +53,16 @@ fn main() {
     }
 }
 
-fn cmd_completions(_shell: clap_complete::Shell) {
-    eprintln!("Error: not implemented yet.");
-    exit(1);
+/// Write a shell completion script to stdout.
+///
+/// The completion function registers against the command word `jlo`, which
+/// resolves to the shell function from jlo-init.sh, so the wrapper is
+/// transparent to completion.
+fn cmd_completions(shell: clap_complete::Shell) {
+    use clap::CommandFactory;
+
+    let mut command = cli::Cli::command();
+    clap_complete::generate(shell, &mut command, "jlo", &mut std::io::stdout());
 }
 
 /// Determine the requested major version: the explicit CLI argument if present,

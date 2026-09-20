@@ -732,3 +732,38 @@ fn env_is_idempotent() {
     }
     temp_dir.close().unwrap();
 }
+
+#[test]
+fn completions_emit_a_script_per_shell() {
+    for (shell, needle) in [
+        ("bash", "complete"),
+        ("zsh", "compdef"),
+        ("fish", "complete"),
+    ] {
+        let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
+        cmd.args(["completions", shell])
+            .assert()
+            .success()
+            .code(0)
+            .stdout(predicate::str::contains(needle))
+            .stdout(predicate::str::contains("jlo"));
+    }
+}
+
+#[test]
+fn completions_reject_an_unknown_shell() {
+    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
+    cmd.args(["completions", "nosuchshell"])
+        .assert()
+        .failure()
+        .code(2);
+}
+
+#[test]
+fn completions_do_not_hit_the_network() {
+    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
+    cmd.args(["completions", "bash"])
+        .env("JLO_ADOPTIUM_API_URL", "http://127.0.0.1:1")
+        .assert()
+        .success();
+}
