@@ -1,0 +1,280 @@
+//! Tests for the shell integration in `jlo-autoload.sh`.
+//!
+//! The script is sourced by the user's interactive shell, so these tests drive
+//! a real `bash` and inspect the hook it registers. `JLO_HOME` and the working
+//! directory both point at empty temp dirs so the script's "fresh shell" branch
+//! finds neither `.jlorc` nor `default.jlorc` and stays quiet.
+//!
+//! Set `JLO_TEST_BASH` to exercise a specific interpreter, e.g. a bash >= 5.1
+//! that honours an array-valued `PROMPT_COMMAND`:
+//!
+//! ```text
+//! JLO_TEST_BASH=/opt/homebrew/bin/bash cargo test --release --test autoload
+//! ```
+
+use std::process::Command;
+use tempfile::tempdir;
+
+/// Separates the `declare -p` line from the element dump.
+const MARKER: &str = "--8<--";
+
+fn autoload_script() -> String {
+    format!("{}/jlo-autoload.sh", env!("CARGO_MANIFEST_DIR"))
+}
+
+fn bash_bin() -> String {
+    std::env::var("JLO_TEST_BASH").unwrap_or_else(|_| "bash".to_string())
+}
+
+/// The state of `PROMPT_COMMAND` after sourcing.
+struct PromptCommand {
+    /// `declare -p PROMPT_COMMAND` output, or `UNSET`. Carries the variable's
+    /// type and export flag, which a plain element dump would hide.
+    decl: String,
+    /// One entry per command bash will run. A scalar yields exactly one.
+    elements: Vec<String>,
+}
+
+impl PromptCommand {
+    fn is_array(&self) -> bool {
+        // `declare -a` / `declare -ax` ... the flags sit between "declare -" and
+        // the variable name.
+        self.decl
+            .split_whitespace()
+            .nth(1)
+            .is_some_and(|flags| flags.starts_with('-') && flags.contains('a'))
+    }
+
+    fn is_exported(&self) -> bool {
+        self.decl
+            .split_whitespace()
+            .nth(1)
+            .is_some_and(|flags| flags.starts_with('-') && flags.contains('x'))
+    }
+
+    fn hook_elements(&self) -> usize {
+        self.elements
+            .iter()
+            .filter(|e| e.split(';').any(|tok| tok.trim() == "jlo_after_cd"))
+            .count()
+    }
+}
+
+/// Run `prologue`, then source `jlo-autoload.sh` `times` times in one bash
+/// session, and report the resulting `PROMPT_COMMAND`.
+fn source_script(prologue: &str, times: usize) -> PromptCommand {
+    let cwd = tempdir().unwrap();
+    let jlo_home = tempdir().unwrap();
+    let script = autoload_script();
+
+    // `set -e` so a failure inside the sourced script fails the test instead of
+    // being masked by the trailing printf's exit status.
+    let mut body = String::from("set -e\n");
+    body.push_str(prologue);
+    body.push('\n');
+    for _ in 0..times {
+        body.push_str(&format!(". '{script}'\n"));
+    }
+    body.push_str("declare -p PROMPT_COMMAND 2>/dev/null || echo UNSET\n");
+    body.push_str(&format!("printf '%s\\n' '{MARKER}'\n"));
+    // Unset expands to zero words, so nothing is printed.
+    body.push_str("printf '%s\\0' \"${PROMPT_COMMAND[@]}\"\n");
+
+    let out = Command::new(bash_bin())
+        .arg("-c")
+        .arg(&body)
+        .current_dir(cwd.path())
+        .env("JLO_HOME", jlo_home.path())
+        .env_remove("PROMPT_COMMAND")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run {}: {e}", bash_bin()));
+
+    assert!(
+        out.status.success(),
+        "bash failed ({}): {}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let (decl, dump) = stdout
+        .split_once(&format!("{MARKER}\n"))
+        .unwrap_or_else(|| panic!("marker missing in bash output: {stdout:?}"));
+
+    PromptCommand {
+        decl: decl.trim().to_string(),
+        elements: dump
+            .split('\0')
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect(),
+    }
+}
+
+/// bash only honours an array-valued `PROMPT_COMMAND` from 5.1 on; before that
+/// only element 0 ever runs, so array-shaped expectations are meaningless.
+fn array_prompt_command_supported() -> bool {
+    Command::new(bash_bin())
+        .arg("-c")
+        .arg("(( BASH_VERSINFO[0] > 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] >= 1) ))")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Returns true when the caller should bail out. Prints loudly: a silently
+/// skipped test is indistinguishable from a passing one.
+#[must_use]
+fn skip_without_array_support(test: &str) -> bool {
+    if array_prompt_command_supported() {
+        return false;
+    }
+    eprintln!(
+        "SKIP {test}: {} predates 5.1 and ignores array PROMPT_COMMAND. \
+         Re-run with JLO_TEST_BASH=<bash>=5.1> to cover it.",
+        bash_bin()
+    );
+    true
+}
+
+// ---------------------------------------------------------------------------
+// Scalar PROMPT_COMMAND
+// ---------------------------------------------------------------------------
+
+#[test]
+fn registers_hook_when_prompt_command_is_unset() {
+    let pc = source_script("unset PROMPT_COMMAND", 1);
+    assert_eq!(pc.elements, vec!["jlo_after_cd"]);
+}
+
+#[test]
+fn registers_hook_when_prompt_command_is_empty() {
+    let pc = source_script("PROMPT_COMMAND=", 1);
+    assert_eq!(pc.elements, vec!["jlo_after_cd"]);
+}
+
+#[test]
+fn prepends_hook_before_existing_command() {
+    let pc = source_script("PROMPT_COMMAND='__user_hook'", 1);
+    assert_eq!(pc.elements, vec!["jlo_after_cd;__user_hook"]);
+}
+
+#[test]
+fn does_not_duplicate_hook_when_resourced() {
+    let pc = source_script("PROMPT_COMMAND='__user_hook'", 3);
+    assert_eq!(pc.elements, vec!["jlo_after_cd;__user_hook"]);
+    assert_eq!(pc.hook_elements(), 1);
+}
+
+/// An exported PROMPT_COMMAND must stay an exported scalar - it must not be
+/// silently converted to an array.
+#[test]
+fn keeps_exported_scalar_exported_and_scalar() {
+    let pc = source_script("export PROMPT_COMMAND='__user_hook'", 1);
+    assert!(pc.is_exported(), "export lost; declare was {:?}", pc.decl);
+    assert!(!pc.is_array(), "became an array; declare was {:?}", pc.decl);
+    assert_eq!(pc.elements, vec!["jlo_after_cd;__user_hook"]);
+}
+
+// ---------------------------------------------------------------------------
+// Registration must recognise *our* hook, not merely its name
+// ---------------------------------------------------------------------------
+
+/// `echo jlo_after_cd` mentions the hook but does not run it, so J'Lo must
+/// still register. A substring test would wrongly treat this as registered.
+#[test]
+fn registers_when_hook_name_only_appears_as_an_argument() {
+    let pc = source_script("PROMPT_COMMAND='echo jlo_after_cd'", 1);
+    assert_eq!(pc.elements, vec!["jlo_after_cd;echo jlo_after_cd"]);
+}
+
+/// A different function whose name merely contains ours is not our hook.
+#[test]
+fn registers_alongside_similarly_named_hook() {
+    let pc = source_script("PROMPT_COMMAND='other_jlo_after_cd_hook'", 1);
+    assert_eq!(pc.elements, vec!["jlo_after_cd;other_jlo_after_cd_hook"]);
+}
+
+// ---------------------------------------------------------------------------
+// Array PROMPT_COMMAND (bash >= 5.1)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn array_keeps_every_user_element_intact() {
+    if skip_without_array_support("array_keeps_every_user_element_intact") {
+        return;
+    }
+    let pc = source_script("PROMPT_COMMAND=(__first __second)", 1);
+    assert!(pc.is_array(), "declare was {:?}", pc.decl);
+    assert_eq!(pc.elements, vec!["jlo_after_cd", "__first", "__second"]);
+}
+
+#[test]
+fn array_does_not_duplicate_hook_when_resourced() {
+    if skip_without_array_support("array_does_not_duplicate_hook_when_resourced") {
+        return;
+    }
+    let pc = source_script("PROMPT_COMMAND=(__first __second)", 3);
+    assert_eq!(pc.elements, vec!["jlo_after_cd", "__first", "__second"]);
+}
+
+/// Another integration may prepend its own element after J'Lo registered, so
+/// the hook is not necessarily at index 0 when the file is sourced again.
+#[test]
+fn array_finds_hook_outside_element_zero() {
+    if skip_without_array_support("array_finds_hook_outside_element_zero") {
+        return;
+    }
+    let pc = source_script("PROMPT_COMMAND=(__other jlo_after_cd)", 1);
+    assert_eq!(pc.elements, vec!["__other", "jlo_after_cd"]);
+    assert_eq!(pc.hook_elements(), 1);
+}
+
+#[test]
+fn empty_array_gets_the_hook() {
+    if skip_without_array_support("empty_array_gets_the_hook") {
+        return;
+    }
+    let pc = source_script("PROMPT_COMMAND=()", 1);
+    assert_eq!(pc.elements, vec!["jlo_after_cd"]);
+}
+
+// ---------------------------------------------------------------------------
+// zsh uses add-zsh-hook and must not touch PROMPT_COMMAND at all
+// ---------------------------------------------------------------------------
+
+#[test]
+fn zsh_registers_chpwd_hook_once_and_leaves_prompt_command_alone() {
+    let cwd = tempdir().unwrap();
+    let jlo_home = tempdir().unwrap();
+    let script = autoload_script();
+
+    let body = format!(
+        "set -e\n. '{script}'\n. '{script}'\n. '{script}'\n\
+         print -r -- \"hooks=$chpwd_functions\"\nprint -r -- \"pc=${{PROMPT_COMMAND-}}\"\n"
+    );
+
+    let out = Command::new("zsh")
+        .arg("-c")
+        .arg(&body)
+        .current_dir(cwd.path())
+        .env("JLO_HOME", jlo_home.path())
+        .env_remove("PROMPT_COMMAND")
+        .output()
+        .expect("failed to run zsh");
+
+    assert!(
+        out.status.success(),
+        "zsh failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        stdout.contains("hooks=jlo_after_cd\n"),
+        "expected exactly one chpwd hook, got {stdout:?}"
+    );
+    assert!(
+        stdout.contains("pc=\n"),
+        "zsh must not touch PROMPT_COMMAND, got {stdout:?}"
+    );
+}
