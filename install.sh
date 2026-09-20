@@ -63,6 +63,21 @@ if [ "$JLO_MAY_LINK" = 1 ]; then
   fi
 fi
 
+# Shell completions. Generated once at install time rather than via
+# 'source <(jlo completions bash)' in the profile, so shell startup costs no
+# subprocess. A failure here is a convenience lost, not a broken install.
+JLO_COMPLETION_DIR="$JLO_HOME/completions"
+if mkdir -p "$JLO_COMPLETION_DIR" 2>/dev/null; then
+  for sh in bash zsh fish; do
+    if ! "$JLO_TARGET" completions "$sh" > "$JLO_COMPLETION_DIR/jlo.$sh" 2>/dev/null; then
+      rm -f "$JLO_COMPLETION_DIR/jlo.$sh"
+      echo "Warning: could not generate $sh completions." >&2
+    fi
+  done
+else
+  echo "Warning: could not create '$JLO_COMPLETION_DIR'; shell completions are unavailable." >&2
+fi
+
 cat <<EOF
 Successfully installed J'Lo to $JLO_HOME.
 
@@ -73,6 +88,9 @@ Add the following lines to the end of your shell profile file (e.g., ~/.bashrc, 
 export JLO_HOME="\$HOME/.jlo"
 [[ -s "\$JLO_HOME/bin/jlo-init.sh" ]] && source "\$JLO_HOME/bin/jlo-init.sh"
 [[ -s "\$JLO_HOME/bin/jlo-autoload.sh" ]] && source "\$JLO_HOME/bin/jlo-autoload.sh"
+
+# Shell completions (bash; use jlo.zsh or jlo.fish for those shells):
+[[ -s "\$JLO_HOME/completions/jlo.bash" ]] && source "\$JLO_HOME/completions/jlo.bash"
 
 Then restart your terminal or execute the above lines in your current shell session.
 
