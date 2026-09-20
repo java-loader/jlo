@@ -196,6 +196,8 @@ That updates every installed major version in one go — no need to name them in
   Missing versions will be installed automatically.
 - If no arguments are provided, it updates the Java version specified in the `.jlorc` file in the current directory,
   falling back to `~/.jlo/default.jlorc` if none is found.
+- The superseded minor release stays on disk — an open shell or IDE may still point at it. When an update leaves one
+  behind, `jlo update` ends with a reminder to run [`jlo clean`](#cleaning-installed-versions).
 
 **Usage examples:**
 ```shell

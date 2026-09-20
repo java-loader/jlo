@@ -188,6 +188,29 @@ pub(crate) fn find_installed_jdks(jdk_base: &Path) -> anyhow::Result<Vec<Install
         .collect())
 }
 
+/// How many installs `jlo clean` would remove: every managed JDK that is not
+/// the newest of its major.
+///
+/// The read-only counterpart to [`clean_jdks`], so `jlo update` can point at
+/// `jlo clean` after superseding a minor without deleting anything itself.
+pub(crate) fn count_superseded_jdks(jdk_base: &Path) -> anyhow::Result<usize> {
+    let mut newest_seen: std::collections::HashSet<i64> = std::collections::HashSet::new();
+    let mut superseded = 0;
+
+    // `find_installed_jdks` yields newest first, so the first managed JDK of a
+    // major is the one `clean_jdks` keeps and every later one is superseded.
+    for jdk in find_installed_jdks(jdk_base)?
+        .into_iter()
+        .filter(|jdk| jdk.managed)
+    {
+        if !newest_seen.insert(jdk.major) {
+            superseded += 1;
+        }
+    }
+
+    Ok(superseded)
+}
+
 pub(crate) fn find_installed_major_versions(jdk_base: &Path) -> anyhow::Result<Vec<i64>> {
     let mut major_versions = std::collections::HashSet::new();
 
@@ -777,6 +800,39 @@ mod tests {
         let dir = tempdir().unwrap();
         let missing = dir.path().join("nothing-installed-here");
         assert!(find_installed_jdks(&missing).unwrap().is_empty());
+    }
+
+    // -- count_superseded_jdks --
+
+    #[test]
+    fn count_superseded_jdks_counts_all_but_newest_per_major() {
+        let dir = tempdir().unwrap();
+        create_jdk_dir(dir.path(), "21.0.1+12", true);
+        create_jdk_dir(dir.path(), "21.0.3+9", true);
+        create_jdk_dir(dir.path(), "21.0.12+7", true);
+        create_jdk_dir(dir.path(), "17.0.2+8", true);
+
+        // Exactly what `clean_jdks` would remove: two old 21s, no 17.
+        assert_eq!(count_superseded_jdks(dir.path()).unwrap(), 2);
+    }
+
+    #[test]
+    fn count_superseded_jdks_ignores_unmanaged() {
+        let dir = tempdir().unwrap();
+        create_jdk_dir(dir.path(), "21.0.1+12", false);
+        create_jdk_dir(dir.path(), "21.0.3+9", true);
+
+        // `clean_jdks` never touches an unmanaged install, so counting one
+        // would point at a `jlo clean` that then removes nothing.
+        assert_eq!(count_superseded_jdks(dir.path()).unwrap(), 0);
+    }
+
+    #[test]
+    fn count_superseded_jdks_on_missing_base_dir() {
+        let dir = tempdir().unwrap();
+        let missing = dir.path().join("never-installed");
+
+        assert_eq!(count_superseded_jdks(&missing).unwrap(), 0);
     }
 
     // -- clean_jdks --

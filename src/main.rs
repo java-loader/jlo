@@ -5,8 +5,8 @@ mod extract;
 mod ui;
 
 use crate::adoptium::{
-    AdoptiumClient, JdkMetadata, RemoteJdk, clean_jdks, find_installed_jdk, find_installed_jdks,
-    find_installed_major_versions, find_suitable_jdk,
+    AdoptiumClient, JdkMetadata, RemoteJdk, clean_jdks, count_superseded_jdks, find_installed_jdk,
+    find_installed_jdks, find_installed_major_versions, find_suitable_jdk,
 };
 use crate::ui::InstallUi;
 use anyhow::Context;
@@ -612,12 +612,49 @@ fn cmd_update(client: &AdoptiumClient, versions: Vec<String>, all: bool) {
     let mut versions_to_install: Vec<_> = versions_to_install.into_iter().collect();
     versions_to_install.sort();
 
+    let mut installed_any = false;
     for java_version in versions_to_install {
-        update(client, &java_version);
+        installed_any |= update(client, &java_version);
+    }
+
+    // An update leaves the superseded minor on disk on purpose - a command
+    // that downloads should not also delete, and the old JDK may still be
+    // wired into an open shell or an IDE. Point at `jlo clean` instead of
+    // doing it here.
+    if let Some(hint) = superseded_hint(installed_any, count_superseded()) {
+        ui::hint!("{hint}");
     }
 }
 
-fn update(client: &AdoptiumClient, java_version: &str) {
+/// How many installs `jlo clean` would remove, or 0 if that cannot be
+/// determined. A hint is not worth failing an otherwise successful update, so
+/// an unreadable JDK directory just means no hint.
+fn count_superseded() -> usize {
+    jdk_base_dir()
+        .and_then(|base| count_superseded_jdks(&base))
+        .unwrap_or(0)
+}
+
+/// The line `jlo update` ends on when this run left an older minor behind.
+///
+/// `None` when there is nothing to say: no install happened (the leftovers
+/// predate this run, and nagging on every no-op update trains the user to
+/// ignore the line), or nothing is superseded.
+fn superseded_hint(installed_any: bool, superseded: usize) -> Option<String> {
+    if !installed_any || superseded == 0 {
+        return None;
+    }
+
+    let plural = if superseded == 1 { "" } else { "s" };
+    Some(format!(
+        "{superseded} superseded JDK{plural} still installed - run 'jlo clean' to remove {}.",
+        if superseded == 1 { "it" } else { "them" }
+    ))
+}
+
+/// Returns whether a JDK was installed, so the caller can tell a real update
+/// from an already-current one.
+fn update(client: &AdoptiumClient, java_version: &str) -> bool {
     let jdk_metadata = client.fetch_metadata(java_version).unwrap_or_else(|e| {
         ui::error!("{e:#}");
         exit(1);
@@ -630,11 +667,13 @@ fn update(client: &AdoptiumClient, java_version: &str) {
 
     if find_installed_jdk(&jdk_metadata, &jdk_base).is_some() {
         ui::up_to_date(java_version, &jdk_metadata.semver);
+        false
     } else {
         install_jdk(client, &jdk_base, &jdk_metadata).unwrap_or_else(|e| {
             ui::error!("could not install JDK: {e:#}");
             exit(1);
         });
+        true
     }
 }
 
@@ -805,6 +844,38 @@ mod tests {
 
     fn owned(items: &[&str]) -> Vec<String> {
         items.iter().map(std::string::ToString::to_string).collect()
+    }
+
+    // -- superseded_hint --
+
+    #[test]
+    fn superseded_hint_names_the_command_and_the_count() {
+        let hint = superseded_hint(true, 2).expect("an install plus leftovers earns a hint");
+        assert!(hint.contains('2'), "hint should say how many: {hint}");
+        assert!(
+            hint.contains("jlo clean"),
+            "hint should name the command: {hint}"
+        );
+    }
+
+    #[test]
+    fn superseded_hint_singular_for_one() {
+        let hint = superseded_hint(true, 1).unwrap();
+        assert!(hint.contains("1 superseded JDK "), "{hint}");
+    }
+
+    /// Nothing was superseded, so pointing at `jlo clean` would send the user
+    /// to a command that removes nothing.
+    #[test]
+    fn superseded_hint_silent_when_nothing_is_superseded() {
+        assert!(superseded_hint(true, 0).is_none());
+    }
+
+    /// Every JDK was already current: the leftovers are pre-existing clutter,
+    /// not something this run caused, and `jlo update` would nag on every run.
+    #[test]
+    fn superseded_hint_silent_when_nothing_was_installed() {
+        assert!(superseded_hint(false, 3).is_none());
     }
 
     #[test]
