@@ -19,6 +19,17 @@ use std::process::exit;
 use tempfile::tempdir;
 
 fn main() {
+    // The easter egg is deliberately not a clap subcommand: `hide = true`
+    // only suppresses it from `--help`. `clap_complete` still emits hidden
+    // subcommands into generated completion scripts, and clap's "did you
+    // mean" suggestion engine still offers it for typos (e.g. `jlo sng`).
+    // Intercepting the raw token before `Cli::parse()` keeps it out of
+    // help, completions, and typo suggestions in one move.
+    if env::args().nth(1).as_deref() == Some("sing") {
+        eprintln!("There are no Easter Eggs in this program. Trust me. 💃");
+        return;
+    }
+
     let cli = cli::Cli::parse();
 
     let Some(command) = cli.command else {
@@ -47,9 +58,6 @@ fn main() {
         }
         cli::Command::Completions { shell } => cmd_completions(shell),
         cli::Command::Version => println!(env!("CARGO_PKG_VERSION")),
-        cli::Command::Sing => {
-            eprintln!("There are no Easter Eggs in this program. Trust me. 💃");
-        }
     }
 }
 

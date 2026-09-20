@@ -205,7 +205,6 @@ directly:
 
     /// Print the version
     Version,
-
-    #[command(hide = true)]
-    Sing,
+    // The `sing` easter egg is deliberately NOT a variant here - see
+    // `main`'s comment for why.
 }

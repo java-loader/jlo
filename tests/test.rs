@@ -184,15 +184,55 @@ fn exec_passes_hyphen_args_through_to_the_child() {
 }
 
 #[test]
-fn sing_is_hidden_from_help() {
-    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
-    cmd.arg("--help")
+fn sing_is_hidden_everywhere_but_still_works() {
+    // "sing" as a bare substring shows up inside ordinary words the help/
+    // completion text may legitimately contain (using, missing, parsing,
+    // ...), so check the whole word instead - case-insensitive since clap
+    // and shells don't care about case for this. `Not<RegexPredicate>`
+    // isn't `Clone`, so build a fresh one per assertion.
+    fn not_the_word_sing() -> predicates::boolean::NotPredicate<predicates::str::RegexPredicate, str>
+    {
+        predicate::str::is_match(r"(?i)\bsing\b").unwrap().not()
+    }
+
+    // `hide = true` only ever suppressed the `--help` listing; `sing` is no
+    // longer a clap subcommand at all, so this covers all three leaks in
+    // one command family: help, completions (both shells), and clap's own
+    // typo-suggestion engine.
+    let mut help = Command::cargo_bin("jlo-bin").unwrap();
+    help.arg("--help")
         .assert()
         .success()
-        .stdout(predicate::str::contains("sing").not());
+        .stdout(not_the_word_sing());
 
+    let mut bash = Command::cargo_bin("jlo-bin").unwrap();
+    bash.args(["completions", "bash"])
+        .assert()
+        .success()
+        .stdout(not_the_word_sing());
+
+    let mut zsh = Command::cargo_bin("jlo-bin").unwrap();
+    zsh.args(["completions", "zsh"])
+        .assert()
+        .success()
+        .stdout(not_the_word_sing());
+
+    // A typo must still be a real usage error - it must not silently
+    // succeed - and the suggestion it prints must not name the hidden
+    // command either.
+    let mut typo = Command::cargo_bin("jlo-bin").unwrap();
+    typo.arg("sng")
+        .assert()
+        .failure()
+        .stderr(not_the_word_sing());
+
+    // The easter egg itself must still work when invoked directly.
     let mut sing = Command::cargo_bin("jlo-bin").unwrap();
-    sing.arg("sing").assert().success();
+    sing.arg("sing")
+        .assert()
+        .success()
+        .code(0)
+        .stderr(predicate::str::contains("There are no Easter Eggs"));
 }
 
 #[test]
