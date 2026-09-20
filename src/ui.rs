@@ -1,7 +1,10 @@
+use crate::adoptium::RemoteJdk;
+use crate::store::InstalledJdk;
 use console::style;
 use indicatif::{ProgressBar, ProgressBarIter, ProgressStyle};
 use std::io::{IsTerminal, Read, stderr};
 use std::path::Path;
+use std::process::exit;
 use std::time::{Duration, Instant};
 
 /// The live progress region for one JDK installation.
@@ -263,6 +266,153 @@ pub(crate) fn clean_report(report: &crate::store::CleanReport) {
     }
 }
 
+/// The `jlo list --offline` listing: the JDKs already installed.
+///
+/// Every line of either listing starts with the major version, because that -
+/// not the full build version - is what `jlo update`, `jlo exec` and `.jlorc`
+/// take. Colours switch themselves off when stdout is not a terminal, so a pipe
+/// sees plain text.
+pub(crate) fn offline_list(installed: &[InstalledJdk], jdk_base: &Path) {
+    if installed.is_empty() {
+        eprintln!("No JDKs installed in {}.", jdk_base.display());
+        return;
+    }
+
+    let major_width = major_column_width(installed.iter().map(|jdk| jdk.major));
+
+    print_lines(installed.iter().map(|jdk| {
+        let row = format!(
+            "{:<major_width$}  {}",
+            style(jdk.major).dim(),
+            jdk.version,
+            major_width = major_width
+        );
+        if jdk.managed {
+            row
+        } else {
+            // `jlo clean` leaves these alone; say so rather than let the user
+            // wonder why a version never goes away.
+            format!("{} {}", row, style("(unmanaged)").dim())
+        }
+    }));
+}
+
+/// Width of the leading major-version column. Styling adds invisible escape
+/// bytes, so the width has to come from the plain numbers.
+fn major_column_width(majors: impl IntoIterator<Item = i64>) -> usize {
+    majors
+        .into_iter()
+        .map(|major| major.to_string().len())
+        .max()
+        .unwrap_or(0)
+}
+
+/// The `jlo list` listing: what Adoptium offers for this machine, annotated
+/// with what is installed locally.
+pub(crate) fn remote_list(available: &[RemoteJdk], installed: &[InstalledJdk]) {
+    if available.is_empty() {
+        eprintln!("Adoptium offers no JDKs for this OS and architecture.");
+        return;
+    }
+
+    let width = available
+        .iter()
+        .map(|jdk| jdk.version.len())
+        .max()
+        .unwrap_or(0);
+    let major_width = major_column_width(available.iter().map(|jdk| jdk.major));
+
+    print_lines(available.iter().map(|jdk| {
+        // The LTS tag is padded to its *visible* width - the styled string
+        // carries escape bytes that must not count towards the column.
+        let lts = if jdk.lts {
+            style("LTS").cyan().to_string()
+        } else {
+            "   ".to_string()
+        };
+
+        let status = match installed_status(jdk, installed) {
+            InstalledStatus::Latest => style("installed").green().to_string(),
+            InstalledStatus::Older(version) => {
+                style(format!("outdated ({version})")).yellow().to_string()
+            }
+            InstalledStatus::None => String::new(),
+        };
+
+        // Trailing whitespace is ugly in a terminal, so build the row and trim
+        // it rather than padding fields that may be empty.
+        format!(
+            "{:<major_width$}  {:<width$}  {}  {}",
+            style(jdk.major).dim(),
+            jdk.version,
+            lts,
+            status,
+            major_width = major_width,
+            width = width
+        )
+        .trim_end()
+        .to_string()
+    }));
+
+    if has_outdated(available, installed) {
+        // stderr, so the tip never lands in a pipe alongside the listing.
+        eprintln!(
+            "\n{} Use `{}` to update all outdated JDKs.",
+            style("TIP:").cyan().bold().for_stderr(),
+            style("jlo update --all").bold().for_stderr()
+        );
+    }
+}
+
+/// Whether any major version has an older build installed than Adoptium offers.
+fn has_outdated(available: &[RemoteJdk], installed: &[InstalledJdk]) -> bool {
+    available
+        .iter()
+        .any(|jdk| matches!(installed_status(jdk, installed), InstalledStatus::Older(_)))
+}
+
+/// `println!` panics when the reader goes away, and this output is meant to be
+/// piped (`jlo list | head`), so treat a closed pipe as a normal end of output.
+fn print_lines(lines: impl IntoIterator<Item = String>) {
+    use std::io::Write;
+
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    for line in lines {
+        match writeln!(out, "{line}") {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => return,
+            Err(e) => {
+                error!("could not write to stdout: {e}");
+                exit(1);
+            }
+        }
+    }
+}
+
+enum InstalledStatus {
+    /// The newest build Adoptium offers for this major version is installed.
+    Latest,
+    /// Some build of this major version is installed, but an older one.
+    Older(String),
+    None,
+}
+
+fn installed_status(jdk: &RemoteJdk, installed: &[InstalledJdk]) -> InstalledStatus {
+    if installed.iter().any(|i| i.version == jdk.version) {
+        return InstalledStatus::Latest;
+    }
+
+    match installed
+        .iter()
+        .find(|i| i.major == jdk.major)
+        .map(|i| i.version.clone())
+    {
+        Some(version) => InstalledStatus::Older(version),
+        None => InstalledStatus::None,
+    }
+}
+
 /// Whether stderr can carry a bar that redraws over itself.
 ///
 /// Being a terminal is not enough. Under `TERM=dumb` - Emacs `shell-mode`, some
@@ -390,5 +540,79 @@ mod tests {
         assert!(line.contains("~/.jdks/21.0.8"), "got: {line}");
         assert!(line.contains("(18s)"), "got: {line}");
         assert_eq!(line.lines().count(), 1, "got: {line}");
+    }
+
+    fn remote(version: &str, major: i64) -> RemoteJdk {
+        RemoteJdk {
+            version: version.to_string(),
+            major,
+            lts: false,
+        }
+    }
+
+    fn local(version: &str, major: i64) -> InstalledJdk {
+        InstalledJdk {
+            version: version.to_string(),
+            major,
+            managed: true,
+        }
+    }
+
+    #[test]
+    fn installed_status_exact_match_is_latest() {
+        let installed = vec![local("21.0.12+101.0.LTS", 21)];
+        assert!(matches!(
+            installed_status(&remote("21.0.12+101.0.LTS", 21), &installed),
+            InstalledStatus::Latest
+        ));
+    }
+
+    #[test]
+    fn installed_status_older_build_of_same_major_is_outdated() {
+        let installed = vec![local("21.0.11+10.0.LTS", 21)];
+        match installed_status(&remote("21.0.12+101.0.LTS", 21), &installed) {
+            InstalledStatus::Older(v) => assert_eq!(v, "21.0.11+10.0.LTS"),
+            _ => panic!("expected Older"),
+        }
+    }
+
+    #[test]
+    fn installed_status_other_majors_do_not_count() {
+        let installed = vec![local("17.0.20+101", 17)];
+        assert!(matches!(
+            installed_status(&remote("21.0.12+101.0.LTS", 21), &installed),
+            InstalledStatus::None
+        ));
+    }
+
+    #[test]
+    fn installed_status_reports_newest_local_build_of_the_major() {
+        // `JdkStore::list` yields newest first, so the first match for a
+        // major is the newest build the user has.
+        let installed = vec![local("21.0.11+10.0.LTS", 21), local("21.0.9+10.0.LTS", 21)];
+        match installed_status(&remote("21.0.12+101.0.LTS", 21), &installed) {
+            InstalledStatus::Older(v) => assert_eq!(v, "21.0.11+10.0.LTS"),
+            _ => panic!("expected Older"),
+        }
+    }
+
+    #[test]
+    fn has_outdated_is_true_when_a_major_has_an_older_build() {
+        let available = vec![remote("21.0.12+101.0.LTS", 21)];
+        let installed = vec![local("21.0.11+10.0.LTS", 21)];
+        assert!(has_outdated(&available, &installed));
+    }
+
+    #[test]
+    fn has_outdated_is_false_when_everything_is_current() {
+        let available = vec![remote("21.0.12+101.0.LTS", 21), remote("17.0.20+101", 17)];
+        let installed = vec![local("21.0.12+101.0.LTS", 21)];
+        assert!(!has_outdated(&available, &installed));
+    }
+
+    #[test]
+    fn has_outdated_is_false_with_nothing_installed() {
+        let available = vec![remote("21.0.12+101.0.LTS", 21)];
+        assert!(!has_outdated(&available, &[]));
     }
 }
