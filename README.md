@@ -69,17 +69,23 @@ This allows automatic discovery of installed JDKs by IDEs like IntelliJ IDEA.
 6. [Updating Java Versions](#updating-java-versions)
 7. [Cleaning Installed Versions](#cleaning-installed-versions)
 8. [Managing J’Lo Itself](#managing-jlo-itself)
+9. [Getting Help](#getting-help)
+10. [Shell Completions](#shell-completions)
 
 ## Environment Setup
 
 The command `jlo env` configures the current shell session by setting the `JAVA_HOME` and `PATH` environment variables
 to point to the desired JDK installation.
 
+`jlo use` is an alias for `jlo env`.
+
 **Behavior:**
 - If the current directory contains a `.jlorc` file, `jlo env` uses the version it specifies.
 - Otherwise, it falls back to `~/.jlo/default.jlorc`.
 - If the requested Java version is not installed, it will be downloaded and installed automatically.
 - This command affects only the current shell session.
+- VERSION is a major version only, e.g. `25`, not `25.0.5`. This applies everywhere a command takes a VERSION
+  argument.
 
 **Usage examples:**
 ```shell
@@ -263,6 +269,53 @@ by J'Lo itself.
 
 - The command `jlo version` prints the currently installed J’Lo version.
 - The command `jlo selfupdate` updates J’Lo itself to the latest version.
+
+## Getting Help
+
+Every command documents itself:
+
+```shell
+# overview of all commands
+jlo --help
+
+# details for one command, including its arguments
+jlo env --help
+jlo exec --help
+```
+
+Running `jlo` with no arguments prints the same overview as `jlo --help`. `-h` prints a shorter summary of the same
+help; `--help` prints the long form (with more explanation on subcommands).
+
+`jlo --version` (or `jlo version`) prints the installed version.
+
+## Shell Completions
+
+The installer generates completion scripts for **bash and zsh** and writes them to `$JLO_HOME/completions`, then
+prints the lines to add to your shell profile:
+
+```shell
+# Shell completions - bash:
+[[ -s "$JLO_HOME/completions/jlo.bash" ]] && source "$JLO_HOME/completions/jlo.bash"
+
+# Shell completions - zsh:
+(( $+functions[compdef] )) || { autoload -Uz compinit && compinit -u; }
+[[ -s "$JLO_HOME/completions/_jlo" ]] && source "$JLO_HOME/completions/_jlo"
+```
+
+Fish is not supported: the core `jlo` shell function (`jlo-init.sh`) is bash/zsh syntax and cannot be sourced from
+fish, so `jlo env`/`jlo use` don't work there regardless of completions. If you use fish anyway and still want
+completions for the subset of J'Lo that works as a plain binary, you can generate a script yourself:
+
+```shell
+jlo completions fish > ~/.config/fish/completions/jlo.fish
+```
+
+`jlo completions <shell>` supports `bash`, `elvish`, `fish`, `powershell` and `zsh`, and can also be used to load
+completions without a file:
+
+```shell
+source <(jlo completions bash)
+```
 
 # CI / scripting / AI agents
 
