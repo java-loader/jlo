@@ -1,4 +1,5 @@
 mod adoptium;
+mod cli;
 mod conf;
 mod extract;
 mod progress_bar;
@@ -8,6 +9,7 @@ use crate::adoptium::{
     find_installed_major_versions, find_suitable_jdk,
 };
 use anyhow::Context;
+use clap::Parser;
 use console::style;
 use std::collections::HashSet;
 use std::env;
@@ -17,75 +19,47 @@ use std::process::exit;
 use tempfile::tempdir;
 
 fn main() {
-    if env::args().len() < 2 {
-        eprintln!("Arguments missing.");
-        print_usage_and_exit()
-    }
+    let cli = cli::Cli::parse();
+
+    let Some(command) = cli.command else {
+        cli::print_help();
+        return;
+    };
 
     let api_url =
         env::var("JLO_ADOPTIUM_API_URL").unwrap_or_else(|_| adoptium::ADOPTIUM_API_URL.to_string());
     let client = AdoptiumClient::new(api_url);
 
-    // Get command
-    let command = &env::args().nth(1).expect("argument count checked above");
-    match command.as_str() {
-        "env" => {
-            cmd_env(&client);
-        }
-        "home" => {
-            cmd_home(&client);
-        }
-        "exec" => {
-            cmd_exec(&client);
-        }
-        "list" => {
-            cmd_list(&client);
-        }
-        "clean" => {
-            cmd_clean();
-        }
-        "default" => {
-            cmd_default();
-        }
-        "init" => {
-            cmd_init(&client);
-        }
-        "update" => {
-            cmd_update(&client);
-        }
-        "selfupdate" => {
-            eprintln!("Self-update is handled by the jlo shell function.");
+    match command {
+        cli::Command::Env { version } => cmd_env(&client, version),
+        cli::Command::Home { version } => cmd_home(&client, version),
+        cli::Command::Exec { args } => cmd_exec(&client, &args),
+        cli::Command::List { offline } => cmd_list(&client, offline),
+        cli::Command::Update { versions } => cmd_update(&client, versions),
+        cli::Command::Clean => cmd_clean(),
+        cli::Command::Init { version } => cmd_init(&client, version),
+        cli::Command::Default { version } => cmd_default(&version),
+        cli::Command::Selfupdate => {
+            eprintln!(
+                "Self-update is handled by the jlo shell function. Source jlo-init.sh from your shell profile, or re-run the installer."
+            );
             exit(1);
         }
-        "sing" => {
+        cli::Command::Completions { shell } => cmd_completions(shell),
+        cli::Command::Version => println!(env!("CARGO_PKG_VERSION")),
+        cli::Command::Sing => {
             eprintln!("There are no Easter Eggs in this program. Trust me. 💃");
-        }
-        "version" => {
-            println!(env!("CARGO_PKG_VERSION"));
-        }
-        _ => {
-            eprintln!("Unknown command: {command}");
-            print_usage_and_exit()
         }
     }
 }
 
-fn print_usage_and_exit() -> ! {
-    eprintln!(
-        "Usage: jlo [ env | home | exec | list | clean | default | init | update | selfupdate | version ]"
-    );
+fn cmd_completions(_shell: clap_complete::Shell) {
+    eprintln!("Error: not implemented yet.");
     exit(1);
 }
 
-/// Determine the requested major version: explicit CLI argument if present,
+/// Determine the requested major version: the explicit CLI argument if present,
 /// otherwise the project `.jlorc` / user default config.
-fn resolve_java_version() -> String {
-    let explicit = env::args().nth(2);
-    resolve_java_version_from(explicit)
-}
-
-/// Like [`resolve_java_version`] but with the explicit version supplied by the
-/// caller (used by `exec`, whose version is parsed out of its own arguments).
 fn resolve_java_version_from(explicit: Option<String>) -> String {
     let java_version = explicit.unwrap_or_else(|| {
         conf::load_config_java_version().unwrap_or_else(|e| {
@@ -98,16 +72,16 @@ fn resolve_java_version_from(explicit: Option<String>) -> String {
     java_version
 }
 
-fn cmd_env(client: &AdoptiumClient) {
-    let java_version = resolve_java_version();
+fn cmd_env(client: &AdoptiumClient, version: Option<String>) {
+    let java_version = resolve_java_version_from(version);
     if let Err(e) = setup(client, &java_version) {
         eprintln!("Error: {e:#}");
         exit(1);
     }
 }
 
-fn cmd_home(client: &AdoptiumClient) {
-    let java_version = resolve_java_version();
+fn cmd_home(client: &AdoptiumClient, version: Option<String>) {
+    let java_version = resolve_java_version_from(version);
     let java_home = resolve_java_home(client, &java_version).unwrap_or_else(|e| {
         eprintln!("Error: {e:#}");
         exit(1);
@@ -115,15 +89,38 @@ fn cmd_home(client: &AdoptiumClient) {
     println!("{}", java_home.to_string_lossy());
 }
 
-fn cmd_exec(client: &AdoptiumClient) {
-    let args: Vec<String> = env::args().skip(2).collect();
+fn cmd_exec(client: &AdoptiumClient, args: &[String]) {
+    let args = restore_leading_separator(args);
     let (version, command) = parse_exec_args(&args).unwrap_or_else(|e| {
         eprintln!("Error: {e}");
-        eprintln!("Usage: jlo exec [version] -- <command> [args...]");
+        eprintln!("Usage: jlo exec [VERSION] -- <COMMAND> [ARGS]...");
         exit(1);
     });
 
     run_exec(client, version, &command);
+}
+
+/// clap's `trailing_var_arg` treats a literal `--` as the options/positional
+/// boundary rather than a value whenever it is the very first token handed to
+/// the subcommand - which is exactly `jlo exec -- <command>` (version
+/// omitted). It gets consumed before reaching us, so `args` arrives here
+/// without the separator `parse_exec_args` requires. Detect that exact shape
+/// from the real argv and put the `--` back.
+fn restore_leading_separator(args: &[String]) -> Vec<String> {
+    let already_present = args.first().is_some_and(|a| a == "--");
+    let user_typed_it = env::args()
+        .skip_while(|a| a != "exec")
+        .nth(1)
+        .is_some_and(|a| a == "--");
+
+    if already_present || !user_typed_it {
+        return args.to_vec();
+    }
+
+    let mut restored = Vec::with_capacity(args.len() + 1);
+    restored.push("--".to_string());
+    restored.extend_from_slice(args);
+    restored
 }
 
 /// Resolve the JDK (installing on demand) and replace the current process with
@@ -236,19 +233,7 @@ fn exec_failure_code(kind: std::io::ErrorKind) -> i32 {
 /// Every line starts with the major version, because that - not the full build
 /// version - is what `jlo update`, `jlo exec` and `.jlorc` take. Colours switch
 /// themselves off when stdout is not a terminal, so a pipe sees plain text.
-fn cmd_list(client: &AdoptiumClient) {
-    let mut offline = false;
-    for arg in env::args().skip(2) {
-        match arg.as_str() {
-            "--offline" => offline = true,
-            other => {
-                eprintln!("Error: unknown option for list: '{other}'");
-                eprintln!("Usage: jlo list [--offline]");
-                exit(1);
-            }
-        }
-    }
-
+fn cmd_list(client: &AdoptiumClient, offline: bool) {
     let jdk_base = jdk_base_dir().unwrap_or_else(|e| {
         eprintln!("Error: {e:#}");
         exit(1);
@@ -420,21 +405,16 @@ fn cmd_clean() {
     });
 }
 
-fn cmd_default() {
-    let Some(java_version) = env::args().nth(2) else {
-        eprintln!("Error: Missing argument for default command.");
-        print_usage_and_exit();
-    };
-
-    assert_java_version(&java_version);
-    conf::init_default_config(&java_version).unwrap_or_else(|e| {
+fn cmd_default(java_version: &str) {
+    assert_java_version(java_version);
+    conf::init_default_config(java_version).unwrap_or_else(|e| {
         eprintln!("Error: Could not create default config file: {e:#}");
         exit(1);
     });
 }
 
-fn cmd_init(client: &AdoptiumClient) {
-    let java_version = env::args().nth(2).unwrap_or_else(|| {
+fn cmd_init(client: &AdoptiumClient, version: Option<String>) {
+    let java_version = version.unwrap_or_else(|| {
         client.latest_major().unwrap_or_else(|e| {
             eprintln!("Error: Could not fetch latest JDK version: {e:#}");
             exit(1);
@@ -449,19 +429,17 @@ fn cmd_init(client: &AdoptiumClient) {
     });
 }
 
-fn cmd_update(client: &AdoptiumClient) {
+fn cmd_update(client: &AdoptiumClient, versions: Vec<String>) {
     let mut versions_to_install: HashSet<String> = HashSet::new();
 
-    let args: Vec<String> = env::args().skip(2).collect();
-
-    if args.is_empty() {
+    if versions.is_empty() {
         let java_version = conf::load_config_java_version().unwrap_or_else(|e| {
             eprintln!("Error: Could not load configuration: {e:#}");
             exit(1);
         });
         versions_to_install.insert(java_version);
     } else {
-        if args.iter().any(|arg| arg == "all") {
+        if versions.iter().any(|arg| arg == "all") {
             find_installed_major_versions(&jdk_base_dir().unwrap_or_else(|e| {
                 eprintln!("Error: {e:#}");
                 exit(1);
@@ -476,13 +454,16 @@ fn cmd_update(client: &AdoptiumClient) {
             });
         }
 
-        args.into_iter().filter(|arg| arg != "all").for_each(|v| {
-            if conf::is_valid_version(&v) {
-                versions_to_install.insert(v);
-            } else {
-                eprintln!("Skipping invalid version: '{v}'.");
-            }
-        });
+        versions
+            .into_iter()
+            .filter(|arg| arg != "all")
+            .for_each(|v| {
+                if conf::is_valid_version(&v) {
+                    versions_to_install.insert(v);
+                } else {
+                    eprintln!("Skipping invalid version: '{v}'.");
+                }
+            });
 
         if versions_to_install.is_empty() {
             eprintln!("No valid Java versions provided to update.");

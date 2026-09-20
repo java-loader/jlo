@@ -7,13 +7,153 @@ use predicates::prelude::*;
 use serial_test::serial;
 
 #[test]
-fn missing_arguments() {
+fn bare_invocation_prints_help() {
     let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
     cmd.assert()
+        .success()
+        .code(0)
+        .stdout(predicate::str::contains("Usage: jlo"))
+        .stdout(predicate::str::contains("env"))
+        .stdout(predicate::str::contains("home"))
+        .stdout(predicate::str::contains("exec"))
+        .stdout(predicate::str::contains("list"))
+        .stdout(predicate::str::contains("update"))
+        .stdout(predicate::str::contains("clean"))
+        .stdout(predicate::str::contains("init"))
+        .stdout(predicate::str::contains("default"))
+        .stdout(predicate::str::contains("selfupdate"))
+        .stdout(predicate::str::contains("completions"))
+        .stdout(predicate::str::contains("version"));
+}
+
+#[test]
+fn help_flags_print_help() {
+    for flag in ["-h", "--help"] {
+        let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
+        cmd.arg(flag)
+            .assert()
+            .success()
+            .code(0)
+            .stdout(predicate::str::contains("Usage: jlo"));
+    }
+}
+
+#[test]
+fn help_mentions_version_resolution_and_examples() {
+    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
+    cmd.arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(".jlorc"))
+        .stdout(predicate::str::contains("default.jlorc"))
+        .stdout(predicate::str::contains("Examples:"))
+        .stdout(predicate::str::contains("jlo exec 21 -- ./gradlew build"));
+}
+
+#[test]
+fn version_flag_matches_version_subcommand() {
+    let mut flag = Command::cargo_bin("jlo-bin").unwrap();
+    let flag_out = flag
+        .arg("-V")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let flag_out = String::from_utf8(flag_out).unwrap();
+    assert!(flag_out.contains(env!("CARGO_PKG_VERSION")));
+
+    let mut sub = Command::cargo_bin("jlo-bin").unwrap();
+    sub.arg("version")
+        .assert()
+        .success()
+        .stdout(predicate::str::is_match(r"^\d+\.\d+\.\d+\n$").unwrap());
+}
+
+#[test]
+fn unknown_command_is_a_usage_error() {
+    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
+    cmd.arg("nosuchcmd")
+        .assert()
         .failure()
-        .code(1)
-        .stderr(predicate::str::contains(r"Arguments missing."))
-        .stdout("");
+        .code(2)
+        .stderr(predicate::str::contains("nosuchcmd"));
+}
+
+#[test]
+fn unknown_command_suggests_a_real_one() {
+    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
+    cmd.arg("enb")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("env"));
+}
+
+#[test]
+fn default_without_version_is_a_usage_error() {
+    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
+    cmd.arg("default")
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains("VERSION"));
+}
+
+#[test]
+fn every_subcommand_has_help() {
+    for sub in [
+        "env",
+        "home",
+        "exec",
+        "list",
+        "update",
+        "clean",
+        "init",
+        "default",
+        "selfupdate",
+        "completions",
+        "version",
+    ] {
+        let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
+        cmd.args([sub, "--help"])
+            .assert()
+            .success()
+            .code(0)
+            .stdout(predicate::str::contains("Usage: jlo"));
+    }
+}
+
+#[test]
+fn exec_help_is_not_passed_to_the_child() {
+    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
+    cmd.args(["exec", "--help"])
+        .assert()
+        .success()
+        .code(0)
+        .stdout(predicate::str::contains("Usage: jlo exec"));
+}
+
+#[test]
+fn exec_passes_hyphen_args_through_to_the_child() {
+    // `--help` after `--` belongs to the child, not to jlo. `true` ignores it
+    // and exits 0; jlo's own help would mention "Usage: jlo exec".
+    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
+    cmd.args(["exec", "--", "true", "--help"])
+        .env("JLO_ADOPTIUM_API_URL", "http://127.0.0.1:1")
+        .assert()
+        .stdout(predicate::str::contains("Usage: jlo exec").not());
+}
+
+#[test]
+fn sing_is_hidden_from_help() {
+    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
+    cmd.arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("sing").not());
+
+    let mut sing = Command::cargo_bin("jlo-bin").unwrap();
+    sing.arg("sing").assert().success();
 }
 
 #[test]
@@ -24,25 +164,6 @@ fn version() {
         .success()
         .code(0)
         .stdout(predicate::str::is_match(r"^\d+\.\d+\.\d+\n$").unwrap());
-}
-
-#[test]
-fn unknown_command() {
-    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
-    cmd.arg("nosuchcmd")
-        .assert()
-        .failure()
-        .code(1)
-        .stderr(predicate::str::contains("Unknown command: nosuchcmd"));
-}
-
-#[test]
-fn unknown_command_usage_mentions_list() {
-    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
-    cmd.arg("nosuchcmd")
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("list"));
 }
 
 #[test]
@@ -63,8 +184,8 @@ fn list_rejects_unknown_option() {
     cmd.args(["list", "--nope"])
         .assert()
         .failure()
-        .code(1)
-        .stderr(predicate::str::contains("unknown option"));
+        .code(2)
+        .stderr(predicate::str::contains("--nope"));
 }
 
 #[test]
@@ -137,16 +258,6 @@ fn init_with_version() {
 
     std::env::set_current_dir(std::env::temp_dir()).unwrap();
     temp_dir.close().unwrap();
-}
-
-#[test]
-fn default_missing_arg() {
-    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
-    cmd.arg("default")
-        .assert()
-        .failure()
-        .code(1)
-        .stderr(predicate::str::contains("Missing argument"));
 }
 
 #[test]
