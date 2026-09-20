@@ -487,7 +487,7 @@ fn init() {
         .code(1)
         .stderr(
             predicate::str::is_match(
-                r"Error: Could not create config file: File '.jlorc' already exists!",
+                r"Error: could not create config file: file '.jlorc' already exists",
             )
             .unwrap(),
         )

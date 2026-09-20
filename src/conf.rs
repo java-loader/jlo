@@ -12,7 +12,7 @@ pub(crate) fn load_config_java_version() -> anyhow::Result<String> {
     match load(Path::new(JLO_CONFIG_FILE)) {
         Ok(v) => return Ok(v),
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
-            return Err(anyhow!("Error: Could not load configuration: {e}"));
+            return Err(anyhow!("could not load configuration: {e}"));
         }
         Err(_) => {} // NotFound -> fall through to default config
     }
@@ -25,7 +25,7 @@ pub(crate) fn load_config_java_version() -> anyhow::Result<String> {
                 "Neither '{JLO_CONFIG_FILE}' nor the default config file found. Please run 'jlo init' to create a configuration file."
             )
         } else {
-            anyhow!("Error: Could not load configuration: {e}")
+            anyhow!("could not load configuration: {e}")
         }
     })
 }
@@ -94,7 +94,7 @@ fn init_config(path: &Path, latest_release: &str) -> anyhow::Result<()> {
         .open(path)
         .map_err(|e| {
             if e.kind() == std::io::ErrorKind::AlreadyExists {
-                anyhow!("File '{}' already exists!", path.display())
+                anyhow!("file '{}' already exists", path.display())
             } else {
                 anyhow!(e)
             }

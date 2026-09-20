@@ -83,7 +83,7 @@ fn main() {
         cli::Command::Default { version } => cmd_default(&version),
         cli::Command::Selfupdate => {
             ui::error!(
-                "Self-update is handled by the jlo shell function. Source jlo-init.sh from your shell profile, or re-run the installer."
+                "self-update is handled by the jlo shell function. Source jlo-init.sh from your shell profile, or re-run the installer."
             );
             exit(1);
         }
@@ -266,7 +266,7 @@ fn run_exec(client: &AdoptiumClient, version: Option<String>, command: &[String]
 // spawn-and-wait fallback that propagates the child's exit code.
 #[cfg(not(unix))]
 fn run_exec(_client: &AdoptiumClient, _version: Option<String>, _command: &[String]) -> ! {
-    ui::error!("'jlo exec' is not supported on this platform.");
+    ui::error!("'jlo exec' is not supported on this platform");
     exit(1);
 }
 
@@ -303,7 +303,7 @@ fn child_path(java_bin: &str, current_path: &str) -> anyhow::Result<String> {
     paths.extend(env::split_paths(current_path));
 
     Ok(env::join_paths(paths)
-        .context("Could not join PATH components")?
+        .context("could not join PATH components")?
         .to_str()
         .context("PATH contains non-UTF-8 characters")?
         .to_string())
@@ -364,7 +364,7 @@ fn cmd_list(client: &AdoptiumClient, offline: bool) {
         exit(1);
     });
     let installed = find_installed_jdks(&jdk_base).unwrap_or_else(|e| {
-        ui::error!("Could not list installed JDKs: {e:#}");
+        ui::error!("could not list installed JDKs: {e:#}");
         exit(1);
     });
 
@@ -372,7 +372,7 @@ fn cmd_list(client: &AdoptiumClient, offline: bool) {
         print_offline_list(&installed, &jdk_base);
     } else {
         let available = client.available_jdks().unwrap_or_else(|e| {
-            ui::error!("Could not fetch available JDKs: {e:#}");
+            ui::error!("{e:#}");
             ui::hint!("Use 'jlo list --offline' to list the JDKs already installed.");
             exit(1);
         });
@@ -525,7 +525,7 @@ fn cmd_clean() {
         exit(1);
     });
     let report = clean_jdks(&jdk_base).unwrap_or_else(|e| {
-        ui::error!("Could not clean JDKs: {e:#}");
+        ui::error!("could not clean JDKs: {e:#}");
         exit(1);
     });
     ui::clean_report(&report);
@@ -534,7 +534,7 @@ fn cmd_clean() {
 fn cmd_default(java_version: &str) {
     assert_java_version(java_version);
     conf::init_default_config(java_version).unwrap_or_else(|e| {
-        ui::error!("Could not create default config file: {e:#}");
+        ui::error!("could not create default config file: {e:#}");
         exit(1);
     });
 }
@@ -542,7 +542,7 @@ fn cmd_default(java_version: &str) {
 fn cmd_init(client: &AdoptiumClient, version: Option<String>) {
     let java_version = version.unwrap_or_else(|| {
         client.latest_major().unwrap_or_else(|e| {
-            ui::error!("Could not fetch latest JDK version: {e:#}");
+            ui::error!("could not fetch latest JDK version: {e:#}");
             exit(1);
         })
     });
@@ -550,7 +550,7 @@ fn cmd_init(client: &AdoptiumClient, version: Option<String>) {
     assert_java_version(&java_version);
 
     conf::init_project_config(&java_version).unwrap_or_else(|e| {
-        ui::error!("Could not create config file: {e:#}");
+        ui::error!("could not create config file: {e:#}");
         exit(1);
     });
 }
@@ -560,7 +560,7 @@ fn cmd_update(client: &AdoptiumClient, versions: Vec<String>) {
 
     if versions.is_empty() {
         let java_version = conf::load_config_java_version().unwrap_or_else(|e| {
-            ui::error!("Could not load configuration: {e:#}");
+            ui::error!("{e:#}");
             exit(1);
         });
         versions_to_install.insert(java_version);
@@ -571,7 +571,7 @@ fn cmd_update(client: &AdoptiumClient, versions: Vec<String>) {
                 exit(1);
             }))
             .unwrap_or_else(|e| {
-                ui::error!("Could not determine installed JDK versions: {e:#}");
+                ui::error!("could not determine installed JDK versions: {e:#}");
                 exit(1);
             })
             .into_iter()
@@ -587,12 +587,12 @@ fn cmd_update(client: &AdoptiumClient, versions: Vec<String>) {
                 if conf::is_valid_version(&v) {
                     versions_to_install.insert(v);
                 } else {
-                    ui::warning!("Skipping invalid version: '{v}'.");
+                    ui::warning!("skipping invalid version '{v}'");
                 }
             });
 
         if versions_to_install.is_empty() {
-            ui::error!("No valid Java versions provided to update.");
+            ui::error!("no valid Java versions provided to update");
             exit(1);
         }
     }
@@ -608,7 +608,7 @@ fn cmd_update(client: &AdoptiumClient, versions: Vec<String>) {
 
 fn update(client: &AdoptiumClient, java_version: &str) {
     let jdk_metadata = client.fetch_metadata(java_version).unwrap_or_else(|e| {
-        ui::error!("Could not fetch JDK metadata: {e:#}");
+        ui::error!("{e:#}");
         exit(1);
     });
 
@@ -621,7 +621,7 @@ fn update(client: &AdoptiumClient, java_version: &str) {
         ui::up_to_date(java_version, &jdk_metadata.semver);
     } else {
         install_jdk(client, &jdk_base, &jdk_metadata).unwrap_or_else(|e| {
-            ui::error!("Could not install JDK: {e:#}");
+            ui::error!("could not install JDK: {e:#}");
             exit(1);
         });
     }
@@ -708,7 +708,7 @@ fn install_jdk_inner(
     adoptium::install_jdk(jdk_metadata, temp_dir.path(), dest_dir, ui)?;
 
     temp_dir.close().unwrap_or_else(|err| {
-        ui::warning!("Could not delete temporary directory: {err}");
+        ui::warning!("could not delete temporary directory: {err}");
     });
 
     Ok(())
@@ -718,12 +718,12 @@ fn jlo_home_dir() -> anyhow::Result<PathBuf> {
     let path = env::var_os("JLO_HOME")
         .map(PathBuf::from)
         .or_else(env::home_dir)
-        .context("Could not determine home directory.")?;
+        .context("could not determine home directory.")?;
     Ok(path)
 }
 
 fn jdk_base_dir() -> anyhow::Result<PathBuf> {
-    let home = env::home_dir().context("Could not determine home directory")?;
+    let home = env::home_dir().context("could not determine home directory")?;
     Ok(jdk_base_dir_for(env::consts::OS, &home))
 }
 
@@ -756,7 +756,7 @@ fn update_path(
 
     // Join paths back into a single string
     let new_path = env::join_paths(path_vector)
-        .context("Could not join PATH components")?
+        .context("could not join PATH components")?
         .to_str()
         .context("PATH contains non-UTF-8 characters")?
         .to_string();
@@ -772,7 +772,7 @@ fn update_path(
 fn assert_java_version(java_version: &str) {
     if !conf::is_valid_version(java_version) {
         ui::error!(
-            "Unsupported version: '{java_version}'. Only major versions 8, 11, ... are supported."
+            "unsupported version '{java_version}': only major versions 8, 11, ... are supported"
         );
         exit(1);
     }

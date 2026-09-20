@@ -10,12 +10,12 @@ pub(crate) fn extract(file: &Path, dest: &Path, ui: &InstallUi) -> anyhow::Resul
     match file.extension().and_then(|s| s.to_str()) {
         Some("gz") => extract_tar_gz(file, dest, ui),
         Some("zip") => extract_zip(file, dest, ui),
-        _ => bail!("Unsupported archive format: {file:?}. Only .tar.gz and .zip are supported."),
+        _ => bail!("unsupported archive format: {file:?} (only .tar.gz and .zip are supported)"),
     }
 }
 
 fn extract_tar_gz(source: &Path, dest: &Path, ui: &InstallUi) -> anyhow::Result<()> {
-    let file = File::open(source).with_context(|| format!("Error opening archive {source:?}"))?;
+    let file = File::open(source).with_context(|| format!("could not open archive {source:?}"))?;
     ui.start_extract();
 
     let progress_reader = ui.wrap_read(BufReader::new(file));
@@ -24,20 +24,20 @@ fn extract_tar_gz(source: &Path, dest: &Path, ui: &InstallUi) -> anyhow::Result<
 
     archive
         .unpack(dest)
-        .with_context(|| format!("Error extracting archive {source:?}"))
+        .with_context(|| format!("could not extract archive {source:?}"))
 }
 
 fn extract_zip(source: &Path, dest: &Path, ui: &InstallUi) -> anyhow::Result<()> {
-    let file = File::open(source).with_context(|| format!("Error opening archive {source:?}"))?;
+    let file = File::open(source).with_context(|| format!("could not open archive {source:?}"))?;
     ui.start_extract();
 
     let progress_reader = ui.wrap_read(BufReader::new(file));
     let mut archive = zip::ZipArchive::new(progress_reader)
-        .with_context(|| format!("Error reading zip archive {source:?}"))?;
+        .with_context(|| format!("could not read zip archive {source:?}"))?;
 
     archive
         .extract(dest)
-        .with_context(|| format!("Error extracting archive {source:?}"))
+        .with_context(|| format!("could not extract archive {source:?}"))
 }
 
 #[cfg(test)]
@@ -97,6 +97,6 @@ mod tests {
             &InstallUi::hidden("test"),
         )
         .unwrap_err();
-        assert!(format!("{err:#}").contains("Unsupported archive format"));
+        assert!(format!("{err:#}").contains("unsupported archive format"));
     }
 }

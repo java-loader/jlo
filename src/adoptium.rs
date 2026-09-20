@@ -48,7 +48,7 @@ pub(crate) fn clean_jdks(jdk_base: &Path) -> anyhow::Result<CleanReport> {
         std::collections::HashMap::new();
     let mut report = CleanReport::default();
     let entries = std::fs::read_dir(jdk_base)
-        .with_context(|| format!("Can't read JDK base directory {jdk_base:?}"))?;
+        .with_context(|| format!("could not read JDK base directory {jdk_base:?}"))?;
 
     for entry in entries.filter_map(Result::ok) {
         let path = entry.path();
@@ -56,7 +56,7 @@ pub(crate) fn clean_jdks(jdk_base: &Path) -> anyhow::Result<CleanReport> {
             continue;
         }
         let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
-            crate::ui::warning!("Ignoring directory with invalid name: {path:?}");
+            crate::ui::warning!("ignoring directory with invalid name {path:?}");
             continue;
         };
         if !path.join(MARKER_FILE).exists() {
@@ -65,7 +65,7 @@ pub(crate) fn clean_jdks(jdk_base: &Path) -> anyhow::Result<CleanReport> {
             continue;
         }
         let Ok(semver) = semver_rs::parse(file_name, None) else {
-            crate::ui::warning!("Ignoring non-semver directory: {path:?}");
+            crate::ui::warning!("ignoring non-semver directory {path:?}");
             continue;
         };
         installed_jdks.entry(semver.major).or_default().push(path);
@@ -155,7 +155,8 @@ pub(crate) fn find_installed_jdks(jdk_base: &Path) -> anyhow::Result<Vec<Install
         Ok(entries) => entries,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => {
-            return Err(e).with_context(|| format!("Can't read JDK base directory {jdk_base:?}"));
+            return Err(e)
+                .with_context(|| format!("could not read JDK base directory {jdk_base:?}"));
         }
     };
 
@@ -191,7 +192,7 @@ pub(crate) fn find_installed_major_versions(jdk_base: &Path) -> anyhow::Result<V
     let mut major_versions = std::collections::HashSet::new();
 
     let entries = std::fs::read_dir(jdk_base)
-        .with_context(|| format!("Can't read JDK base directory {jdk_base:?}"))?;
+        .with_context(|| format!("could not read JDK base directory {jdk_base:?}"))?;
 
     for entry in entries.filter_map(Result::ok) {
         let path = entry.path();
@@ -219,8 +220,8 @@ pub(crate) fn install_jdk(
     ui: &InstallUi,
 ) -> anyhow::Result<()> {
     // Validate extracted path
-    let extracted_jdk_path =
-        find_jdk_path(jdk_metadata, source_dir).context("Could not find JDK directory")?;
+    let extracted_jdk_path = find_jdk_path(jdk_metadata, source_dir)
+        .context("could not find the extracted JDK directory")?;
 
     // Create destination directory
     ui.start_install();
@@ -251,12 +252,12 @@ fn find_jdk_path(jdk_metadata: &JdkMetadata, temp_dest: &Path) -> anyhow::Result
     if env::consts::OS == "windows" {
         let java_bin = extracted_jdk_path.join("bin").join("java.exe");
         if !java_bin.exists() {
-            bail!("Error: java executable is missing at: {java_bin:?}");
+            bail!("java executable is missing at {java_bin:?}");
         }
     } else {
         let java_bin = extracted_jdk_path.join("bin").join("java");
         if !java_bin.exists() {
-            bail!("Error: java executable is missing at: {java_bin:?}");
+            bail!("java executable is missing at {java_bin:?}");
         }
     }
 
@@ -329,7 +330,7 @@ impl TryFrom<Asset> for JdkMetadata {
             || metadata.download_link.is_empty()
             || metadata.checksum.is_empty()
         {
-            bail!("Incomplete metadata received from API.");
+            bail!("incomplete metadata received from the Adoptium API");
         }
         Ok(metadata)
     }
@@ -414,7 +415,7 @@ impl AdoptiumClient {
             .agent
             .get(api_url)
             .call()
-            .context("Could not fetch metadata from API")?;
+            .context("could not fetch metadata from the Adoptium API")?;
 
         if !response.status().is_success() {
             bail!(
@@ -426,7 +427,7 @@ impl AdoptiumClient {
         let assets: Vec<Asset> = response
             .body_mut()
             .read_json()
-            .context("Failed to parse JSON response")?;
+            .context("could not parse the Adoptium API response")?;
 
         Ok(assets.into_iter().next())
     }
@@ -490,7 +491,7 @@ impl AdoptiumClient {
             .agent
             .get(format!("{}/v3/info/available_releases", self.base_url))
             .call()
-            .context("Could not fetch available releases from API")?;
+            .context("could not fetch available releases from the Adoptium API")?;
 
         if !response.status().is_success() {
             bail!(
@@ -502,7 +503,7 @@ impl AdoptiumClient {
         response
             .body_mut()
             .read_json()
-            .context("Failed to parse JSON response")
+            .context("could not parse the Adoptium API response")
     }
 
     pub(crate) fn latest_major(&self) -> anyhow::Result<String> {
@@ -512,7 +513,7 @@ impl AdoptiumClient {
             .available_releases
             .into_iter()
             .max()
-            .context("No available releases found.")?;
+            .context("no available releases found")?;
 
         Ok(latest.to_string())
     }
@@ -527,7 +528,7 @@ impl AdoptiumClient {
 
         if !response.status().is_success() {
             bail!(
-                "Failed to download {} from {}: HTTP {}",
+                "could not download {} from {}: HTTP {}",
                 metadata.package_name,
                 metadata.download_link,
                 response.status()
@@ -537,7 +538,7 @@ impl AdoptiumClient {
         let total_size = response
             .body()
             .content_length()
-            .context("Failed to get content length")?;
+            .context("could not determine the download size: no Content-Length header")?;
 
         ui.start_download(total_size);
 
@@ -549,7 +550,7 @@ impl AdoptiumClient {
         loop {
             let n = reader
                 .read(&mut buffer)
-                .context("Could not read package data from response")?;
+                .context("could not read package data from the response")?;
             if n == 0 {
                 break;
             }
@@ -562,7 +563,7 @@ impl AdoptiumClient {
         let hash = hex::encode(hasher.finalize());
         if hash != metadata.checksum {
             bail!(
-                "Checksum mismatch: expected {}, got {}.",
+                "checksum mismatch: expected {}, got {}",
                 metadata.checksum,
                 hash
             );
@@ -576,7 +577,7 @@ fn jdk_os() -> anyhow::Result<&'static str> {
     match env::consts::OS {
         "linux" | "windows" | "solaris" | "aix" => Ok(env::consts::OS),
         "macos" => Ok("mac"),
-        _ => bail!("Unsupported OS: {}", env::consts::OS),
+        _ => bail!("unsupported OS: {}", env::consts::OS),
     }
 }
 
@@ -594,7 +595,7 @@ fn jdk_arch() -> anyhow::Result<&'static str> {
         "s390x" | "arm" | "aarch64" => Ok(env::consts::ARCH),
         "sparc64" => Ok("sparcv9"),
         "riscv64" => Ok("riscv64"),
-        _ => bail!("Unsupported architecture: {}", env::consts::ARCH),
+        _ => bail!("unsupported architecture: {}", env::consts::ARCH),
     }
 }
 
@@ -1065,7 +1066,7 @@ mod client_tests {
         let err = client.fetch_metadata("21").unwrap_err();
 
         assert!(
-            format!("{err:#}").contains("Failed to parse JSON response"),
+            format!("{err:#}").contains("could not parse the Adoptium API response"),
             "got: {err:#}"
         );
     }
@@ -1106,7 +1107,7 @@ mod client_tests {
         let err = client.fetch_metadata("21").unwrap_err();
 
         assert!(
-            format!("{err:#}").contains("Incomplete metadata"),
+            format!("{err:#}").contains("incomplete metadata"),
             "got: {err:#}"
         );
     }
@@ -1313,7 +1314,7 @@ mod client_tests {
             .unwrap_err();
 
         assert!(
-            format!("{err:#}").contains("Checksum mismatch"),
+            format!("{err:#}").contains("checksum mismatch"),
             "got: {err:#}"
         );
     }
@@ -1338,7 +1339,7 @@ mod client_tests {
             .unwrap_err();
 
         assert!(
-            format!("{err:#}").contains("content length"),
+            format!("{err:#}").contains("Content-Length"),
             "got: {err:#}"
         );
     }
@@ -1381,6 +1382,6 @@ mod client_tests {
 
         let msg = format!("{err:#}");
         assert!(msg.contains("HTTP 404"), "got: {msg}");
-        assert!(!msg.contains("Checksum mismatch"), "got: {msg}");
+        assert!(!msg.contains("checksum mismatch"), "got: {msg}");
     }
 }

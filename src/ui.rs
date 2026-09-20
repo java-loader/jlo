@@ -140,6 +140,22 @@ pub(crate) fn up_to_date(major: &str, version: &str) {
 
 /// Diagnostic prefixes.
 ///
+/// Message conventions, so diagnostics from different commands read as one
+/// voice:
+///
+/// - Text after `Error:`/`Warning:` starts lowercase and carries no trailing
+///   period, the way cargo and rustc phrase theirs. It is a clause following a
+///   label, not a sentence.
+/// - `anyhow` contexts follow the same rule: they compose into a chain printed
+///   after that label, so a context that says "Error opening archive" renders
+///   as "Error: Error opening archive".
+/// - Say "could not <verb>" - not "Failed to", "Can't" or "Error <verb>ing".
+/// - Do not restate the chain's first clause in the top-level message;
+///   `ui::error!("{e:#}")` is right when the context already names the
+///   operation.
+/// - Hints are the exception: they are advice rather than a label, so they stay
+///   sentence-cased with a full stop.
+///
 /// All four write to stderr and all four are `.for_stderr()`: `console::style`
 /// decides whether to emit colour by looking at *stdout*, and the `jlo` shell
 /// function runs `. <(jlo-bin env)`, so stdout is a pipe exactly when a user is
