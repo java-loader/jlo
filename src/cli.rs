@@ -202,9 +202,6 @@ directly:
         /// Shell to generate completions for
         shell: clap_complete::Shell,
     },
-
-    /// Print the version
-    Version,
     // The `sing` easter egg is deliberately NOT a variant here - see
     // `main`'s comment for why.
 }

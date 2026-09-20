@@ -22,8 +22,11 @@ fn bare_invocation_prints_help() {
         .stdout(predicate::str::contains("init"))
         .stdout(predicate::str::contains("default"))
         .stdout(predicate::str::contains("selfupdate"))
-        .stdout(predicate::str::contains("completions"))
-        .stdout(predicate::str::contains("version"));
+        .stdout(predicate::str::contains("completions"));
+    // No assertion for "version" here: since the `version` subcommand was
+    // removed, that substring would still match vacuously against the
+    // `-V, --version` line in the Options block, making it a false pass
+    // rather than real coverage of the subcommand list.
 }
 
 #[test]
@@ -76,7 +79,7 @@ fn init_help_states_the_default_when_version_is_omitted() {
 }
 
 #[test]
-fn version_flag_matches_version_subcommand() {
+fn version_flag_prints_the_crate_version() {
     let mut flag = Command::cargo_bin("jlo-bin").unwrap();
     let flag_out = flag
         .arg("-V")
@@ -88,11 +91,12 @@ fn version_flag_matches_version_subcommand() {
     let flag_out = String::from_utf8(flag_out).unwrap();
     assert!(flag_out.contains(env!("CARGO_PKG_VERSION")));
 
-    let mut sub = Command::cargo_bin("jlo-bin").unwrap();
-    sub.arg("version")
+    let mut long_flag = Command::cargo_bin("jlo-bin").unwrap();
+    long_flag
+        .arg("--version")
         .assert()
         .success()
-        .stdout(predicate::str::is_match(r"^\d+\.\d+\.\d+\n$").unwrap());
+        .stdout(predicate::str::contains(env!("CARGO_PKG_VERSION")));
 }
 
 #[test]
@@ -137,7 +141,6 @@ fn every_subcommand_has_help() {
         "default",
         "selfupdate",
         "completions",
-        "version",
     ] {
         let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
         cmd.args([sub, "--help"])
@@ -238,11 +241,23 @@ fn sing_is_hidden_everywhere_but_still_works() {
 #[test]
 fn version() {
     let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
-    cmd.arg("version")
+    cmd.arg("--version")
         .assert()
         .success()
         .code(0)
-        .stdout(predicate::str::is_match(r"^\d+\.\d+\.\d+\n$").unwrap());
+        .stdout(predicate::str::is_match(r"^jlo \d+\.\d+\.\d+\n$").unwrap());
+}
+
+#[test]
+fn version_subcommand_no_longer_exists() {
+    // `jlo version` was removed in favour of `-V`/`--version`; it must fail
+    // as an unrecognised subcommand, not silently keep working.
+    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
+    cmd.arg("version")
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains("unrecognized subcommand"));
 }
 
 #[test]

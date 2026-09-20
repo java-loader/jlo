@@ -267,7 +267,7 @@ by J'Lo itself.
 
 ## Managing J’Lo Itself
 
-- The command `jlo version` prints the currently installed J’Lo version.
+- `jlo --version` prints the currently installed J’Lo version.
 - The command `jlo selfupdate` updates J’Lo itself to the latest version.
 
 ## Getting Help
@@ -286,7 +286,7 @@ jlo exec --help
 Running `jlo` with no arguments prints the same overview as `jlo --help`. `-h` prints a shorter summary of the same
 help; `--help` prints the long form (with more explanation on subcommands).
 
-`jlo --version` (or `jlo version`) prints the installed version.
+`jlo --version` (or `jlo -V`) prints the installed version.
 
 ## Shell Completions
 

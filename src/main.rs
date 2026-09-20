@@ -57,7 +57,6 @@ fn main() {
             exit(1);
         }
         cli::Command::Completions { shell } => cmd_completions(shell),
-        cli::Command::Version => println!(env!("CARGO_PKG_VERSION")),
     }
 }
 

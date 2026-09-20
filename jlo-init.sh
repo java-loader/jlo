@@ -19,11 +19,11 @@ jlo() {
       . <("$J" "$@")
       ;;
     selfupdate)
-      echo -n "Version before update: "
-      "$J" version
+      echo -n "Before update: "
+      "$J" --version
       /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/java-loader/jlo/refs/heads/main/install.sh)"
-      echo -n "Version after update: "
-      "$J" version
+      echo -n "After update: "
+      "$J" --version
       ;;
     *)
       "$J" "$@"
