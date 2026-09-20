@@ -294,12 +294,14 @@ The installer generates completion scripts for **bash and zsh** and writes them 
 prints the lines to add to your shell profile:
 
 ```shell
-# Shell completions - bash:
-[[ -s "$JLO_HOME/completions/jlo.bash" ]] && source "$JLO_HOME/completions/jlo.bash"
-
-# Shell completions - zsh:
-(( $+functions[compdef] )) || { autoload -Uz compinit && compinit -u; }
-[[ -s "$JLO_HOME/completions/_jlo" ]] && source "$JLO_HOME/completions/_jlo"
+# Shell completions:
+if [ -n "$BASH_VERSION" ]; then
+  [[ -s "$JLO_HOME/completions/jlo.bash" ]] && source "$JLO_HOME/completions/jlo.bash"
+fi
+if [ -n "$ZSH_VERSION" ]; then
+  (( $+functions[compdef] )) || { autoload -Uz compinit && compinit -i; }
+  [[ -s "$JLO_HOME/completions/_jlo" ]] && source "$JLO_HOME/completions/_jlo"
+fi
 ```
 
 Fish is not supported: the core `jlo` shell function (`jlo-init.sh`) is bash/zsh syntax and cannot be sourced from

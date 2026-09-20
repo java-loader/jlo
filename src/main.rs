@@ -30,6 +30,36 @@ fn main() {
         return;
     }
 
+    // TRANSITION SHIM - delete after the next release.
+    //
+    // The `version` subcommand was removed in favour of `-V`/`--version`.
+    // But `jlo selfupdate` swaps the binary out from under an *already
+    // resident* shell function: the old `jlo-init.sh` body (sourced before
+    // the update ran) calls `"$J" version` itself, right after invoking
+    // this same new binary to install itself. Without this shim, someone's
+    // very first selfupdate onto this release ends with the new binary
+    // rejecting the old wrapper's `version` call:
+    //
+    //   Version before update: 0.2.0
+    //   ...installer output...
+    //   Version after update: error: unrecognized subcommand 'version'
+    //
+    // The update itself succeeded, but it looks broken and the wrapper
+    // returns a nonzero exit code. Print the bare crate version - not
+    // clap's `jlo 0.2.0` form - so the old wrapper's
+    // `echo -n "..."; "$J" --version` output still reads as a clean
+    // version string.
+    //
+    // This intercepts the raw token before `Cli::parse()`, exactly like
+    // the `sing` easter egg above and for the same reason: putting
+    // `version` back in the `Command` enum would reintroduce it into
+    // `--help`, generated completions, and clap's typo-suggestion engine,
+    // which is precisely the drift this CLI rewrite exists to eliminate.
+    if env::args().nth(1).as_deref() == Some("version") {
+        println!(env!("CARGO_PKG_VERSION"));
+        return;
+    }
+
     let cli = cli::Cli::parse();
 
     let Some(command) = cli.command else {

@@ -8,7 +8,9 @@
 use clap::{Parser, Subcommand};
 
 const AFTER_HELP: &str = "\
-When VERSION is omitted it is resolved from ./.jlorc, then ~/.jlo/default.jlorc.
+When VERSION is omitted, env, home, exec and update resolve it from ./.jlorc,
+then ~/.jlo/default.jlorc. init instead pins the latest release, and default
+requires VERSION outright.
 
 Examples:
   jlo env 25                       Use Java 25 in this shell
@@ -40,8 +42,9 @@ pub(crate) fn print_help() {
     use clap::CommandFactory;
 
     // A closed stdout (`jlo | head`) is not an error worth reporting.
+    // `print_help` already ends its output with a newline; an extra
+    // `println!()` here would double it and desync `jlo` from `jlo --help`.
     let _ = Cli::command().print_help();
-    println!();
 }
 
 /// Print `jlo exec`'s own help, exactly as `jlo exec -h`/`jlo exec --help`
@@ -65,13 +68,15 @@ pub(crate) fn print_exec_help(long: bool) {
         .expect("the `exec` subcommand is always registered");
     // A closed stdout (`jlo exec 21 --help | head`) is not an error worth
     // reporting.
+    // `print_help`/`print_long_help` already end their output with a
+    // newline; an extra `println!()` here would double it (see the
+    // corresponding comment in `print_help`).
     let result = if long {
         exec.print_long_help()
     } else {
         exec.print_help()
     };
     let _ = result;
-    println!();
 }
 
 #[derive(Debug, Subcommand)]
@@ -133,7 +138,12 @@ The literal -- separates the optional version from the command:
   jlo exec -- java -version
 
 JAVA_HOME is set and the JDK's bin directory is prepended to PATH for
-the child only; the current shell is untouched."
+the child only; the current shell is untouched.",
+        // The default rendering (`Usage: jlo exec [ARGS]...`) reads as
+        // free-form optional args and hides the mandatory `--`. Match the
+        // usage line `cmd_exec`'s own error path prints on a parse
+        // failure (main.rs), so `-h` and the error agree.
+        override_usage = "jlo exec [VERSION] -- <COMMAND> [ARGS]..."
     )]
     Exec {
         /// [VERSION] -- <COMMAND>...

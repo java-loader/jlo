@@ -68,12 +68,16 @@ fi
 # subprocess. A failure here is a convenience lost, not a broken install.
 JLO_COMPLETION_DIR="$JLO_HOME/completions"
 if mkdir -p "$JLO_COMPLETION_DIR" 2>/dev/null; then
-  if ! "$JLO_TARGET" completions bash > "$JLO_COMPLETION_DIR/jlo.bash"; then
-    rm -f "$JLO_COMPLETION_DIR/jlo.bash"
+  if "$JLO_TARGET" completions bash > "$JLO_COMPLETION_DIR/jlo.bash.tmp"; then
+    mv -f "$JLO_COMPLETION_DIR/jlo.bash.tmp" "$JLO_COMPLETION_DIR/jlo.bash"
+  else
+    rm -f "$JLO_COMPLETION_DIR/jlo.bash.tmp"
     echo "Warning: could not generate bash completions." >&2
   fi
-  if ! "$JLO_TARGET" completions zsh > "$JLO_COMPLETION_DIR/_jlo"; then
-    rm -f "$JLO_COMPLETION_DIR/_jlo"
+  if "$JLO_TARGET" completions zsh > "$JLO_COMPLETION_DIR/_jlo.tmp"; then
+    mv -f "$JLO_COMPLETION_DIR/_jlo.tmp" "$JLO_COMPLETION_DIR/_jlo"
+  else
+    rm -f "$JLO_COMPLETION_DIR/_jlo.tmp"
     echo "Warning: could not generate zsh completions." >&2
   fi
 else
@@ -91,12 +95,14 @@ export JLO_HOME="\$HOME/.jlo"
 [[ -s "\$JLO_HOME/bin/jlo-init.sh" ]] && source "\$JLO_HOME/bin/jlo-init.sh"
 [[ -s "\$JLO_HOME/bin/jlo-autoload.sh" ]] && source "\$JLO_HOME/bin/jlo-autoload.sh"
 
-# Shell completions - bash:
-[[ -s "\$JLO_HOME/completions/jlo.bash" ]] && source "\$JLO_HOME/completions/jlo.bash"
-
-# Shell completions - zsh:
-(( \$+functions[compdef] )) || { autoload -Uz compinit && compinit -u; }
-[[ -s "\$JLO_HOME/completions/_jlo" ]] && source "\$JLO_HOME/completions/_jlo"
+# Shell completions:
+if [ -n "\$BASH_VERSION" ]; then
+  [[ -s "\$JLO_HOME/completions/jlo.bash" ]] && source "\$JLO_HOME/completions/jlo.bash"
+fi
+if [ -n "\$ZSH_VERSION" ]; then
+  (( \$+functions[compdef] )) || { autoload -Uz compinit && compinit -i; }
+  [[ -s "\$JLO_HOME/completions/_jlo" ]] && source "\$JLO_HOME/completions/_jlo"
+fi
 
 Then restart your terminal or execute the above lines in your current shell session.
 

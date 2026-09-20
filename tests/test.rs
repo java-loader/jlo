@@ -162,6 +162,23 @@ fn exec_help_is_not_passed_to_the_child() {
 }
 
 #[test]
+fn exec_usage_line_shows_the_mandatory_separator() {
+    // clap's default rendering for a `trailing_var_arg` positional
+    // (`Usage: jlo exec [ARGS]...`) reads as free-form optional args and
+    // hides that `--` is mandatory. `override_usage` must make `-h` agree
+    // with the usage line `cmd_exec`'s own parse-error path already prints
+    // (main.rs): "Usage: jlo exec [VERSION] -- <COMMAND> [ARGS]...".
+    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
+    cmd.args(["exec", "-h"])
+        .assert()
+        .success()
+        .code(0)
+        .stdout(predicate::str::contains(
+            "Usage: jlo exec [VERSION] -- <COMMAND> [ARGS]...",
+        ));
+}
+
+#[test]
 fn exec_help_still_shows_after_an_explicit_version() {
     // Once a version has bound to the `args` positional, clap's own
     // `-h`/`--help` interception no longer fires on its own (it only
@@ -249,15 +266,94 @@ fn version() {
 }
 
 #[test]
-fn version_subcommand_no_longer_exists() {
-    // `jlo version` was removed in favour of `-V`/`--version`; it must fail
-    // as an unrecognised subcommand, not silently keep working.
-    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
-    cmd.arg("version")
+fn version_subcommand_is_a_transition_shim_hidden_from_discovery() {
+    // `jlo version` was removed from the clap `Command` enum in favour of
+    // `-V`/`--version`, in the same commit that added the `sing` easter
+    // egg's raw-argv interception - `hide = true` would only suppress it
+    // from `--help`, not from generated completions or clap's typo
+    // suggestions. But unlike `sing`, `version` isn't gone: a transition
+    // shim (see the comment in `main.rs`, just before `Cli::parse()`)
+    // keeps it *working* for one release, because the OLD `jlo` shell
+    // function - already resident in a user's shell at `selfupdate` time -
+    // calls `"$J" version` itself, against the newly-installed binary.
+    //
+    // "version" legitimately appears elsewhere in this output (the
+    // `-V, --version` option, and JAVA_HOME/`.jlorc` prose that talks
+    // about "a version"), so unlike the `sing` test this can't assert the
+    // word is wholly absent. Each check below targets the specific shape a
+    // *subcommand* entry would take, distinguishing it from those
+    // legitimate occurrences - `.contains("version")` would false-positive
+    // on `--version` and on that prose.
+
+    // The shim prints the bare crate version - not clap's `jlo 0.2.0` form
+    // - so the old wrapper's `echo -n "..."; "$J" --version` output still
+    // reads as a clean version string.
+    let mut shim = Command::cargo_bin("jlo-bin").unwrap();
+    shim.arg("version")
+        .assert()
+        .success()
+        .code(0)
+        .stdout(format!("{}\n", env!("CARGO_PKG_VERSION")));
+
+    // No "  version" line in the Commands: list (as opposed to the
+    // "  -V, --version  Print version" Options line, which starts with
+    // "-V," not "version").
+    let mut help = Command::cargo_bin("jlo-bin").unwrap();
+    help.arg("--help").assert().success().stdout(
+        predicate::str::is_match(r"(?m)^\s*version(\s|$)")
+            .unwrap()
+            .not(),
+    );
+
+    // No `jlo,version)`/`jlo__subcmd__version` case in the generated bash
+    // completion script - that's the shape every *real* subcommand takes
+    // there (see e.g. `jlo,home)` / `cmd="jlo__subcmd__home"`).
+    let mut bash = Command::cargo_bin("jlo-bin").unwrap();
+    bash.args(["completions", "bash"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::is_match(r"jlo,version\)|jlo__subcmd__version")
+                .unwrap()
+                .not(),
+        );
+
+    // No `'version:...'` entry in the generated zsh completion script -
+    // that's the shape every *real* subcommand takes there (see e.g.
+    // `'home:Print the JAVA_HOME path for a version' \`, where "home" is
+    // the command and "version" only appears inside its description).
+    let mut zsh = Command::cargo_bin("jlo-bin").unwrap();
+    zsh.args(["completions", "zsh"])
+        .assert()
+        .success()
+        .stdout(predicate::str::is_match(r"(?m)^'version:").unwrap().not());
+
+    // A typo must still be a real usage error, and since the shim isn't a
+    // clap subcommand, clap's "did you mean" engine can't offer it either.
+    let mut typo = Command::cargo_bin("jlo-bin").unwrap();
+    typo.arg("vrsion")
         .assert()
         .failure()
-        .code(2)
-        .stderr(predicate::str::contains("unrecognized subcommand"));
+        .stderr(predicate::str::is_match(r"(?i)\bversion\b").unwrap().not());
+}
+
+#[test]
+fn bare_invocation_matches_help_flag_byte_for_byte() {
+    // `jlo` (exploration) and `jlo --help` (usage error convention) must
+    // print the identical overview - only the exit-code handling in `main`
+    // differs. A stray extra `println!()` in either `cli::print_help` call
+    // site would desync them by one trailing newline.
+    let bare = Command::cargo_bin("jlo-bin").unwrap().assert().success();
+    let bare_stdout = bare.get_output().stdout.clone();
+
+    let help = Command::cargo_bin("jlo-bin")
+        .unwrap()
+        .arg("--help")
+        .assert()
+        .success();
+    let help_stdout = help.get_output().stdout.clone();
+
+    assert_eq!(bare_stdout, help_stdout);
 }
 
 #[test]

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 jlo() {
+  local J arg
   J="$JLO_HOME/bin/jlo-bin"
   case "$1" in
     env|use)
