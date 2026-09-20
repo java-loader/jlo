@@ -9,7 +9,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Install Rust (if needed)
         run: rustup update
@@ -24,7 +24,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Check advisories, licenses, bans and sources
         uses: EmbarkStudios/cargo-deny-action@v2
@@ -43,7 +43,7 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Install Rust (if needed)
         run: rustup update
@@ -61,7 +61,7 @@ jobs:
         run: tar --no-same-owner -czf ${{ matrix.package }}.tar.gz jlo-autoload.sh jlo-init.sh -C target/release jlo-bin
 
       - name: Upload package
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.package }}-artifact
           path: jlo-*.tar.gz
