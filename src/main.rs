@@ -414,7 +414,7 @@ fn cmd_list(client: &AdoptiumClient, offline: bool) -> Result<(), CommandError> 
     let installed = store.list().context("could not list installed JDKs")?;
 
     if offline {
-        ui::offline_list(&installed, store.base());
+        ui::offline_list(&installed, &store);
     } else {
         let available = client.available_jdks().map_err(|e| {
             CommandError::with_hint(
@@ -475,12 +475,13 @@ fn cmd_update(
     versions: Vec<String>,
     all: bool,
 ) -> Result<(), CommandError> {
+    let store = JdkStore::discover()?;
     let mut versions_to_install: HashSet<String> = HashSet::new();
 
     // `--all` and explicit versions are mutually exclusive (clap enforces it),
     // so these three arms are the whole input space.
     if all {
-        JdkStore::discover()?
+        store
             .installed_majors()
             .context("could not determine installed JDK versions")?
             .into_iter()
@@ -513,14 +514,14 @@ fn cmd_update(
 
     let mut installed_any = false;
     for java_version in versions_to_install {
-        installed_any |= update(client, &java_version)?;
+        installed_any |= update(client, &store, &java_version)?;
     }
 
     // An update leaves the superseded minor on disk on purpose - a command
     // that downloads should not also delete, and the old JDK may still be
     // wired into an open shell or an IDE. Point at `jlo clean` instead of
     // doing it here.
-    if let Some(hint) = superseded_hint(installed_any, count_superseded()) {
+    if let Some(hint) = superseded_hint(installed_any, count_superseded(&store)) {
         ui::hint!("{hint}");
     }
 
@@ -530,10 +531,8 @@ fn cmd_update(
 /// How many installs `jlo clean` would remove, or 0 if that cannot be
 /// determined. A hint is not worth failing an otherwise successful update, so
 /// an unreadable JDK directory just means no hint.
-fn count_superseded() -> usize {
-    JdkStore::discover()
-        .and_then(|store| store.superseded_count())
-        .unwrap_or(0)
+fn count_superseded(store: &JdkStore) -> usize {
+    store.superseded_count().unwrap_or(0)
 }
 
 /// The line `jlo update` ends on when this run left an older minor behind.
@@ -555,15 +554,14 @@ fn superseded_hint(installed_any: bool, superseded: usize) -> Option<String> {
 
 /// Returns whether a JDK was installed, so the caller can tell a real update
 /// from an already-current one.
-fn update(client: &AdoptiumClient, java_version: &str) -> anyhow::Result<bool> {
+fn update(client: &AdoptiumClient, store: &JdkStore, java_version: &str) -> anyhow::Result<bool> {
     let jdk_metadata = client.fetch_metadata(java_version)?;
-    let store = JdkStore::discover()?;
 
     if store.find_exact(&jdk_metadata).is_some() {
         ui::up_to_date(java_version, &jdk_metadata.semver);
         Ok(false)
     } else {
-        install_jdk(client, &store, &jdk_metadata).context("could not install JDK")?;
+        install_jdk(client, store, &jdk_metadata).context("could not install JDK")?;
         Ok(true)
     }
 }

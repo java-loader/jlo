@@ -1,5 +1,5 @@
 use crate::adoptium::RemoteJdk;
-use crate::store::InstalledJdk;
+use crate::store::{InstalledJdk, JdkStore};
 use console::style;
 use indicatif::{ProgressBar, ProgressBarIter, ProgressStyle};
 use std::io::{IsTerminal, Read, stderr};
@@ -272,9 +272,9 @@ pub(crate) fn clean_report(report: &crate::store::CleanReport) {
 /// not the full build version - is what `jlo update`, `jlo exec` and `.jlorc`
 /// take. Colours switch themselves off when stdout is not a terminal, so a pipe
 /// sees plain text.
-pub(crate) fn offline_list(installed: &[InstalledJdk], jdk_base: &Path) {
+pub(crate) fn offline_list(installed: &[InstalledJdk], store: &JdkStore) {
     if installed.is_empty() {
-        eprintln!("No JDKs installed in {}.", jdk_base.display());
+        eprintln!("No JDKs installed in {}.", store.base().display());
         return;
     }
 

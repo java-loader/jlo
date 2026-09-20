@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 
 const MARKER_FILE: &str = ".jlo-managed";
 
-/// What a `jlo clean` run did, so the caller owns the presentation and this
-/// function owns only the filesystem work.
+/// What a `jlo clean` run did, so the caller owns the presentation and
+/// [`JdkStore::clean`] owns only the filesystem work.
 #[derive(Debug, Default)]
 pub(crate) struct CleanReport {
     /// `(major, removed version names)`, newest major first. Only versions
@@ -72,8 +72,9 @@ impl JdkStore {
         Self { base: base.into() }
     }
 
-    /// The install directory itself. Needed only by PATH rewriting, which has
-    /// to know which PATH entries J'Lo owns.
+    /// The install directory itself, for the two places that have to name it:
+    /// PATH rewriting, which has to know which PATH entries J'Lo owns, and the
+    /// empty `jlo list --offline` line, which says where it looked.
     pub(crate) fn base(&self) -> &Path {
         &self.base
     }
@@ -103,7 +104,10 @@ impl JdkStore {
             .collect())
     }
 
-    /// The newest installed JDK whose version matches `major`, if any.
+    /// The newest installed JDK whose directory name starts with `major`, if
+    /// any. A prefix match, not a semver comparison: `major` has passed
+    /// [`crate::conf::is_valid_version`], so it is a bare integer, and only a
+    /// directory named something like `21-broken` would match spuriously.
     pub(crate) fn find_matching(&self, major: &str) -> Option<PathBuf> {
         let mut matching_versions = self.scan().ok()?;
         matching_versions.retain(|candidate| {
