@@ -94,8 +94,9 @@ export JLO_HOME="\$HOME/.jlo"
 # Shell completions - bash:
 [[ -s "\$JLO_HOME/completions/jlo.bash" ]] && source "\$JLO_HOME/completions/jlo.bash"
 
-# Shell completions - zsh (this line must come BEFORE your 'compinit' call):
-fpath=("\$JLO_HOME/completions" \$fpath)
+# Shell completions - zsh:
+(( \$+functions[compdef] )) || { autoload -Uz compinit && compinit -u; }
+[[ -s "\$JLO_HOME/completions/_jlo" ]] && source "\$JLO_HOME/completions/_jlo"
 
 Then restart your terminal or execute the above lines in your current shell session.
 
