@@ -1,4 +1,4 @@
-use crate::progress_bar::setup_progress_bar;
+use crate::ui::InstallUi;
 use anyhow::{Context, bail};
 use flate2::bufread::GzDecoder;
 use std::fs::File;
@@ -6,72 +6,38 @@ use std::io::BufReader;
 use std::path::Path;
 use tar::Archive;
 
-pub(crate) fn extract(file: &Path, dest: &Path) -> anyhow::Result<()> {
+pub(crate) fn extract(file: &Path, dest: &Path, ui: &InstallUi) -> anyhow::Result<()> {
     match file.extension().and_then(|s| s.to_str()) {
-        Some("gz") => extract_tar_gz(file, dest),
-        Some("zip") => extract_zip(file, dest),
+        Some("gz") => extract_tar_gz(file, dest, ui),
+        Some("zip") => extract_zip(file, dest, ui),
         _ => bail!("Unsupported archive format: {file:?}. Only .tar.gz and .zip are supported."),
     }
 }
 
-fn extract_tar_gz(source: &Path, dest: &Path) -> anyhow::Result<()> {
+fn extract_tar_gz(source: &Path, dest: &Path, ui: &InstallUi) -> anyhow::Result<()> {
     let file = File::open(source).with_context(|| format!("Error opening archive {source:?}"))?;
-    let metadata = file
-        .metadata()
-        .with_context(|| format!("Error reading metadata of {source:?}"))?;
-    let pb = setup_progress_bar("Extracting", metadata.len());
+    ui.start_extract();
 
-    let buffered_file = BufReader::new(file);
-    let progress_reader = pb.wrap_read(buffered_file);
+    let progress_reader = ui.wrap_read(BufReader::new(file));
     let decompressor = GzDecoder::new(progress_reader);
     let mut archive = Archive::new(decompressor);
 
-    let result = archive
+    archive
         .unpack(dest)
-        .with_context(|| format!("Error extracting archive {source:?}"));
-
-    match &result {
-        Ok(()) => {
-            pb.finish_and_clear();
-            eprintln!("✅ Extraction complete.");
-        }
-        Err(e) => {
-            pb.abandon_with_message("❌ Extraction failed!");
-            eprintln!("Error: {e}");
-        }
-    }
-
-    result
+        .with_context(|| format!("Error extracting archive {source:?}"))
 }
 
-fn extract_zip(source: &Path, dest: &Path) -> anyhow::Result<()> {
+fn extract_zip(source: &Path, dest: &Path, ui: &InstallUi) -> anyhow::Result<()> {
     let file = File::open(source).with_context(|| format!("Error opening archive {source:?}"))?;
-    let metadata = file
-        .metadata()
-        .with_context(|| format!("Error reading metadata of {source:?}"))?;
-    let pb = setup_progress_bar("Extracting", metadata.len());
+    ui.start_extract();
 
-    let buffered_file = BufReader::new(file);
-    let progress_reader = pb.wrap_read(buffered_file);
+    let progress_reader = ui.wrap_read(BufReader::new(file));
     let mut archive = zip::ZipArchive::new(progress_reader)
         .with_context(|| format!("Error reading zip archive {source:?}"))?;
 
-    let result = archive
+    archive
         .extract(dest)
-        .with_context(|| format!("Error extracting archive {source:?}"));
-
-    match &result {
-        Ok(()) => {
-            pb.finish_and_clear();
-            eprintln!("✅ Extraction complete.");
-        }
-        Err(e) => {
-            pb.abandon_with_message("❌ Extraction failed!");
-            eprintln!("Error: {e}");
-        }
-    }
-
-    result
+        .with_context(|| format!("Error extracting archive {source:?}"))
 }
 
 #[cfg(test)]
@@ -110,7 +76,7 @@ mod tests {
         zip.finish().unwrap();
 
         let dest = dir.path().join("out");
-        extract(&archive_path, &dest).unwrap();
+        extract(&archive_path, &dest, &InstallUi::hidden("test")).unwrap();
 
         assert_eq!(
             std::fs::read(dest.join("jdk/bin/java")).unwrap(),
@@ -125,7 +91,12 @@ mod tests {
     #[test]
     fn rejects_unsupported_archive_format() {
         let dir = tempdir().unwrap();
-        let err = extract(&dir.path().join("jdk.7z"), dir.path()).unwrap_err();
+        let err = extract(
+            &dir.path().join("jdk.7z"),
+            dir.path(),
+            &InstallUi::hidden("test"),
+        )
+        .unwrap_err();
         assert!(format!("{err:#}").contains("Unsupported archive format"));
     }
 }

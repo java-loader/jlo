@@ -2,12 +2,13 @@ mod adoptium;
 mod cli;
 mod conf;
 mod extract;
-mod progress_bar;
+mod ui;
 
 use crate::adoptium::{
     AdoptiumClient, JdkMetadata, RemoteJdk, clean_jdks, find_installed_jdk, find_installed_jdks,
     find_installed_major_versions, find_suitable_jdk,
 };
+use crate::ui::InstallUi;
 use anyhow::Context;
 use clap::Parser;
 use console::style;
@@ -463,8 +464,8 @@ fn print_remote_list(available: &[RemoteJdk], installed: &[adoptium::InstalledJd
         // stderr, so the tip never lands in a pipe alongside the listing.
         eprintln!(
             "\n{} Use `{}` to update all outdated JDKs.",
-            style("TIP:").cyan().bold(),
-            style("jlo update all").bold()
+            style("TIP:").cyan().bold().for_stderr(),
+            style("jlo update all").bold().for_stderr()
         );
     }
 }
@@ -523,10 +524,11 @@ fn cmd_clean() {
         eprintln!("Error: {e:#}");
         exit(1);
     });
-    clean_jdks(&jdk_base).unwrap_or_else(|e| {
+    let report = clean_jdks(&jdk_base).unwrap_or_else(|e| {
         eprintln!("Error: Could not clean JDKs: {e:#}");
         exit(1);
     });
+    ui::clean_report(&report);
 }
 
 fn cmd_default(java_version: &str) {
@@ -615,12 +617,8 @@ fn update(client: &AdoptiumClient, java_version: &str) {
         exit(1);
     });
 
-    if let Some(path) = find_installed_jdk(&jdk_metadata, &jdk_base) {
-        eprintln!(
-            "Most recent version of JDK {} is already installed at: {}",
-            java_version,
-            path.to_string_lossy()
-        );
+    if find_installed_jdk(&jdk_metadata, &jdk_base).is_some() {
+        ui::up_to_date(java_version, &jdk_metadata.semver);
     } else {
         install_jdk(client, &jdk_base, &jdk_metadata).unwrap_or_else(|e| {
             eprintln!("Error: Could not install JDK: {e:#}");
@@ -643,27 +641,26 @@ fn resolve_java_home(client: &AdoptiumClient, java_version: &str) -> anyhow::Res
     }
 }
 
+/// Emit the `export` lines for the requested version.
+///
+/// Nothing is written to stderr on this path, even when the environment does
+/// change: the autoload hook calls it from `PROMPT_COMMAND`/`chpwd`, so any
+/// status line here would print on every new shell and every `cd`. Exporting a
+/// variable lasts only as long as the shell and is implied by the command the
+/// user ran - it is the install (a JDK on disk) that earns a line, not this.
 fn setup(client: &AdoptiumClient, java_version: &str) -> anyhow::Result<()> {
     let java_home = resolve_java_home(client, java_version)?;
     let jdk_base = jdk_base_dir()?;
 
-    let mut updates = false;
-
     let current_java_home = env::var("JAVA_HOME").unwrap_or_default();
     if current_java_home != java_home.to_string_lossy() {
-        updates = true;
         println!("export JAVA_HOME=\"{}\"", java_home.to_string_lossy());
     }
 
     let java_bin_path = java_home.join("bin").to_string_lossy().into_owned();
     let current_path = env::var("PATH").unwrap_or_default();
     if let Some(updated_path) = update_path(&java_bin_path, &current_path, &jdk_base)? {
-        updates = true;
         println!("export PATH=\"{updated_path}\"");
-    }
-
-    if updates {
-        eprintln!("Use Java from {}", java_home.to_string_lossy());
     }
 
     Ok(())
@@ -674,23 +671,47 @@ fn install_jdk(
     jdk_base: &Path,
     jdk_metadata: &JdkMetadata,
 ) -> anyhow::Result<PathBuf> {
+    // One progress region spans all three phases, so the terminal shows a
+    // single line that changes rather than three bars stacking up.
+    let ui = InstallUi::new(&jdk_metadata.semver);
+    let dest_dir = jdk_base.join(&jdk_metadata.semver);
+
+    match install_jdk_inner(client, jdk_metadata, &dest_dir, &ui) {
+        Ok(()) => {
+            ui.finish(&dest_dir);
+            Ok(dest_dir)
+        }
+        Err(e) => {
+            // Clear the live region first: a half-drawn bar above the error
+            // only gets in the way of reading it.
+            ui.abandon();
+            Err(e)
+        }
+    }
+}
+
+fn install_jdk_inner(
+    client: &AdoptiumClient,
+    jdk_metadata: &JdkMetadata,
+    dest_dir: &Path,
+    ui: &InstallUi,
+) -> anyhow::Result<()> {
     // Download JDK
     let temp_dir = tempdir().context("could not create temporary directory")?;
     let temp_file = temp_dir.path().join(&jdk_metadata.package_name);
     let file = &mut File::create(&temp_file).context("could not create temporary file")?;
-    client.download(jdk_metadata, file)?;
+    client.download(jdk_metadata, file, ui)?;
 
     // Extract JDK to temp dir
-    extract::extract(&temp_file, temp_dir.path())?;
+    extract::extract(&temp_file, temp_dir.path(), ui)?;
 
-    let dest_dir = jdk_base.join(&jdk_metadata.semver);
-    adoptium::install_jdk(jdk_metadata, temp_dir.path(), dest_dir.as_path())?;
+    adoptium::install_jdk(jdk_metadata, temp_dir.path(), dest_dir, ui)?;
 
     temp_dir.close().unwrap_or_else(|err| {
         eprintln!("Warning: Could not delete temporary directory: {err}");
     });
 
-    Ok(dest_dir)
+    Ok(())
 }
 
 fn jlo_home_dir() -> anyhow::Result<PathBuf> {

@@ -1,4 +1,4 @@
-use crate::progress_bar::setup_progress_bar;
+use crate::ui::InstallUi;
 use anyhow::{Context, bail};
 use semver_rs::compare;
 use sha2::{Digest, Sha256};
@@ -21,17 +21,38 @@ fn sort_by_semver_desc(paths: &mut [PathBuf]) {
     });
 }
 
-pub(crate) fn clean_jdks(jdk_base: &Path) -> anyhow::Result<()> {
+/// What a `jlo clean` run did, so the caller owns the presentation and this
+/// function owns only the filesystem work.
+#[derive(Debug, Default)]
+pub(crate) struct CleanReport {
+    /// `(major, removed version names)`, newest major first. Only versions
+    /// actually deleted appear here.
+    pub(crate) removed: Vec<(i64, Vec<String>)>,
+    /// One message per JDK that could not be deleted.
+    pub(crate) failures: Vec<String>,
+    /// Installs without a `.jlo-managed` marker. Counted rather than listed:
+    /// on a machine that also uses sdkman or Homebrew this is every other JDK,
+    /// and a line each would bury the removals.
+    pub(crate) skipped_unmanaged: usize,
+}
+
+impl CleanReport {
+    pub(crate) fn removed_count(&self) -> usize {
+        self.removed.iter().map(|(_, v)| v.len()).sum()
+    }
+}
+
+pub(crate) fn clean_jdks(jdk_base: &Path) -> anyhow::Result<CleanReport> {
     // collector major versions
     let mut installed_jdks: std::collections::HashMap<i64, Vec<PathBuf>> =
         std::collections::HashMap::new();
+    let mut report = CleanReport::default();
     let entries = std::fs::read_dir(jdk_base)
         .with_context(|| format!("Can't read JDK base directory {jdk_base:?}"))?;
 
     for entry in entries.filter_map(Result::ok) {
         let path = entry.path();
         if !path.is_dir() {
-            eprintln!("{path:?} is not a directory");
             continue;
         }
         let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
@@ -40,7 +61,7 @@ pub(crate) fn clean_jdks(jdk_base: &Path) -> anyhow::Result<()> {
         };
         if !path.join(MARKER_FILE).exists() {
             // skip directories not managed by jlo
-            eprintln!("Ignoring non-jlo-managed directory: {path:?}");
+            report.skipped_unmanaged += 1;
             continue;
         }
         let Ok(semver) = semver_rs::parse(file_name, None) else {
@@ -50,33 +71,45 @@ pub(crate) fn clean_jdks(jdk_base: &Path) -> anyhow::Result<()> {
         installed_jdks.entry(semver.major).or_default().push(path);
     }
 
-    for (major, mut paths) in installed_jdks {
-        sort_by_semver_desc(&mut paths);
+    // A `HashMap` hands back its keys in an arbitrary order, which made two runs
+    // over the same directory print the majors differently. Sort so the output
+    // is stable and matches `jlo list` (newest major first).
+    let mut majors: Vec<i64> = installed_jdks.keys().copied().collect();
+    majors.sort_unstable_by(|a, b| b.cmp(a));
+
+    for major in majors {
+        let Some(paths) = installed_jdks.get_mut(&major) else {
+            continue;
+        };
+        sort_by_semver_desc(paths);
 
         if paths.len() <= 1 {
             continue;
         }
 
-        let kept = paths[0]
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("unknown");
-        let removed = paths[1..]
-            .iter()
-            .filter_map(|p| p.file_name().and_then(|n| n.to_str()))
-            .collect::<Vec<_>>()
-            .join(", ");
-
-        eprintln!("Keeping {kept} for JDK {major}, but removing: {removed}");
-
+        // Record what was *actually* deleted. Announcing the removals up front
+        // meant a failure below turned the line above it into a false claim.
+        let mut removed = Vec::new();
         for old_jdk in &paths[1..] {
-            if let Err(e) = std::fs::remove_dir_all(old_jdk) {
-                eprintln!("Error removing old JDK {old_jdk:?}: {e}");
+            let name = old_jdk
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("unknown")
+                .to_string();
+            match std::fs::remove_dir_all(old_jdk) {
+                Ok(()) => removed.push(name),
+                Err(e) => report
+                    .failures
+                    .push(format!("could not remove {old_jdk:?}: {e}")),
             }
+        }
+
+        if !removed.is_empty() {
+            report.removed.push((major, removed));
         }
     }
 
-    Ok(())
+    Ok(report)
 }
 
 pub(crate) fn find_suitable_jdk(jdk_base: &Path, required_version: &str) -> Option<PathBuf> {
@@ -183,13 +216,14 @@ pub(crate) fn install_jdk(
     jdk_metadata: &JdkMetadata,
     source_dir: &Path,
     dest_dir: &Path,
+    ui: &InstallUi,
 ) -> anyhow::Result<()> {
     // Validate extracted path
     let extracted_jdk_path =
         find_jdk_path(jdk_metadata, source_dir).context("Could not find JDK directory")?;
 
     // Create destination directory
-    eprintln!("Installing JDK to {dest_dir:?}");
+    ui.start_install();
     std::fs::create_dir_all(
         dest_dir
             .parent()
@@ -483,7 +517,12 @@ impl AdoptiumClient {
         Ok(latest.to_string())
     }
 
-    pub(crate) fn download(&self, metadata: &JdkMetadata, file: &mut File) -> anyhow::Result<()> {
+    pub(crate) fn download(
+        &self,
+        metadata: &JdkMetadata,
+        file: &mut File,
+        ui: &InstallUi,
+    ) -> anyhow::Result<()> {
         let mut response = self.agent.get(&metadata.download_link).call()?;
 
         if !response.status().is_success() {
@@ -500,13 +539,7 @@ impl AdoptiumClient {
             .content_length()
             .context("Failed to get content length")?;
 
-        let pb = setup_progress_bar(
-            &format!(
-                "Downloading JDK {} ({})",
-                metadata.semver, metadata.package_name
-            ),
-            total_size,
-        );
+        ui.start_download(total_size);
 
         let mut hasher = Sha256::new();
 
@@ -522,11 +555,9 @@ impl AdoptiumClient {
             }
             file.write_all(&buffer[..n])?;
             downloaded += n as u64;
-            pb.set_position(downloaded);
+            ui.set_downloaded(downloaded);
             hasher.update(&buffer[..n]);
         }
-
-        pb.finish_and_clear();
 
         let hash = hex::encode(hasher.finalize());
         if hash != metadata.checksum {
@@ -536,8 +567,6 @@ impl AdoptiumClient {
                 hash
             );
         }
-
-        eprintln!("✅ Download complete, checksum passed.");
 
         Ok(())
     }
@@ -779,6 +808,45 @@ mod tests {
         assert!(dir.path().join("21.0.3+9").exists());
     }
 
+    /// A `HashMap` yields its keys in an arbitrary order, so the majors used to
+    /// print differently from one run to the next over the same directory.
+    #[test]
+    fn clean_jdks_reports_majors_newest_first() {
+        let dir = tempdir().unwrap();
+        for version in [
+            "17.0.1+1",
+            "17.0.2+8",
+            "25.0.1+1",
+            "25.0.2+1",
+            "21.0.1+12",
+            "21.0.3+9",
+        ] {
+            create_jdk_dir(dir.path(), version, true);
+        }
+
+        let report = clean_jdks(dir.path()).unwrap();
+
+        let majors: Vec<i64> = report.removed.iter().map(|(major, _)| *major).collect();
+        assert_eq!(majors, vec![25, 21, 17]);
+        assert_eq!(report.removed_count(), 3);
+        assert_eq!(report.removed[0].1, vec!["25.0.1+1"]);
+        assert!(report.failures.is_empty());
+    }
+
+    #[test]
+    fn clean_jdks_counts_unmanaged_without_removing_them() {
+        let dir = tempdir().unwrap();
+        create_jdk_dir(dir.path(), "21.0.1+12", false);
+        create_jdk_dir(dir.path(), "21.0.3+9", false);
+        create_jdk_dir(dir.path(), "17.0.2+8", true);
+
+        let report = clean_jdks(dir.path()).unwrap();
+
+        assert_eq!(report.skipped_unmanaged, 2);
+        assert_eq!(report.removed_count(), 0);
+        assert!(dir.path().join("21.0.1+12").exists());
+    }
+
     #[test]
     fn clean_jdks_single_version_kept() {
         let dir = tempdir().unwrap();
@@ -886,7 +954,13 @@ mod tests {
         };
 
         let dest = dest_parent.path().join("21.0.3+9");
-        install_jdk(&metadata, source_dir.path(), &dest).unwrap();
+        install_jdk(
+            &metadata,
+            source_dir.path(),
+            &dest,
+            &InstallUi::hidden("test"),
+        )
+        .unwrap();
 
         assert!(dest.exists());
         assert!(dest.join(MARKER_FILE).exists());
@@ -1212,7 +1286,9 @@ mod client_tests {
         );
 
         let mut file = tempfile::tempfile().unwrap();
-        client.download(&metadata, &mut file).unwrap();
+        client
+            .download(&metadata, &mut file, &InstallUi::hidden("test"))
+            .unwrap();
 
         file.rewind().unwrap();
         let mut content = Vec::new();
@@ -1232,7 +1308,9 @@ mod client_tests {
         let metadata = fake_metadata(format!("{}/pkg.tar.gz", server.url()), "deadbeef");
 
         let mut file = tempfile::tempfile().unwrap();
-        let err = client.download(&metadata, &mut file).unwrap_err();
+        let err = client
+            .download(&metadata, &mut file, &InstallUi::hidden("test"))
+            .unwrap_err();
 
         assert!(
             format!("{err:#}").contains("Checksum mismatch"),
@@ -1255,7 +1333,9 @@ mod client_tests {
         );
 
         let mut file = tempfile::tempfile().unwrap();
-        let err = client.download(&metadata, &mut file).unwrap_err();
+        let err = client
+            .download(&metadata, &mut file, &InstallUi::hidden("test"))
+            .unwrap_err();
 
         assert!(
             format!("{err:#}").contains("content length"),
@@ -1295,7 +1375,9 @@ mod client_tests {
         );
 
         let mut file = tempfile::tempfile().unwrap();
-        let err = client.download(&metadata, &mut file).unwrap_err();
+        let err = client
+            .download(&metadata, &mut file, &InstallUi::hidden("test"))
+            .unwrap_err();
 
         let msg = format!("{err:#}");
         assert!(msg.contains("HTTP 404"), "got: {msg}");
