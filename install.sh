@@ -68,12 +68,14 @@ fi
 # subprocess. A failure here is a convenience lost, not a broken install.
 JLO_COMPLETION_DIR="$JLO_HOME/completions"
 if mkdir -p "$JLO_COMPLETION_DIR" 2>/dev/null; then
-  for sh in bash zsh fish; do
-    if ! "$JLO_TARGET" completions "$sh" > "$JLO_COMPLETION_DIR/jlo.$sh" 2>/dev/null; then
-      rm -f "$JLO_COMPLETION_DIR/jlo.$sh"
-      echo "Warning: could not generate $sh completions." >&2
-    fi
-  done
+  if ! "$JLO_TARGET" completions bash > "$JLO_COMPLETION_DIR/jlo.bash"; then
+    rm -f "$JLO_COMPLETION_DIR/jlo.bash"
+    echo "Warning: could not generate bash completions." >&2
+  fi
+  if ! "$JLO_TARGET" completions zsh > "$JLO_COMPLETION_DIR/_jlo"; then
+    rm -f "$JLO_COMPLETION_DIR/_jlo"
+    echo "Warning: could not generate zsh completions." >&2
+  fi
 else
   echo "Warning: could not create '$JLO_COMPLETION_DIR'; shell completions are unavailable." >&2
 fi
@@ -89,8 +91,11 @@ export JLO_HOME="\$HOME/.jlo"
 [[ -s "\$JLO_HOME/bin/jlo-init.sh" ]] && source "\$JLO_HOME/bin/jlo-init.sh"
 [[ -s "\$JLO_HOME/bin/jlo-autoload.sh" ]] && source "\$JLO_HOME/bin/jlo-autoload.sh"
 
-# Shell completions (bash; use jlo.zsh or jlo.fish for those shells):
+# Shell completions - bash:
 [[ -s "\$JLO_HOME/completions/jlo.bash" ]] && source "\$JLO_HOME/completions/jlo.bash"
+
+# Shell completions - zsh (this line must come BEFORE your 'compinit' call):
+fpath=("\$JLO_HOME/completions" \$fpath)
 
 Then restart your terminal or execute the above lines in your current shell session.
 
