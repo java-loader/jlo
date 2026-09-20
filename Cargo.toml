@@ -3,6 +3,24 @@ name = "jlo-bin"
 version = "0.2.0"
 edition = "2024"
 authors = ["Oliver Siegmar <oliver@siegmar.de>"]
+license = "MIT"
+
+[lints.rust]
+unsafe_code = "deny"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+# `unwrap` hides the invariant that makes it safe; `expect` states it.
+unwrap_used = "warn"
+# Codebase convention: every fallible path returns a descriptive error.
+todo = "warn"
+unimplemented = "warn"
+dbg_macro = "warn"
+# Paths are deliberately Debug-quoted in user-facing messages: the quotes make
+# trailing whitespace and odd characters visible when a path is wrong.
+unnecessary_debug_formatting = "allow"
 
 [dev-dependencies]
 assert_cmd = "2"
@@ -22,5 +40,8 @@ sha2 = "0.10.9"
 hex = "0.4.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1.0.145"
-zip = "6.0.0"
+# Adoptium's Windows JDK archives are plain deflate, so drop the default
+# feature set (aes-crypto, bzip2, lzma, ppmd, xz, zstd, deflate64, time).
+# `deflate-flate2` reuses the flate2 backend already pulled in for tar.gz.
+zip = { version = "6.0.0", default-features = false, features = ["deflate-flate2"] }
 semver_rs = "0.2.0"

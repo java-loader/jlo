@@ -1,3 +1,7 @@
+// Test code: `unwrap` failures are test failures, and `env::set_var` needs
+// `unsafe` under edition 2024 despite the serial_test guard.
+#![allow(unsafe_code, clippy::unwrap_used)]
+
 use assert_cmd::Command;
 use predicates::prelude::*;
 use serial_test::serial;
@@ -169,7 +173,7 @@ fn init() {
         "# Java version configured by J'Lo - https://github.com/java-loader/jlo"
     );
     let version: u32 = lines[1].parse().expect("expected numeric version");
-    assert!(version >= 8, "expected version >= 8, got {}", version);
+    assert!(version >= 8, "expected version >= 8, got {version}");
 
     // run init again to check for existing file error
     let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
@@ -209,7 +213,7 @@ fn home() {
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
 
     // stdout must be exactly one line: the JAVA_HOME path, nothing else
-    assert_eq!(stdout.lines().count(), 1, "stdout: {:?}", stdout);
+    assert_eq!(stdout.lines().count(), 1, "stdout: {stdout:?}");
     assert!(stdout.ends_with('\n'), "stdout must be newline-terminated");
     let java_home = stdout.trim_end();
     assert!(
@@ -217,8 +221,7 @@ fn home() {
             .join("bin")
             .join("java")
             .exists(),
-        "printed JAVA_HOME must contain bin/java: {}",
-        java_home
+        "printed JAVA_HOME must contain bin/java: {java_home}"
     );
 
     // explicit version argument resolves the same way
@@ -277,7 +280,7 @@ fn exec() {
     assert!(!java_home.is_empty(), "JAVA_HOME must be set in child");
     assert_eq!(
         java_bin,
-        format!("{}/bin/java", java_home),
+        format!("{java_home}/bin/java"),
         "java must resolve to the JDK from JAVA_HOME"
     );
 
@@ -407,7 +410,6 @@ fn init_reports_api_http_error() {
 /// Where `jlo` installs JDKs, mirroring `jdk_base_dir()` in main.rs.
 /// IntelliJ-compatible: `~/Library/Java/JavaVirtualMachines` on macOS, `~/.jdks` elsewhere.
 fn jdk_base() -> std::path::PathBuf {
-    #[allow(deprecated)]
     let home = std::env::home_dir().unwrap();
     if cfg!(target_os = "macos") {
         home.join("Library/Java/JavaVirtualMachines")
@@ -474,7 +476,6 @@ fn env_without_jlo_home_keeps_unrelated_home_path_entries() {
     std::fs::write(".jlorc", "25").unwrap();
 
     // User-local PATH entries that have nothing to do with jlo.
-    #[allow(deprecated)]
     let home = std::env::home_dir().unwrap();
     let cargo_bin = home.join(".cargo").join("bin");
     let user_bin = home.join("bin");
@@ -546,8 +547,7 @@ fn env_is_idempotent() {
 
     assert_eq!(
         stdout, "",
-        "re-running env in an already-configured shell must emit nothing, got: {:?}",
-        stdout
+        "re-running env in an already-configured shell must emit nothing, got: {stdout:?}"
     );
 
     std::env::set_current_dir(std::env::temp_dir()).unwrap();

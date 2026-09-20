@@ -20,37 +20,31 @@ fn sort_by_semver_desc(paths: &mut [PathBuf]) {
     });
 }
 
-pub fn clean_jdks(jdk_base: &Path) -> anyhow::Result<()> {
+pub(crate) fn clean_jdks(jdk_base: &Path) -> anyhow::Result<()> {
     // collector major versions
     let mut installed_jdks: std::collections::HashMap<i64, Vec<PathBuf>> =
         std::collections::HashMap::new();
     let entries = std::fs::read_dir(jdk_base)
-        .with_context(|| format!("Can't read JDK base directory {:?}", jdk_base))?;
+        .with_context(|| format!("Can't read JDK base directory {jdk_base:?}"))?;
 
     for entry in entries.filter_map(Result::ok) {
         let path = entry.path();
         if !path.is_dir() {
-            eprintln!("{:?} is not a directory", path);
+            eprintln!("{path:?} is not a directory");
             continue;
         }
-        let file_name = match path.file_name().and_then(|n| n.to_str()) {
-            Some(name) => name,
-            None => {
-                eprintln!("Ignoring directory with invalid name: {:?}", path);
-                continue;
-            }
+        let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
+            eprintln!("Ignoring directory with invalid name: {path:?}");
+            continue;
         };
         if !path.join(MARKER_FILE).exists() {
             // skip directories not managed by jlo
-            eprintln!("Ignoring non-jlo-managed directory: {:?}", path);
+            eprintln!("Ignoring non-jlo-managed directory: {path:?}");
             continue;
         }
-        let semver = match semver_rs::parse(file_name, None) {
-            Ok(sv) => sv,
-            Err(_) => {
-                eprintln!("Ignoring non-semver directory: {:?}", path);
-                continue;
-            }
+        let Ok(semver) = semver_rs::parse(file_name, None) else {
+            eprintln!("Ignoring non-semver directory: {path:?}");
+            continue;
         };
         installed_jdks.entry(semver.major).or_default().push(path);
     }
@@ -72,14 +66,11 @@ pub fn clean_jdks(jdk_base: &Path) -> anyhow::Result<()> {
             .collect::<Vec<_>>()
             .join(", ");
 
-        eprintln!(
-            "Keeping {} for JDK {}, but removing: {}",
-            kept, major, removed
-        );
+        eprintln!("Keeping {kept} for JDK {major}, but removing: {removed}");
 
         for old_jdk in &paths[1..] {
             if let Err(e) = std::fs::remove_dir_all(old_jdk) {
-                eprintln!("Error removing old JDK {:?}: {}", old_jdk, e);
+                eprintln!("Error removing old JDK {old_jdk:?}: {e}");
             }
         }
     }
@@ -87,7 +78,7 @@ pub fn clean_jdks(jdk_base: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn find_suitable_jdk(jdk_base: &Path, required_version: &str) -> Option<PathBuf> {
+pub(crate) fn find_suitable_jdk(jdk_base: &Path, required_version: &str) -> Option<PathBuf> {
     let entries = std::fs::read_dir(jdk_base).ok()?;
 
     let mut matching_versions: Vec<PathBuf> = entries
@@ -114,7 +105,7 @@ fn is_jdk_version_dir(name: &str) -> bool {
 }
 
 /// A JDK found in the install directory, identified by its semver directory name.
-pub struct InstalledJdk {
+pub(crate) struct InstalledJdk {
     pub version: String,
     pub major: i64,
     /// Whether the JDK carries the `.jlo-managed` marker, i.e. whether `jlo
@@ -125,12 +116,12 @@ pub struct InstalledJdk {
 /// List every JDK in `jdk_base` whose directory name parses as a semver, newest
 /// first. A missing base directory is not an error - it just means nothing has
 /// been installed yet.
-pub fn find_installed_jdks(jdk_base: &Path) -> anyhow::Result<Vec<InstalledJdk>> {
+pub(crate) fn find_installed_jdks(jdk_base: &Path) -> anyhow::Result<Vec<InstalledJdk>> {
     let entries = match std::fs::read_dir(jdk_base) {
         Ok(entries) => entries,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => {
-            return Err(e).with_context(|| format!("Can't read JDK base directory {:?}", jdk_base));
+            return Err(e).with_context(|| format!("Can't read JDK base directory {jdk_base:?}"));
         }
     };
 
@@ -162,24 +153,22 @@ pub fn find_installed_jdks(jdk_base: &Path) -> anyhow::Result<Vec<InstalledJdk>>
         .collect())
 }
 
-pub fn find_installed_major_versions(jdk_base: &Path) -> anyhow::Result<Vec<i64>> {
+pub(crate) fn find_installed_major_versions(jdk_base: &Path) -> anyhow::Result<Vec<i64>> {
     let mut major_versions = std::collections::HashSet::new();
 
     let entries = std::fs::read_dir(jdk_base)
-        .with_context(|| format!("Can't read JDK base directory {:?}", jdk_base))?;
+        .with_context(|| format!("Can't read JDK base directory {jdk_base:?}"))?;
 
     for entry in entries.filter_map(Result::ok) {
         let path = entry.path();
         if !path.is_dir() {
             continue;
         }
-        let file_name = match path.file_name().and_then(|n| n.to_str()) {
-            Some(name) => name,
-            None => continue,
+        let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
         };
-        let semver = match semver_rs::parse(file_name, None) {
-            Ok(sv) => sv,
-            Err(_) => continue,
+        let Ok(semver) = semver_rs::parse(file_name, None) else {
+            continue;
         };
         major_versions.insert(semver.major);
     }
@@ -189,7 +178,7 @@ pub fn find_installed_major_versions(jdk_base: &Path) -> anyhow::Result<Vec<i64>
     Ok(major_versions_vec)
 }
 
-pub fn install_jdk(
+pub(crate) fn install_jdk(
     jdk_metadata: &JdkMetadata,
     source_dir: &Path,
     dest_dir: &Path,
@@ -199,7 +188,7 @@ pub fn install_jdk(
         find_jdk_path(jdk_metadata, source_dir).context("Could not find JDK directory")?;
 
     // Create destination directory
-    eprintln!("Installing JDK to {:?}", dest_dir);
+    eprintln!("Installing JDK to {dest_dir:?}");
     std::fs::create_dir_all(
         dest_dir
             .parent()
@@ -227,28 +216,32 @@ fn find_jdk_path(jdk_metadata: &JdkMetadata, temp_dest: &Path) -> anyhow::Result
     if env::consts::OS == "windows" {
         let java_bin = extracted_jdk_path.join("bin").join("java.exe");
         if !java_bin.exists() {
-            bail!("Error: java executable is missing at: {:?}", java_bin);
+            bail!("Error: java executable is missing at: {java_bin:?}");
         }
     } else {
         let java_bin = extracted_jdk_path.join("bin").join("java");
         if !java_bin.exists() {
-            bail!("Error: java executable is missing at: {:?}", java_bin);
+            bail!("Error: java executable is missing at: {java_bin:?}");
         }
     }
 
     Ok(extracted_jdk_path)
 }
 
-pub fn find_installed_jdk(jdk_metadata: &JdkMetadata, jdk_base_path: &Path) -> Option<PathBuf> {
+pub(crate) fn find_installed_jdk(
+    jdk_metadata: &JdkMetadata,
+    jdk_base_path: &Path,
+) -> Option<PathBuf> {
     let extracted_jdk_path = jdk_base_path.join(&jdk_metadata.semver);
-    match extracted_jdk_path.exists() {
-        true => Some(extracted_jdk_path),
-        false => None,
+    if extracted_jdk_path.exists() {
+        Some(extracted_jdk_path)
+    } else {
+        None
     }
 }
 
 #[derive(Debug)]
-pub struct JdkMetadata {
+pub(crate) struct JdkMetadata {
     pub semver: String,
     pub release_name: String,
     pub package_name: String,
@@ -256,7 +249,7 @@ pub struct JdkMetadata {
     pub checksum: String,
 }
 
-pub const ADOPTIUM_API_URL: &str = "https://api.adoptium.net";
+pub(crate) const ADOPTIUM_API_URL: &str = "https://api.adoptium.net";
 
 /// One entry of the response from `/v3/assets/latest/...` — the shape the
 /// Adoptium API promises for a JDK build.
@@ -317,7 +310,7 @@ struct AvailableReleases {
 
 /// A JDK release Adoptium offers for *this* OS and architecture.
 #[derive(Debug)]
-pub struct RemoteJdk {
+pub(crate) struct RemoteJdk {
     pub version: String,
     pub major: i64,
     pub lts: bool,
@@ -326,13 +319,13 @@ pub struct RemoteJdk {
 /// The single point of contact with Adoptium: discovering available releases,
 /// fetching JDK metadata, and downloading packages. `base_url` covers the two
 /// API endpoints; downloads follow whatever URL the metadata hands back.
-pub struct AdoptiumClient {
+pub(crate) struct AdoptiumClient {
     client: Client,
     base_url: String,
 }
 
 impl AdoptiumClient {
-    pub fn new(base_url: impl Into<String>) -> anyhow::Result<Self> {
+    pub(crate) fn new(base_url: impl Into<String>) -> anyhow::Result<Self> {
         let client = Client::builder()
             .user_agent(USER_AGENT)
             .build()
@@ -343,13 +336,12 @@ impl AdoptiumClient {
         })
     }
 
-    pub fn fetch_metadata(&self, java_version: &str) -> anyhow::Result<JdkMetadata> {
+    pub(crate) fn fetch_metadata(&self, java_version: &str) -> anyhow::Result<JdkMetadata> {
         let api_url = self.latest_asset_url(java_version)?;
 
         let asset = self.fetch_latest_asset(&api_url)?.with_context(|| {
             format!(
-                "No matching JDK found for the specified version and system architecture.\nTried to fetch metadata from: {}",
-                api_url
+                "No matching JDK found for the specified version and system architecture.\nTried to fetch metadata from: {api_url}"
             )
         })?;
 
@@ -392,7 +384,7 @@ impl AdoptiumClient {
     /// Costs one request for the major-version list plus one per major. Done
     /// serially that is ~4s, so the per-major lookups are fanned out across
     /// threads sharing the pooled client.
-    pub fn available_jdks(&self) -> anyhow::Result<Vec<RemoteJdk>> {
+    pub(crate) fn available_jdks(&self) -> anyhow::Result<Vec<RemoteJdk>> {
         let releases = self.fetch_available_releases()?;
         let lts: std::collections::HashSet<i64> =
             releases.available_lts_releases.into_iter().collect();
@@ -426,7 +418,7 @@ impl AdoptiumClient {
                 // No build for this OS/architecture - nothing to offer.
                 Ok(None) => {}
                 // One major failing should not cost the user the whole listing.
-                Err(e) => eprintln!("Warning: could not look up JDK {}: {:#}", major, e),
+                Err(e) => eprintln!("Warning: could not look up JDK {major}: {e:#}"),
             }
         }
 
@@ -458,7 +450,7 @@ impl AdoptiumClient {
         response.json().context("Failed to parse JSON response")
     }
 
-    pub fn latest_major(&self) -> anyhow::Result<String> {
+    pub(crate) fn latest_major(&self) -> anyhow::Result<String> {
         let releases = self.fetch_available_releases()?;
 
         let latest = releases
@@ -470,7 +462,7 @@ impl AdoptiumClient {
         Ok(latest.to_string())
     }
 
-    pub fn download(&self, metadata: &JdkMetadata, file: &mut File) -> anyhow::Result<()> {
+    pub(crate) fn download(&self, metadata: &JdkMetadata, file: &mut File) -> anyhow::Result<()> {
         let mut response = self.client.get(&metadata.download_link).send()?;
 
         if !response.status().is_success() {
@@ -577,8 +569,7 @@ mod tests {
         let os = jdk_os().unwrap();
         assert!(
             ["linux", "mac", "windows", "solaris", "aix"].contains(&os),
-            "unexpected os: {}",
-            os
+            "unexpected os: {os}"
         );
     }
 
@@ -590,8 +581,7 @@ mod tests {
                 "x64", "x32", "aarch64", "arm", "s390x", "ppc64", "ppc64le", "sparcv9", "riscv64"
             ]
             .contains(&arch),
-            "unexpected arch: {}",
-            arch
+            "unexpected arch: {arch}"
         );
     }
 
@@ -966,7 +956,7 @@ mod client_tests {
         let client = AdoptiumClient::new(server.url()).unwrap();
         let err = client.fetch_metadata("21").unwrap_err();
 
-        assert!(format!("{:#}", err).contains("HTTP 500"), "got: {:#}", err);
+        assert!(format!("{err:#}").contains("HTTP 500"), "got: {err:#}");
     }
 
     #[test]
@@ -978,9 +968,8 @@ mod client_tests {
         let err = client.fetch_metadata("21").unwrap_err();
 
         assert!(
-            format!("{:#}", err).contains("Failed to parse JSON response"),
-            "got: {:#}",
-            err
+            format!("{err:#}").contains("Failed to parse JSON response"),
+            "got: {err:#}"
         );
     }
 
@@ -993,9 +982,8 @@ mod client_tests {
         let err = client.fetch_metadata("21").unwrap_err();
 
         assert!(
-            format!("{:#}", err).contains("No matching JDK found"),
-            "got: {:#}",
-            err
+            format!("{err:#}").contains("No matching JDK found"),
+            "got: {err:#}"
         );
     }
 
@@ -1008,7 +996,7 @@ mod client_tests {
         let client = AdoptiumClient::new(server.url()).unwrap();
         let err = client.fetch_metadata("21").unwrap_err();
 
-        assert!(format!("{:#}", err).contains("checksum"), "got: {:#}", err);
+        assert!(format!("{err:#}").contains("checksum"), "got: {err:#}");
     }
 
     #[test]
@@ -1021,9 +1009,8 @@ mod client_tests {
         let err = client.fetch_metadata("21").unwrap_err();
 
         assert!(
-            format!("{:#}", err).contains("Incomplete metadata"),
-            "got: {:#}",
-            err
+            format!("{err:#}").contains("Incomplete metadata"),
+            "got: {err:#}"
         );
     }
 
@@ -1052,7 +1039,7 @@ mod client_tests {
         server
             .mock(
                 "GET",
-                mockito::Matcher::Regex(format!(r"^/v3/assets/latest/{}/hotspot", major)),
+                mockito::Matcher::Regex(format!(r"^/v3/assets/latest/{major}/hotspot")),
             )
             .match_query(mockito::Matcher::Any)
             .with_status(status)
@@ -1137,7 +1124,7 @@ mod client_tests {
         let client = AdoptiumClient::new(server.url()).unwrap();
         let err = client.available_jdks().unwrap_err();
 
-        assert!(format!("{:#}", err).contains("HTTP 503"), "got: {:#}", err);
+        assert!(format!("{err:#}").contains("HTTP 503"), "got: {err:#}");
     }
 
     #[test]
@@ -1180,14 +1167,15 @@ mod client_tests {
         let err = client.latest_major().unwrap_err();
 
         assert!(
-            format!("{:#}", err).contains("available_releases"),
-            "got: {:#}",
-            err
+            format!("{err:#}").contains("available_releases"),
+            "got: {err:#}"
         );
     }
 
     #[test]
     fn download_happy_path_writes_verified_file() {
+        use std::io::Seek;
+
         let mut server = mockito::Server::new();
         let _m = server
             .mock("GET", "/pkg.tar.gz")
@@ -1203,7 +1191,6 @@ mod client_tests {
         let mut file = tempfile::tempfile().unwrap();
         client.download(&metadata, &mut file).unwrap();
 
-        use std::io::Seek;
         file.rewind().unwrap();
         let mut content = Vec::new();
         file.read_to_end(&mut content).unwrap();
@@ -1225,9 +1212,8 @@ mod client_tests {
         let err = client.download(&metadata, &mut file).unwrap_err();
 
         assert!(
-            format!("{:#}", err).contains("Checksum mismatch"),
-            "got: {:#}",
-            err
+            format!("{err:#}").contains("Checksum mismatch"),
+            "got: {err:#}"
         );
     }
 
@@ -1249,9 +1235,8 @@ mod client_tests {
         let err = client.download(&metadata, &mut file).unwrap_err();
 
         assert!(
-            format!("{:#}", err).contains("content length"),
-            "got: {:#}",
-            err
+            format!("{err:#}").contains("content length"),
+            "got: {err:#}"
         );
     }
 
@@ -1268,7 +1253,7 @@ mod client_tests {
         let client = AdoptiumClient::new(server.url()).unwrap();
         let err = client.latest_major().unwrap_err();
 
-        assert!(format!("{:#}", err).contains("HTTP 500"), "got: {:#}", err);
+        assert!(format!("{err:#}").contains("HTTP 500"), "got: {err:#}");
     }
 
     #[test]
@@ -1289,8 +1274,8 @@ mod client_tests {
         let mut file = tempfile::tempfile().unwrap();
         let err = client.download(&metadata, &mut file).unwrap_err();
 
-        let msg = format!("{:#}", err);
-        assert!(msg.contains("HTTP 404"), "got: {}", msg);
-        assert!(!msg.contains("Checksum mismatch"), "got: {}", msg);
+        let msg = format!("{err:#}");
+        assert!(msg.contains("HTTP 404"), "got: {msg}");
+        assert!(!msg.contains("Checksum mismatch"), "got: {msg}");
     }
 }

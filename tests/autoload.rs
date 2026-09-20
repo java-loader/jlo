@@ -12,6 +12,10 @@
 //! JLO_TEST_BASH=/opt/homebrew/bin/bash cargo test --release --test autoload
 //! ```
 
+// Test code: an `unwrap` failure here is a test failure, which is the point.
+#![allow(clippy::unwrap_used)]
+
+use std::fmt::Write as _;
 use std::process::Command;
 use tempfile::tempdir;
 
@@ -73,10 +77,10 @@ fn source_script(prologue: &str, times: usize) -> PromptCommand {
     body.push_str(prologue);
     body.push('\n');
     for _ in 0..times {
-        body.push_str(&format!(". '{script}'\n"));
+        writeln!(body, ". '{script}'").unwrap();
     }
     body.push_str("declare -p PROMPT_COMMAND 2>/dev/null || echo UNSET\n");
-    body.push_str(&format!("printf '%s\\n' '{MARKER}'\n"));
+    writeln!(body, "printf '%s\\n' '{MARKER}'").unwrap();
     // Unset expands to zero words, so nothing is printed.
     body.push_str("printf '%s\\0' \"${PROMPT_COMMAND[@]}\"\n");
 
@@ -118,8 +122,7 @@ fn array_prompt_command_supported() -> bool {
         .arg("-c")
         .arg("(( BASH_VERSINFO[0] > 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] >= 1) ))")
         .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+        .is_ok_and(|o| o.status.success())
 }
 
 /// Returns true when the caller should bail out. Prints loudly: a silently
@@ -166,7 +169,7 @@ fn does_not_duplicate_hook_when_resourced() {
     assert_eq!(pc.hook_elements(), 1);
 }
 
-/// An exported PROMPT_COMMAND must stay an exported scalar - it must not be
+/// An exported `PROMPT_COMMAND` must stay an exported scalar - it must not be
 /// silently converted to an array.
 #[test]
 fn keeps_exported_scalar_exported_and_scalar() {

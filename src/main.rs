@@ -25,12 +25,12 @@ fn main() {
     let api_url =
         env::var("JLO_ADOPTIUM_API_URL").unwrap_or_else(|_| adoptium::ADOPTIUM_API_URL.to_string());
     let client = AdoptiumClient::new(api_url).unwrap_or_else(|e| {
-        eprintln!("Error: {:#}", e);
+        eprintln!("Error: {e:#}");
         exit(1);
     });
 
     // Get command
-    let command = &env::args().nth(1).unwrap();
+    let command = &env::args().nth(1).expect("argument count checked above");
     match command.as_str() {
         "env" => {
             cmd_env(&client);
@@ -67,7 +67,7 @@ fn main() {
             println!(env!("CARGO_PKG_VERSION"));
         }
         _ => {
-            eprintln!("Unknown command: {}", command);
+            eprintln!("Unknown command: {command}");
             print_usage_and_exit()
         }
     }
@@ -83,7 +83,7 @@ fn print_usage_and_exit() -> ! {
 /// Determine the requested major version: explicit CLI argument if present,
 /// otherwise the project `.jlorc` / user default config.
 fn resolve_java_version() -> String {
-    let explicit = (env::args().len() > 2).then(|| env::args().nth(2).unwrap());
+    let explicit = env::args().nth(2);
     resolve_java_version_from(explicit)
 }
 
@@ -92,7 +92,7 @@ fn resolve_java_version() -> String {
 fn resolve_java_version_from(explicit: Option<String>) -> String {
     let java_version = explicit.unwrap_or_else(|| {
         conf::load_config_java_version().unwrap_or_else(|e| {
-            eprintln!("{:#}", e);
+            eprintln!("{e:#}");
             exit(1);
         })
     });
@@ -104,7 +104,7 @@ fn resolve_java_version_from(explicit: Option<String>) -> String {
 fn cmd_env(client: &AdoptiumClient) {
     let java_version = resolve_java_version();
     if let Err(e) = setup(client, &java_version) {
-        eprintln!("Error: {:#}", e);
+        eprintln!("Error: {e:#}");
         exit(1);
     }
 }
@@ -112,7 +112,7 @@ fn cmd_env(client: &AdoptiumClient) {
 fn cmd_home(client: &AdoptiumClient) {
     let java_version = resolve_java_version();
     let java_home = resolve_java_home(client, &java_version).unwrap_or_else(|e| {
-        eprintln!("Error: {:#}", e);
+        eprintln!("Error: {e:#}");
         exit(1);
     });
     println!("{}", java_home.to_string_lossy());
@@ -121,32 +121,32 @@ fn cmd_home(client: &AdoptiumClient) {
 fn cmd_exec(client: &AdoptiumClient) {
     let args: Vec<String> = env::args().skip(2).collect();
     let (version, command) = parse_exec_args(&args).unwrap_or_else(|e| {
-        eprintln!("Error: {}", e);
+        eprintln!("Error: {e}");
         eprintln!("Usage: jlo exec [version] -- <command> [args...]");
         exit(1);
     });
 
-    run_exec(client, version, command);
+    run_exec(client, version, &command);
 }
 
 /// Resolve the JDK (installing on demand) and replace the current process with
 /// the command. On non-Unix targets `exec` is unsupported, so bail out *before*
 /// downloading anything.
 #[cfg(unix)]
-fn run_exec(client: &AdoptiumClient, version: Option<String>, command: Vec<String>) -> ! {
+fn run_exec(client: &AdoptiumClient, version: Option<String>, command: &[String]) -> ! {
     let java_version = resolve_java_version_from(version);
     let java_home = resolve_java_home(client, &java_version).unwrap_or_else(|e| {
-        eprintln!("Error: {:#}", e);
+        eprintln!("Error: {e:#}");
         exit(1);
     });
 
-    exec_command(&java_home, &command);
+    exec_command(&java_home, command);
 }
 
 // A real `execvp` is Unix-only. A native Windows build would replace this with a
 // spawn-and-wait fallback that propagates the child's exit code.
 #[cfg(not(unix))]
-fn run_exec(_client: &AdoptiumClient, _version: Option<String>, _command: Vec<String>) -> ! {
+fn run_exec(_client: &AdoptiumClient, _version: Option<String>, _command: &[String]) -> ! {
     eprintln!("Error: 'jlo exec' is not supported on this platform.");
     exit(1);
 }
@@ -208,7 +208,7 @@ fn exec_command(java_home: &Path, command: &[String]) -> ! {
         &env::var("PATH").unwrap_or_default(),
     )
     .unwrap_or_else(|e| {
-        eprintln!("Error: {:#}", e);
+        eprintln!("Error: {e:#}");
         exit(1);
     });
 
@@ -219,7 +219,7 @@ fn exec_command(java_home: &Path, command: &[String]) -> ! {
         .env("PATH", new_path)
         .exec();
 
-    eprintln!("Error: could not execute '{}': {}", program, err);
+    eprintln!("Error: could not execute '{program}': {err}");
     exit(exec_failure_code(err.kind()));
 }
 
@@ -245,7 +245,7 @@ fn cmd_list(client: &AdoptiumClient) {
         match arg.as_str() {
             "--offline" => offline = true,
             other => {
-                eprintln!("Error: unknown option for list: '{}'", other);
+                eprintln!("Error: unknown option for list: '{other}'");
                 eprintln!("Usage: jlo list [--offline]");
                 exit(1);
             }
@@ -253,11 +253,11 @@ fn cmd_list(client: &AdoptiumClient) {
     }
 
     let jdk_base = jdk_base_dir().unwrap_or_else(|e| {
-        eprintln!("Error: {:#}", e);
+        eprintln!("Error: {e:#}");
         exit(1);
     });
     let installed = find_installed_jdks(&jdk_base).unwrap_or_else(|e| {
-        eprintln!("Error: Could not list installed JDKs: {:#}", e);
+        eprintln!("Error: Could not list installed JDKs: {e:#}");
         exit(1);
     });
 
@@ -265,7 +265,7 @@ fn cmd_list(client: &AdoptiumClient) {
         print_offline_list(&installed, &jdk_base);
     } else {
         let available = client.available_jdks().unwrap_or_else(|e| {
-            eprintln!("Error: Could not fetch available JDKs: {:#}", e);
+            eprintln!("Error: Could not fetch available JDKs: {e:#}");
             eprintln!("Use 'jlo list --offline' to list the JDKs already installed.");
             exit(1);
         });
@@ -332,9 +332,9 @@ fn print_remote_list(available: &[RemoteJdk], installed: &[adoptium::InstalledJd
 
         let status = match installed_status(jdk, installed) {
             InstalledStatus::Latest => style("installed").green().to_string(),
-            InstalledStatus::Older(version) => style(format!("outdated ({})", version))
-                .yellow()
-                .to_string(),
+            InstalledStatus::Older(version) => {
+                style(format!("outdated ({version})")).yellow().to_string()
+            }
             InstalledStatus::None => String::new(),
         };
 
@@ -378,11 +378,11 @@ fn print_lines(lines: impl IntoIterator<Item = String>) {
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
     for line in lines {
-        match writeln!(out, "{}", line) {
+        match writeln!(out, "{line}") {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => return,
             Err(e) => {
-                eprintln!("Error: could not write to stdout: {}", e);
+                eprintln!("Error: could not write to stdout: {e}");
                 exit(1);
             }
         }
@@ -414,45 +414,40 @@ fn installed_status(jdk: &RemoteJdk, installed: &[adoptium::InstalledJdk]) -> In
 
 fn cmd_clean() {
     let jdk_base = jdk_base_dir().unwrap_or_else(|e| {
-        eprintln!("Error: {:#}", e);
+        eprintln!("Error: {e:#}");
         exit(1);
     });
     clean_jdks(&jdk_base).unwrap_or_else(|e| {
-        eprintln!("Error: Could not clean JDKs: {:#}", e);
+        eprintln!("Error: Could not clean JDKs: {e:#}");
         exit(1);
-    })
+    });
 }
 
 fn cmd_default() {
-    let java_version = match env::args().nth(2) {
-        Some(v) => v,
-        None => {
-            eprintln!("Error: Missing argument for default command.");
-            print_usage_and_exit();
-        }
+    let Some(java_version) = env::args().nth(2) else {
+        eprintln!("Error: Missing argument for default command.");
+        print_usage_and_exit();
     };
 
     assert_java_version(&java_version);
-    conf::init_default_config(java_version).unwrap_or_else(|e| {
-        eprintln!("Error: Could not create default config file: {:#}", e);
+    conf::init_default_config(&java_version).unwrap_or_else(|e| {
+        eprintln!("Error: Could not create default config file: {e:#}");
         exit(1);
     });
 }
 
 fn cmd_init(client: &AdoptiumClient) {
-    let java_version = if env::args().len() > 2 {
-        env::args().nth(2).unwrap()
-    } else {
+    let java_version = env::args().nth(2).unwrap_or_else(|| {
         client.latest_major().unwrap_or_else(|e| {
-            eprintln!("Error: Could not fetch latest JDK version: {:#}", e);
+            eprintln!("Error: Could not fetch latest JDK version: {e:#}");
             exit(1);
         })
-    };
+    });
 
     assert_java_version(&java_version);
 
-    conf::init_project_config(java_version).unwrap_or_else(|e| {
-        eprintln!("Error: Could not create config file: {:#}", e);
+    conf::init_project_config(&java_version).unwrap_or_else(|e| {
+        eprintln!("Error: Could not create config file: {e:#}");
         exit(1);
     });
 }
@@ -464,18 +459,18 @@ fn cmd_update(client: &AdoptiumClient) {
 
     if args.is_empty() {
         let java_version = conf::load_config_java_version().unwrap_or_else(|e| {
-            eprintln!("Error: Could not load configuration: {:#}", e);
+            eprintln!("Error: Could not load configuration: {e:#}");
             exit(1);
         });
         versions_to_install.insert(java_version);
     } else {
         if args.iter().any(|arg| arg == "all") {
             find_installed_major_versions(&jdk_base_dir().unwrap_or_else(|e| {
-                eprintln!("Error: {:#}", e);
+                eprintln!("Error: {e:#}");
                 exit(1);
             }))
             .unwrap_or_else(|e| {
-                eprintln!("Error: Could not determine installed JDK versions: {:#}", e);
+                eprintln!("Error: Could not determine installed JDK versions: {e:#}");
                 exit(1);
             })
             .into_iter()
@@ -485,10 +480,10 @@ fn cmd_update(client: &AdoptiumClient) {
         }
 
         args.into_iter().filter(|arg| arg != "all").for_each(|v| {
-            if !conf::is_valid_version(&v) {
-                eprintln!("Skipping invalid version: '{}'.", v)
-            } else {
+            if conf::is_valid_version(&v) {
                 versions_to_install.insert(v);
+            } else {
+                eprintln!("Skipping invalid version: '{v}'.");
             }
         });
 
@@ -509,12 +504,12 @@ fn cmd_update(client: &AdoptiumClient) {
 
 fn update(client: &AdoptiumClient, java_version: &str) {
     let jdk_metadata = client.fetch_metadata(java_version).unwrap_or_else(|e| {
-        eprintln!("Error: Could not fetch JDK metadata: {:#}", e);
+        eprintln!("Error: Could not fetch JDK metadata: {e:#}");
         exit(1);
     });
 
     let jdk_base = jdk_base_dir().unwrap_or_else(|e| {
-        eprintln!("Error: {:#}", e);
+        eprintln!("Error: {e:#}");
         exit(1);
     });
 
@@ -526,24 +521,23 @@ fn update(client: &AdoptiumClient, java_version: &str) {
         );
     } else {
         install_jdk(client, &jdk_base, &jdk_metadata).unwrap_or_else(|e| {
-            eprintln!("Error: Could not install JDK: {:#}", e);
+            eprintln!("Error: Could not install JDK: {e:#}");
             exit(1);
         });
     }
 }
 
-/// Resolve the JAVA_HOME for the requested major version, installing the JDK on
+/// Resolve the `JAVA_HOME` for the requested major version, installing the JDK on
 /// demand if it is not already present. Diagnostics go to stderr; this returns
 /// the path so callers decide what (if anything) to print to stdout.
 fn resolve_java_home(client: &AdoptiumClient, java_version: &str) -> anyhow::Result<PathBuf> {
     let jdk_base = jdk_base_dir()?;
 
-    match find_suitable_jdk(&jdk_base, java_version) {
-        Some(path) => Ok(path),
-        None => {
-            let metadata = client.fetch_metadata(java_version)?;
-            install_jdk(client, &jdk_base, &metadata)
-        }
+    if let Some(path) = find_suitable_jdk(&jdk_base, java_version) {
+        Ok(path)
+    } else {
+        let metadata = client.fetch_metadata(java_version)?;
+        install_jdk(client, &jdk_base, &metadata)
     }
 }
 
@@ -563,7 +557,7 @@ fn setup(client: &AdoptiumClient, java_version: &str) -> anyhow::Result<()> {
     let current_path = env::var("PATH").unwrap_or_default();
     if let Some(updated_path) = update_path(&java_bin_path, &current_path, &jdk_base)? {
         updates = true;
-        println!("export PATH=\"{}\"", updated_path);
+        println!("export PATH=\"{updated_path}\"");
     }
 
     if updates {
@@ -591,7 +585,7 @@ fn install_jdk(
     adoptium::install_jdk(jdk_metadata, temp_dir.path(), dest_dir.as_path())?;
 
     temp_dir.close().unwrap_or_else(|err| {
-        eprintln!("Warning: Could not delete temporary directory: {}", err);
+        eprintln!("Warning: Could not delete temporary directory: {err}");
     });
 
     Ok(dest_dir)
@@ -610,7 +604,7 @@ fn jdk_base_dir() -> anyhow::Result<PathBuf> {
     Ok(jdk_base_dir_for(env::consts::OS, &home))
 }
 
-/// JDK install location, matching IntelliJ IDEA's layout so both tools see the
+/// JDK install location, matching `IntelliJ` IDEA's layout so both tools see the
 /// same JDKs. Split out from [`jdk_base_dir`] so every platform is testable from
 /// any host.
 fn jdk_base_dir_for(os: &str, home: &Path) -> PathBuf {
@@ -655,20 +649,22 @@ fn update_path(
 fn assert_java_version(java_version: &str) {
     if !conf::is_valid_version(java_version) {
         eprintln!(
-            "Unsupported version: '{}'. Only major versions 8, 11, ... are supported.",
-            java_version
+            "Unsupported version: '{java_version}'. Only major versions 8, 11, ... are supported."
         );
         exit(1);
     }
 }
 
 #[cfg(test)]
+// `env::set_var` requires `unsafe` under edition 2024; the mutations here are
+// guarded by `serial_test`.
+#[allow(unsafe_code)]
 mod tests {
     use super::*;
     use tempfile::tempdir;
 
     fn owned(items: &[&str]) -> Vec<String> {
-        items.iter().map(|s| s.to_string()).collect()
+        items.iter().map(std::string::ToString::to_string).collect()
     }
 
     #[test]

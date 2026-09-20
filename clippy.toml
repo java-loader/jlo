@@ -1,0 +1,4 @@
+# unwrap/expect are fine in tests: a panic is a test failure, which is the point.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true

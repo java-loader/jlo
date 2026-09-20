@@ -1,0 +1,46 @@
+# cargo-deny configuration. Run locally with:
+#   cargo deny check
+# CI runs the same check on every push and pull request.
+
+[graph]
+# jlo ships Linux x86_64 and macOS arm64 binaries; ignore deps that only ever
+# get pulled in for other targets (Windows, wasm, ...) so their advisories and
+# licenses don't gate a release we never build.
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-apple-darwin",
+]
+
+[advisories]
+version = 2
+# Fail on any unfixed RUSTSEC advisory. Add an explicit, commented entry here
+# only when a fix is unavailable and the code path is provably unreachable.
+ignore = []
+
+[licenses]
+version = 2
+# Permissive licenses only: jlo is distributed as a static binary, so a copyleft
+# dependency would impose obligations on everyone who ships it.
+allow = [
+    "Apache-2.0",
+    "MIT",
+    "BSD-3-Clause",
+    "Unicode-3.0",
+    "Zlib",
+]
+confidence-threshold = 0.9
+
+# Note: semver_rs declares no `license` expression in its manifest, so
+# cargo-deny falls back to scanning its LICENSE file (MIT) and emits a
+# `no-license-field` warning. That warning is informational; the license is
+# resolved correctly, so no `[[licenses.clarify]]` entry is needed.
+
+[bans]
+# Duplicate versions of the same crate bloat the binary; warn so they stay visible.
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
