@@ -19,6 +19,10 @@ use std::path::{Path, PathBuf};
 use std::process::exit;
 use tempfile::tempdir;
 
+/// Name of J'Lo's state directory under `$HOME`, used when `JLO_HOME` is unset.
+/// Must stay in sync with `install.sh`.
+const JLO_HOME_DIR_NAME: &str = ".jlo";
+
 fn main() {
     // The easter egg is deliberately not a clap subcommand: `hide = true`
     // only suppresses it from `--help`. `clap_complete` still emits hidden
@@ -714,10 +718,16 @@ fn install_jdk_inner(
     Ok(())
 }
 
+/// J'Lo's own state directory — where `default.jlorc` lives.
+///
+/// The fallback must match what `install.sh` exports (`$HOME/.jlo`), not bare
+/// `$HOME`: interactive shells get `JLO_HOME` from `jlo-init.sh`, but scripts
+/// and CI invoking `jlo-bin` directly do not, and those two must resolve the
+/// same file.
 fn jlo_home_dir() -> anyhow::Result<PathBuf> {
     let path = env::var_os("JLO_HOME")
         .map(PathBuf::from)
-        .or_else(env::home_dir)
+        .or_else(|| env::home_dir().map(|home| home.join(JLO_HOME_DIR_NAME)))
         .context("could not determine home directory.")?;
     Ok(path)
 }
@@ -1033,6 +1043,16 @@ mod tests {
     fn has_outdated_is_false_with_nothing_installed() {
         let available = vec![remote("21.0.12+101.0.LTS", 21)];
         assert!(!has_outdated(&available, &[]));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn jlo_home_dir_falls_back_to_dot_jlo_under_home() {
+        unsafe {
+            env::remove_var("JLO_HOME");
+        }
+        let expected = env::home_dir().unwrap().join(".jlo");
+        assert_eq!(jlo_home_dir().unwrap(), expected);
     }
 
     #[test]

@@ -88,6 +88,13 @@ pub(crate) fn init_default_config(java_version: &str) -> anyhow::Result<()> {
 }
 
 fn init_config(path: &Path, latest_release: &str) -> anyhow::Result<()> {
+    // $JLO_HOME need not exist: jlo-bin can be run straight from a build,
+    // without install.sh ever having created ~/.jlo.
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| anyhow!("could not create directory '{}': {e}", parent.display()))?;
+    }
+
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -214,6 +221,20 @@ mod tests {
             "# Java version configured by J'Lo - https://github.com/java-loader/jlo"
         );
         assert_eq!(lines[1], "21");
+    }
+
+    #[test]
+    fn init_config_creates_missing_parent_directory() {
+        // `jlo default` writes into $JLO_HOME, which does not exist yet when
+        // jlo-bin is run without the installer having created ~/.jlo.
+        let dir = tempdir().unwrap();
+        let file = dir.path().join(".jlo").join("default.jlorc");
+        init_config(&file, "21").unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&file).unwrap().lines().nth(1),
+            Some("21")
+        );
     }
 
     #[test]
