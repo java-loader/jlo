@@ -178,24 +178,78 @@ jlo default 25
 
 The command `jlo update` updates installed Java versions to their latest minor releases.
 
+The quickest way to deal with everything `jlo list` flags as `outdated` is:
+
+```shell
+jlo update all
+```
+
+That updates every installed major version in one go — no need to name them individually.
+
 **Behavior:**
+- A special argument `all` updates all installed Java versions.
 - Multiple versions can be specified as arguments; each will be updated to its latest minor release.
   Missing versions will be installed automatically.
-- A special argument `all` updates all installed Java versions.
 - If no arguments are provided, it updates the Java version specified in the `.jlorc` file in the current directory,
   falling back to `~/.jlo/default.jlorc` if none is found.
 
 **Usage examples:**
 ```shell
+# update all installed Java versions
+jlo update all
+
 # update Java version specified in .jlorc or ~/.jlo/default.jlorc
 jlo update
 
 # update Java versions 21 and 25
 jlo update 21 25
-
-# update all installed Java versions
-jlo update all
 ```
+
+## Listing Versions
+
+The command `jlo list` shows every JDK Adoptium offers for this OS and architecture, newest first, with the
+latest build of each major version — annotated with what you already have installed.
+
+```bash
+jlo list
+```
+
+```
+26  26.0.2+101              installed
+25  25.0.4+101.0.LTS   LTS  installed
+24  24.0.2+12
+21  21.0.12+101.0.LTS  LTS  outdated (21.0.11+10.0.LTS)
+17  17.0.20+101        LTS  installed
+11  11.0.32+101        LTS
+```
+
+Every line starts with the **major version** — that is the number `jlo update`, `jlo exec` and `.jlorc` expect, so
+you can read a row and use it directly:
+
+```bash
+jlo update 21
+```
+
+When any row is marked `outdated`, `jlo list` prints a reminder:
+
+```
+TIP: Use `jlo update all` to update all outdated JDKs.
+```
+
+The tip goes to standard error, so it never ends up in a pipe alongside the listing.
+
+Major versions Adoptium has no build for on this platform are omitted, so everything listed is installable.
+
+Add `--offline` to skip the network and list only what is installed locally — including every minor version you
+have, not just the newest per major. Installations J'Lo did not create are marked `(unmanaged)`; `jlo clean`
+leaves those alone.
+
+```bash
+jlo list --offline
+```
+
+Colours switch off automatically when the output is not a terminal, so `jlo list | grep LTS` and friends work as
+expected.
 
 ## Cleaning Installed Versions
 

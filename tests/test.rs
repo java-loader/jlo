@@ -33,6 +33,76 @@ fn unknown_command() {
 }
 
 #[test]
+fn unknown_command_usage_mentions_list() {
+    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
+    cmd.arg("nosuchcmd")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("list"));
+}
+
+#[test]
+fn list_offline_succeeds_without_network() {
+    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
+    // Either JDKs are installed (one version per line on stdout) or none are
+    // (a note on stderr) - both are success, and neither needs the network.
+    cmd.args(["list", "--offline"])
+        .env("JLO_ADOPTIUM_API_URL", "http://127.0.0.1:1")
+        .assert()
+        .success()
+        .code(0);
+}
+
+#[test]
+fn list_rejects_unknown_option() {
+    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
+    cmd.args(["list", "--nope"])
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains("unknown option"));
+}
+
+#[test]
+fn list_remote_shows_available_versions() {
+    let mut server = mockito::Server::new();
+    let _r = server
+        .mock("GET", "/v3/info/available_releases")
+        .with_body(r#"{"available_releases":[21],"available_lts_releases":[21]}"#)
+        .create();
+    let _a = server
+        .mock(
+            "GET",
+            mockito::Matcher::Regex(r"^/v3/assets/latest/21/hotspot".to_string()),
+        )
+        .match_query(mockito::Matcher::Any)
+        .with_body(include_str!("fixtures/assets_latest.json"))
+        .create();
+
+    Command::cargo_bin("jlo-bin")
+        .unwrap()
+        .arg("list")
+        .env("JLO_ADOPTIUM_API_URL", server.url())
+        .assert()
+        .success()
+        // The major version leads the line - that is what `jlo update` takes.
+        .stdout(predicate::str::starts_with("21  21.0.11+10.0.LTS"))
+        .stdout(predicate::str::contains("LTS"));
+}
+
+#[test]
+fn list_remote_network_failure_points_at_offline() {
+    Command::cargo_bin("jlo-bin")
+        .unwrap()
+        .arg("list")
+        .env("JLO_ADOPTIUM_API_URL", "http://127.0.0.1:1")
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains("jlo list --offline"));
+}
+
+#[test]
 fn selfupdate_not_supported() {
     let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
     cmd.arg("selfupdate")

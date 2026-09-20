@@ -107,6 +107,61 @@ pub fn find_suitable_jdk(jdk_base: &Path, required_version: &str) -> Option<Path
     matching_versions.first().cloned()
 }
 
+/// `semver_rs::parse` is lenient - it happily turns any junk into `0.0.0` - so a
+/// directory only counts as a JDK when it parses to a real major version.
+fn is_jdk_version_dir(name: &str) -> bool {
+    semver_rs::parse(name, None).is_ok_and(|sv| sv.major > 0)
+}
+
+/// A JDK found in the install directory, identified by its semver directory name.
+pub struct InstalledJdk {
+    pub version: String,
+    pub major: i64,
+    /// Whether the JDK carries the `.jlo-managed` marker, i.e. whether `jlo
+    /// clean` is allowed to remove it.
+    pub managed: bool,
+}
+
+/// List every JDK in `jdk_base` whose directory name parses as a semver, newest
+/// first. A missing base directory is not an error - it just means nothing has
+/// been installed yet.
+pub fn find_installed_jdks(jdk_base: &Path) -> anyhow::Result<Vec<InstalledJdk>> {
+    let entries = match std::fs::read_dir(jdk_base) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => {
+            return Err(e).with_context(|| format!("Can't read JDK base directory {:?}", jdk_base));
+        }
+    };
+
+    let mut paths: Vec<PathBuf> = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.is_dir()
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(is_jdk_version_dir)
+        })
+        .collect();
+
+    sort_by_semver_desc(&mut paths);
+
+    Ok(paths
+        .into_iter()
+        .filter_map(|path| {
+            let version = path.file_name().and_then(|name| name.to_str())?.to_string();
+            let major = semver_rs::parse(&version, None).ok()?.major;
+            Some(InstalledJdk {
+                version,
+                major,
+                managed: path.join(MARKER_FILE).exists(),
+            })
+        })
+        .collect())
+}
+
 pub fn find_installed_major_versions(jdk_base: &Path) -> anyhow::Result<Vec<i64>> {
     let mut major_versions = std::collections::HashSet::new();
 
@@ -256,6 +311,16 @@ impl TryFrom<Asset> for JdkMetadata {
 #[derive(serde::Deserialize)]
 struct AvailableReleases {
     available_releases: Vec<i64>,
+    #[serde(default)]
+    available_lts_releases: Vec<i64>,
+}
+
+/// A JDK release Adoptium offers for *this* OS and architecture.
+#[derive(Debug)]
+pub struct RemoteJdk {
+    pub version: String,
+    pub major: i64,
+    pub lts: bool,
 }
 
 /// The single point of contact with Adoptium: discovering available releases,
@@ -279,16 +344,34 @@ impl AdoptiumClient {
     }
 
     pub fn fetch_metadata(&self, java_version: &str) -> anyhow::Result<JdkMetadata> {
-        let api_url = format!(
+        let api_url = self.latest_asset_url(java_version)?;
+
+        let asset = self.fetch_latest_asset(&api_url)?.with_context(|| {
+            format!(
+                "No matching JDK found for the specified version and system architecture.\nTried to fetch metadata from: {}",
+                api_url
+            )
+        })?;
+
+        asset.try_into()
+    }
+
+    fn latest_asset_url(&self, java_version: &str) -> anyhow::Result<String> {
+        Ok(format!(
             "{base_url}/v3/assets/latest/{java_version}/hotspot?architecture={arch}&image_type=jdk&os={os}&vendor=eclipse",
             base_url = self.base_url,
             arch = jdk_arch()?,
             os = jdk_os()?
-        );
+        ))
+    }
 
+    /// Fetch the newest asset for a major version, or `None` when Adoptium has
+    /// no build for this OS/architecture. That case is *not* an HTTP error: the
+    /// API answers `200` with an empty array.
+    fn fetch_latest_asset(&self, api_url: &str) -> anyhow::Result<Option<Asset>> {
         let response = self
             .client
-            .get(&api_url)
+            .get(api_url)
             .send()
             .context("Could not fetch metadata from API")?;
 
@@ -301,17 +384,64 @@ impl AdoptiumClient {
 
         let assets: Vec<Asset> = response.json().context("Failed to parse JSON response")?;
 
-        let asset = assets.into_iter().next().with_context(|| {
-            format!(
-                "No matching JDK found for the specified version and system architecture.\nTried to fetch metadata from: {}",
-                api_url
-            )
-        })?;
-
-        asset.try_into()
+        Ok(assets.into_iter().next())
     }
 
-    pub fn latest_major(&self) -> anyhow::Result<String> {
+    /// Every JDK Adoptium can install on this machine, newest first.
+    ///
+    /// Costs one request for the major-version list plus one per major. Done
+    /// serially that is ~4s, so the per-major lookups are fanned out across
+    /// threads sharing the pooled client.
+    pub fn available_jdks(&self) -> anyhow::Result<Vec<RemoteJdk>> {
+        let releases = self.fetch_available_releases()?;
+        let lts: std::collections::HashSet<i64> =
+            releases.available_lts_releases.into_iter().collect();
+
+        let looked_up: Vec<(i64, anyhow::Result<Option<String>>)> = std::thread::scope(|scope| {
+            let handles: Vec<_> = releases
+                .available_releases
+                .iter()
+                .map(|&major| (major, scope.spawn(move || self.latest_version(major))))
+                .collect();
+
+            handles
+                .into_iter()
+                .map(|(major, handle)| {
+                    let result = handle
+                        .join()
+                        .unwrap_or_else(|_| bail!("lookup thread panicked"));
+                    (major, result)
+                })
+                .collect()
+        });
+
+        let mut jdks = Vec::new();
+        for (major, result) in looked_up {
+            match result {
+                Ok(Some(version)) => jdks.push(RemoteJdk {
+                    version,
+                    major,
+                    lts: lts.contains(&major),
+                }),
+                // No build for this OS/architecture - nothing to offer.
+                Ok(None) => {}
+                // One major failing should not cost the user the whole listing.
+                Err(e) => eprintln!("Warning: could not look up JDK {}: {:#}", major, e),
+            }
+        }
+
+        jdks.sort_by(|a, b| compare(&b.version, &a.version, None).unwrap_or(Ordering::Equal));
+        Ok(jdks)
+    }
+
+    fn latest_version(&self, major: i64) -> anyhow::Result<Option<String>> {
+        let api_url = self.latest_asset_url(&major.to_string())?;
+        Ok(self
+            .fetch_latest_asset(&api_url)?
+            .map(|asset| asset.version.semver))
+    }
+
+    fn fetch_available_releases(&self) -> anyhow::Result<AvailableReleases> {
         let response = self
             .client
             .get(format!("{}/v3/info/available_releases", self.base_url))
@@ -325,8 +455,11 @@ impl AdoptiumClient {
             );
         }
 
-        let releases: AvailableReleases =
-            response.json().context("Failed to parse JSON response")?;
+        response.json().context("Failed to parse JSON response")
+    }
+
+    pub fn latest_major(&self) -> anyhow::Result<String> {
+        let releases = self.fetch_available_releases()?;
 
         let latest = releases
             .available_releases
@@ -553,6 +686,54 @@ mod tests {
         let dir = tempdir().unwrap();
         let versions = find_installed_major_versions(dir.path()).unwrap();
         assert!(versions.is_empty());
+    }
+
+    // -- find_installed_jdks --
+
+    #[test]
+    fn find_installed_jdks_sorted_newest_first() {
+        let dir = tempdir().unwrap();
+        create_jdk_dir(dir.path(), "21.0.9+7", true);
+        create_jdk_dir(dir.path(), "21.0.12+7", true);
+        create_jdk_dir(dir.path(), "17.0.13+11", true);
+
+        let jdks = find_installed_jdks(dir.path()).unwrap();
+        let versions: Vec<_> = jdks.iter().map(|j| j.version.as_str()).collect();
+        assert_eq!(versions, vec!["21.0.12+7", "21.0.9+7", "17.0.13+11"]);
+    }
+
+    #[test]
+    fn find_installed_jdks_reports_managed_flag() {
+        let dir = tempdir().unwrap();
+        create_jdk_dir(dir.path(), "21.0.12+7", true);
+        create_jdk_dir(dir.path(), "17.0.13+11", false);
+
+        let jdks = find_installed_jdks(dir.path()).unwrap();
+        assert_eq!(jdks[0].version, "21.0.12+7");
+        assert_eq!(jdks[0].major, 21);
+        assert!(jdks[0].managed);
+        assert_eq!(jdks[1].version, "17.0.13+11");
+        assert_eq!(jdks[1].major, 17);
+        assert!(!jdks[1].managed);
+    }
+
+    #[test]
+    fn find_installed_jdks_ignores_non_semver_and_files() {
+        let dir = tempdir().unwrap();
+        create_jdk_dir(dir.path(), "21.0.12+7", true);
+        fs::create_dir(dir.path().join("not-a-jdk")).unwrap();
+        fs::write(dir.path().join("21.0.1+9"), "a file, not a directory").unwrap();
+
+        let jdks = find_installed_jdks(dir.path()).unwrap();
+        assert_eq!(jdks.len(), 1);
+        assert_eq!(jdks[0].version, "21.0.12+7");
+    }
+
+    #[test]
+    fn find_installed_jdks_missing_base_dir_is_empty() {
+        let dir = tempdir().unwrap();
+        let missing = dir.path().join("nothing-installed-here");
+        assert!(find_installed_jdks(&missing).unwrap().is_empty());
     }
 
     // -- clean_jdks --
@@ -844,6 +1025,135 @@ mod client_tests {
             "got: {:#}",
             err
         );
+    }
+
+    // -- available_jdks --
+
+    fn releases_body(majors: &[i64], lts: &[i64]) -> String {
+        serde_json::json!({
+            "available_releases": majors,
+            "available_lts_releases": lts,
+        })
+        .to_string()
+    }
+
+    fn asset_body(semver: &str) -> String {
+        let mut json: serde_json::Value = serde_json::from_str(ASSETS_FIXTURE).unwrap();
+        json[0]["version"]["semver"] = serde_json::Value::String(semver.to_string());
+        json.to_string()
+    }
+
+    fn major_mock(
+        server: &mut mockito::ServerGuard,
+        major: i64,
+        status: usize,
+        body: &str,
+    ) -> mockito::Mock {
+        server
+            .mock(
+                "GET",
+                mockito::Matcher::Regex(format!(r"^/v3/assets/latest/{}/hotspot", major)),
+            )
+            .match_query(mockito::Matcher::Any)
+            .with_status(status)
+            .with_body(body)
+            .expect_at_least(1)
+            .create()
+    }
+
+    #[test]
+    fn available_jdks_lists_latest_per_major_newest_first() {
+        let mut server = mockito::Server::new();
+        let _r = server
+            .mock("GET", "/v3/info/available_releases")
+            .with_body(releases_body(&[17, 21, 25], &[17, 21]))
+            .create();
+        let _a17 = major_mock(&mut server, 17, 200, &asset_body("17.0.20+101"));
+        let _a21 = major_mock(&mut server, 21, 200, &asset_body("21.0.12+101.0.LTS"));
+        let _a25 = major_mock(&mut server, 25, 200, &asset_body("25.0.4+101.0.LTS"));
+
+        let client = AdoptiumClient::new(server.url()).unwrap();
+        let jdks = client.available_jdks().unwrap();
+
+        let rows: Vec<_> = jdks
+            .iter()
+            .map(|j| (j.version.as_str(), j.major, j.lts))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("25.0.4+101.0.LTS", 25, false),
+                ("21.0.12+101.0.LTS", 21, true),
+                ("17.0.20+101", 17, true),
+            ]
+        );
+    }
+
+    #[test]
+    fn available_jdks_skips_majors_without_a_build_for_this_platform() {
+        let mut server = mockito::Server::new();
+        let _r = server
+            .mock("GET", "/v3/info/available_releases")
+            .with_body(releases_body(&[16, 21], &[21]))
+            .create();
+        // Adoptium answers 200 with an empty array when it has no build for
+        // this OS/architecture.
+        let _a16 = major_mock(&mut server, 16, 200, "[]");
+        let _a21 = major_mock(&mut server, 21, 200, &asset_body("21.0.12+101.0.LTS"));
+
+        let client = AdoptiumClient::new(server.url()).unwrap();
+        let jdks = client.available_jdks().unwrap();
+
+        assert_eq!(jdks.len(), 1);
+        assert_eq!(jdks[0].version, "21.0.12+101.0.LTS");
+    }
+
+    #[test]
+    fn available_jdks_survives_a_single_major_failing() {
+        let mut server = mockito::Server::new();
+        let _r = server
+            .mock("GET", "/v3/info/available_releases")
+            .with_body(releases_body(&[17, 21], &[17, 21]))
+            .create();
+        let _a17 = major_mock(&mut server, 17, 500, "boom");
+        let _a21 = major_mock(&mut server, 21, 200, &asset_body("21.0.12+101.0.LTS"));
+
+        let client = AdoptiumClient::new(server.url()).unwrap();
+        let jdks = client.available_jdks().unwrap();
+
+        assert_eq!(jdks.len(), 1);
+        assert_eq!(jdks[0].version, "21.0.12+101.0.LTS");
+    }
+
+    #[test]
+    fn available_jdks_http_error_on_release_list_is_fatal() {
+        let mut server = mockito::Server::new();
+        let _r = server
+            .mock("GET", "/v3/info/available_releases")
+            .with_status(503)
+            .with_body("nope")
+            .create();
+
+        let client = AdoptiumClient::new(server.url()).unwrap();
+        let err = client.available_jdks().unwrap_err();
+
+        assert!(format!("{:#}", err).contains("HTTP 503"), "got: {:#}", err);
+    }
+
+    #[test]
+    fn available_jdks_without_lts_field_marks_nothing_lts() {
+        let mut server = mockito::Server::new();
+        let _r = server
+            .mock("GET", "/v3/info/available_releases")
+            .with_body(r#"{"available_releases":[21]}"#)
+            .create();
+        let _a21 = major_mock(&mut server, 21, 200, &asset_body("21.0.12+101.0.LTS"));
+
+        let client = AdoptiumClient::new(server.url()).unwrap();
+        let jdks = client.available_jdks().unwrap();
+
+        assert_eq!(jdks.len(), 1);
+        assert!(!jdks[0].lts);
     }
 
     #[test]
