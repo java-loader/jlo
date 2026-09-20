@@ -8,7 +8,7 @@ mod ui;
 use crate::adoptium::{AdoptiumClient, JdkMetadata, RemoteJdk};
 use crate::store::JdkStore;
 use crate::ui::InstallUi;
-use anyhow::Context;
+use anyhow::{Context, anyhow};
 use clap::Parser;
 use console::style;
 use std::collections::HashSet;
@@ -22,7 +22,50 @@ use tempfile::tempdir;
 /// Must stay in sync with `install.sh`.
 const JLO_HOME_DIR_NAME: &str = ".jlo";
 
+/// A failed command: the error to report, plus the advice line that belongs
+/// *under* it, if any.
+///
+/// Reporting an error is `main`'s job alone, so a command that wants to add a
+/// hint has to hand it over rather than print it. Carrying it keeps the two
+/// lines in the order the user has always seen - the error first, the dimmed
+/// advice second - which printing at the failure site would invert.
+#[derive(Debug)]
+struct CommandError {
+    error: anyhow::Error,
+    hint: Option<String>,
+}
+
+impl CommandError {
+    fn with_hint(error: anyhow::Error, hint: impl Into<String>) -> Self {
+        Self {
+            error,
+            hint: Some(hint.into()),
+        }
+    }
+}
+
+impl From<anyhow::Error> for CommandError {
+    fn from(error: anyhow::Error) -> Self {
+        Self { error, hint: None }
+    }
+}
+
+/// The one place a command failure turns into a message and a non-zero exit
+/// status. Every `cmd_*` below hands its error back rather than ending the
+/// process; the only other `exit` calls left are the `exec` path, which cannot
+/// return because it has replaced the process image, and `print_lines`, which
+/// fails on the very stream it is writing the output to.
 fn main() {
+    if let Err(e) = run() {
+        ui::error!("{:#}", e.error);
+        if let Some(hint) = e.hint {
+            ui::hint!("{hint}");
+        }
+        exit(1);
+    }
+}
+
+fn run() -> Result<(), CommandError> {
     // The easter egg is deliberately not a clap subcommand: `hide = true`
     // only suppresses it from `--help`. `clap_complete` still emits hidden
     // subcommands into generated completion scripts, and clap's "did you
@@ -31,7 +74,7 @@ fn main() {
     // help, completions, and typo suggestions in one move.
     if env::args().nth(1).as_deref() == Some("sing") {
         eprintln!("There are no Easter Eggs in this program. Trust me. 💃");
-        return;
+        return Ok(());
     }
 
     // TRANSITION SHIM - delete after the next release.
@@ -61,14 +104,14 @@ fn main() {
     // which is precisely the drift this CLI rewrite exists to eliminate.
     if env::args().nth(1).as_deref() == Some("version") {
         println!(env!("CARGO_PKG_VERSION"));
-        return;
+        return Ok(());
     }
 
     let cli = cli::Cli::parse();
 
     let Some(command) = cli.command else {
         cli::print_help();
-        return;
+        return Ok(());
     };
 
     let api_url =
@@ -87,13 +130,14 @@ fn main() {
             global,
             force,
         } => cmd_init(&client, version, global, force),
-        cli::Command::Selfupdate => {
-            ui::error!(
-                "self-update is handled by the jlo shell function. Source jlo-init.sh from your shell profile, or re-run the installer."
-            );
-            exit(1);
+        cli::Command::Selfupdate => Err(anyhow!(
+            "self-update is handled by the jlo shell function. Source jlo-init.sh from your shell profile, or re-run the installer."
+        )
+        .into()),
+        cli::Command::Completions { shell } => {
+            cmd_completions(shell);
+            Ok(())
         }
-        cli::Command::Completions { shell } => cmd_completions(shell),
     }
 }
 
@@ -111,38 +155,33 @@ fn cmd_completions(shell: clap_complete::Shell) {
 
 /// Determine the requested major version: the explicit CLI argument if present,
 /// otherwise the project `.jlorc` / user default config.
-fn resolve_java_version_from(explicit: Option<String>) -> String {
-    let java_version = explicit.unwrap_or_else(|| {
-        conf::load_config_java_version().unwrap_or_else(|e| {
-            ui::error!("{e:#}");
-            exit(1);
-        })
-    });
+fn resolve_java_version_from(explicit: Option<String>) -> anyhow::Result<String> {
+    let java_version = match explicit {
+        Some(version) => version,
+        None => conf::load_config_java_version()?,
+    };
 
-    assert_java_version(&java_version);
-    java_version
+    assert_java_version(&java_version)?;
+    Ok(java_version)
 }
 
-fn cmd_env(client: &AdoptiumClient, version: Option<String>) {
-    let java_version = resolve_java_version_from(version);
-    if let Err(e) = setup(client, &java_version) {
-        ui::error!("{e:#}");
-        exit(1);
-    }
+fn cmd_env(client: &AdoptiumClient, version: Option<String>) -> Result<(), CommandError> {
+    let java_version = resolve_java_version_from(version)?;
+    setup(client, &java_version)?;
+    Ok(())
 }
 
-fn cmd_home(client: &AdoptiumClient, version: Option<String>) {
-    let java_version = resolve_java_version_from(version);
-    let java_home = JdkStore::discover()
-        .and_then(|store| resolve_java_home(client, &store, &java_version))
-        .unwrap_or_else(|e| {
-            ui::error!("{e:#}");
-            exit(1);
-        });
+fn cmd_home(client: &AdoptiumClient, version: Option<String>) -> Result<(), CommandError> {
+    let java_version = resolve_java_version_from(version)?;
+    let store = JdkStore::discover()?;
+    let java_home = resolve_java_home(client, &store, &java_version)?;
     println!("{}", java_home.to_string_lossy());
+    Ok(())
 }
 
-fn cmd_exec(client: &AdoptiumClient, args: &[String]) {
+/// Diverges on success: `run_exec` replaces the process image. The `Result` is
+/// for the argument errors that can still be reported the ordinary way.
+fn cmd_exec(client: &AdoptiumClient, args: &[String]) -> Result<(), CommandError> {
     let args = restore_leading_separator(args);
 
     // clap's own `-h`/`--help` interception only fires before any value has
@@ -156,19 +195,22 @@ fn cmd_exec(client: &AdoptiumClient, args: &[String]) {
     let before_separator = &args[..separator];
     if before_separator.iter().any(|a| a == "--help") {
         cli::print_exec_help(true);
-        return;
+        return Ok(());
     }
     if before_separator.iter().any(|a| a == "-h") {
         cli::print_exec_help(false);
-        return;
+        return Ok(());
     }
 
-    let (version, command) = parse_exec_args(&args).unwrap_or_else(|e| {
-        ui::error!("{e}");
-        ui::hint!("Usage: jlo exec [VERSION] -- <COMMAND> [ARGS]...");
-        exit(1);
-    });
+    let (version, command) = parse_exec_args(&args).map_err(|e| {
+        CommandError::with_hint(
+            anyhow!("{e}"),
+            "Usage: jlo exec [VERSION] -- <COMMAND> [ARGS]...",
+        )
+    })?;
 
+    // `-> !`, so this tail expression never produces the `Ok(())` its type
+    // says it does.
     run_exec(client, version, &command);
 }
 
@@ -261,9 +303,13 @@ mod exec_arg_recovery_tests {
 /// downloading anything.
 #[cfg(unix)]
 fn run_exec(client: &AdoptiumClient, version: Option<String>, command: &[String]) -> ! {
-    let java_version = resolve_java_version_from(version);
-    let java_home = JdkStore::discover()
-        .and_then(|store| resolve_java_home(client, &store, &java_version))
+    // This function never returns, so it reports its own failures rather than
+    // handing them back to `main`.
+    let java_home = resolve_java_version_from(version)
+        .and_then(|java_version| {
+            let store = JdkStore::discover()?;
+            resolve_java_home(client, &store, &java_version)
+        })
         .unwrap_or_else(|e| {
             ui::error!("{e:#}");
             exit(1);
@@ -368,26 +414,23 @@ fn exec_failure_code(kind: std::io::ErrorKind) -> i32 {
 /// Every line starts with the major version, because that - not the full build
 /// version - is what `jlo update`, `jlo exec` and `.jlorc` take. Colours switch
 /// themselves off when stdout is not a terminal, so a pipe sees plain text.
-fn cmd_list(client: &AdoptiumClient, offline: bool) {
-    let store = JdkStore::discover().unwrap_or_else(|e| {
-        ui::error!("{e:#}");
-        exit(1);
-    });
-    let installed = store.list().unwrap_or_else(|e| {
-        ui::error!("could not list installed JDKs: {e:#}");
-        exit(1);
-    });
+fn cmd_list(client: &AdoptiumClient, offline: bool) -> Result<(), CommandError> {
+    let store = JdkStore::discover()?;
+    let installed = store.list().context("could not list installed JDKs")?;
 
     if offline {
         print_offline_list(&installed, store.base());
     } else {
-        let available = client.available_jdks().unwrap_or_else(|e| {
-            ui::error!("{e:#}");
-            ui::hint!("Use 'jlo list --offline' to list the JDKs already installed.");
-            exit(1);
-        });
+        let available = client.available_jdks().map_err(|e| {
+            CommandError::with_hint(
+                e,
+                "Use 'jlo list --offline' to list the JDKs already installed.",
+            )
+        })?;
         print_remote_list(&available, &installed);
     }
+
+    Ok(())
 }
 
 fn print_offline_list(installed: &[store::InstalledJdk], jdk_base: &Path) {
@@ -529,27 +572,27 @@ fn installed_status(jdk: &RemoteJdk, installed: &[store::InstalledJdk]) -> Insta
     }
 }
 
-fn cmd_clean() {
-    let store = JdkStore::discover().unwrap_or_else(|e| {
-        ui::error!("{e:#}");
-        exit(1);
-    });
-    let report = store.clean().unwrap_or_else(|e| {
-        ui::error!("could not clean JDKs: {e:#}");
-        exit(1);
-    });
+fn cmd_clean() -> Result<(), CommandError> {
+    let store = JdkStore::discover()?;
+    let report = store.clean().context("could not clean JDKs")?;
     ui::clean_report(&report);
+    Ok(())
 }
 
-fn cmd_init(client: &AdoptiumClient, version: Option<String>, global: bool, force: bool) {
-    let java_version = version.unwrap_or_else(|| {
-        client.latest_major().unwrap_or_else(|e| {
-            ui::error!("could not fetch latest JDK version: {e:#}");
-            exit(1);
-        })
-    });
+fn cmd_init(
+    client: &AdoptiumClient,
+    version: Option<String>,
+    global: bool,
+    force: bool,
+) -> Result<(), CommandError> {
+    let java_version = match version {
+        Some(version) => version,
+        None => client
+            .latest_major()
+            .context("could not fetch latest JDK version")?,
+    };
 
-    assert_java_version(&java_version);
+    assert_java_version(&java_version)?;
 
     let result = if global {
         conf::init_default_config(&java_version, force)
@@ -557,47 +600,43 @@ fn cmd_init(client: &AdoptiumClient, version: Option<String>, global: bool, forc
         conf::init_project_config(&java_version, force)
     };
 
-    result.unwrap_or_else(|e| {
+    result.map_err(|e| {
+        // `--force` answers exactly one of the failures below, so the hint is
+        // keyed off the message `conf` produced. Read it before the context is
+        // attached: `to_string` renders only the outermost message.
         let already_exists = e.to_string().contains("already exists");
-        ui::error!("could not create config file: {e:#}");
+        let e = e.context("could not create config file");
         if already_exists {
-            ui::hint!("Re-run with --force to overwrite it.");
+            CommandError::with_hint(e, "Re-run with --force to overwrite it.")
+        } else {
+            e.into()
         }
-        exit(1);
-    });
+    })
 }
 
-fn cmd_update(client: &AdoptiumClient, versions: Vec<String>, all: bool) {
+fn cmd_update(
+    client: &AdoptiumClient,
+    versions: Vec<String>,
+    all: bool,
+) -> Result<(), CommandError> {
     let mut versions_to_install: HashSet<String> = HashSet::new();
 
     // `--all` and explicit versions are mutually exclusive (clap enforces it),
     // so these three arms are the whole input space.
     if all {
-        JdkStore::discover()
-            .unwrap_or_else(|e| {
-                ui::error!("{e:#}");
-                exit(1);
-            })
+        JdkStore::discover()?
             .installed_majors()
-            .unwrap_or_else(|e| {
-                ui::error!("could not determine installed JDK versions: {e:#}");
-                exit(1);
-            })
+            .context("could not determine installed JDK versions")?
             .into_iter()
             .for_each(|v| {
                 versions_to_install.insert(v.to_string());
             });
 
         if versions_to_install.is_empty() {
-            ui::error!("no installed JDKs to update");
-            exit(1);
+            return Err(anyhow!("no installed JDKs to update").into());
         }
     } else if versions.is_empty() {
-        let java_version = conf::load_config_java_version().unwrap_or_else(|e| {
-            ui::error!("{e:#}");
-            exit(1);
-        });
-        versions_to_install.insert(java_version);
+        versions_to_install.insert(conf::load_config_java_version()?);
     } else {
         for v in versions {
             if conf::is_valid_version(&v) {
@@ -608,8 +647,7 @@ fn cmd_update(client: &AdoptiumClient, versions: Vec<String>, all: bool) {
         }
 
         if versions_to_install.is_empty() {
-            ui::error!("no valid Java versions provided to update");
-            exit(1);
+            return Err(anyhow!("no valid Java versions provided to update").into());
         }
     }
 
@@ -619,7 +657,7 @@ fn cmd_update(client: &AdoptiumClient, versions: Vec<String>, all: bool) {
 
     let mut installed_any = false;
     for java_version in versions_to_install {
-        installed_any |= update(client, &java_version);
+        installed_any |= update(client, &java_version)?;
     }
 
     // An update leaves the superseded minor on disk on purpose - a command
@@ -629,6 +667,8 @@ fn cmd_update(client: &AdoptiumClient, versions: Vec<String>, all: bool) {
     if let Some(hint) = superseded_hint(installed_any, count_superseded()) {
         ui::hint!("{hint}");
     }
+
+    Ok(())
 }
 
 /// How many installs `jlo clean` would remove, or 0 if that cannot be
@@ -659,26 +699,16 @@ fn superseded_hint(installed_any: bool, superseded: usize) -> Option<String> {
 
 /// Returns whether a JDK was installed, so the caller can tell a real update
 /// from an already-current one.
-fn update(client: &AdoptiumClient, java_version: &str) -> bool {
-    let jdk_metadata = client.fetch_metadata(java_version).unwrap_or_else(|e| {
-        ui::error!("{e:#}");
-        exit(1);
-    });
-
-    let store = JdkStore::discover().unwrap_or_else(|e| {
-        ui::error!("{e:#}");
-        exit(1);
-    });
+fn update(client: &AdoptiumClient, java_version: &str) -> anyhow::Result<bool> {
+    let jdk_metadata = client.fetch_metadata(java_version)?;
+    let store = JdkStore::discover()?;
 
     if store.find_exact(&jdk_metadata).is_some() {
         ui::up_to_date(java_version, &jdk_metadata.semver);
-        false
+        Ok(false)
     } else {
-        install_jdk(client, &store, &jdk_metadata).unwrap_or_else(|e| {
-            ui::error!("could not install JDK: {e:#}");
-            exit(1);
-        });
-        true
+        install_jdk(client, &store, &jdk_metadata).context("could not install JDK")?;
+        Ok(true)
     }
 }
 
@@ -816,12 +846,13 @@ fn update_path(
     }
 }
 
-fn assert_java_version(java_version: &str) {
-    if !conf::is_valid_version(java_version) {
-        ui::error!(
+fn assert_java_version(java_version: &str) -> anyhow::Result<()> {
+    if conf::is_valid_version(java_version) {
+        Ok(())
+    } else {
+        Err(anyhow!(
             "unsupported version '{java_version}': only major versions 8, 11, ... are supported"
-        );
-        exit(1);
+        ))
     }
 }
 
@@ -835,6 +866,55 @@ mod tests {
 
     fn owned(items: &[&str]) -> Vec<String> {
         items.iter().map(std::string::ToString::to_string).collect()
+    }
+
+    /// A client pointed at an address nothing listens on. Every command below
+    /// must fail on its arguments before it would reach the network, so a
+    /// connection error here would be the test itself reporting a regression.
+    fn offline_client() -> AdoptiumClient {
+        AdoptiumClient::new("http://127.0.0.1:1")
+    }
+
+    // -- cmd_* error paths --
+    //
+    // These used to be reachable only by spawning the binary, because each one
+    // ended in `exit(1)`.
+
+    #[test]
+    fn cmd_env_rejects_an_unsupported_version() {
+        let err = cmd_env(&offline_client(), Some("nope".to_string()))
+            .expect_err("'nope' is not a major version");
+        assert_eq!(
+            format!("{:#}", err.error),
+            "unsupported version 'nope': only major versions 8, 11, ... are supported"
+        );
+        assert!(err.hint.is_none(), "{:?}", err.hint);
+    }
+
+    #[test]
+    fn cmd_update_rejects_a_list_of_only_invalid_versions() {
+        let err = cmd_update(&offline_client(), owned(&["abc"]), false)
+            .expect_err("nothing was left to update");
+        assert_eq!(
+            format!("{:#}", err.error),
+            "no valid Java versions provided to update"
+        );
+    }
+
+    /// The usage line is advice printed *under* the error, so it travels with
+    /// it rather than being printed where the failure happens.
+    #[test]
+    fn cmd_exec_carries_the_usage_hint_when_the_separator_is_missing() {
+        let err = cmd_exec(&offline_client(), &owned(&["java", "-version"]))
+            .expect_err("no '--' before the command");
+        assert_eq!(
+            format!("{:#}", err.error),
+            "expected '--' before the command, e.g. jlo exec 21 -- java -version"
+        );
+        assert_eq!(
+            err.hint.as_deref(),
+            Some("Usage: jlo exec [VERSION] -- <COMMAND> [ARGS]...")
+        );
     }
 
     // -- superseded_hint --
