@@ -65,12 +65,11 @@ This allows automatic discovery of installed JDKs by IDEs like IntelliJ IDEA.
 2. [Resolving JAVA_HOME](#resolving-java_home)
 3. [Executing a Command](#executing-a-command)
 4. [Initialization](#initialization)
-5. [Default](#default)
-6. [Updating Java Versions](#updating-java-versions)
-7. [Cleaning Installed Versions](#cleaning-installed-versions)
-8. [Managing J’Lo Itself](#managing-jlo-itself)
-9. [Getting Help](#getting-help)
-10. [Shell Completions](#shell-completions)
+5. [Updating Java Versions](#updating-java-versions)
+6. [Cleaning Installed Versions](#cleaning-installed-versions)
+7. [Managing J’Lo Itself](#managing-jlo-itself)
+8. [Getting Help](#getting-help)
+9. [Shell Completions](#shell-completions)
 
 ## Environment Setup
 
@@ -153,7 +152,10 @@ The file is used by `jlo env` to determine which Java version to set up.
 
 Specifying a version is optional; if omitted, the latest available Java version will be used.
 
-This command fails if a `.jlorc` file already exists in the current directory.
+With `--global`, the file is written to `~/.jlo/default.jlorc` instead — the default Java version used by
+`jlo env` when no `.jlorc` file is found in the current directory.
+
+This command fails if the config file already exists; pass `--force` to overwrite it.
 
 **Usage examples:**
 ```shell
@@ -162,22 +164,18 @@ jlo init 25
 
 # create .jlorc that pins the latest available Java version
 jlo init
+
+# set the user-wide default version
+jlo init --global 25
+
+# change a version that is already pinned
+jlo init --force 21
 ```
 
 **Example `.jlorc` file content:**
 ```
 # Java version configured by J'Lo - https://github.com/java-loader/jlo
 25
-```
-
-## Default
-
-The command `jlo default` creates the file `~/.jlo/default.jlorc` that specifies the default Java version
-used by `jlo env` when no `.jlorc` file is found in the current directory.
-
-**Usage examples:**
-```shell
-jlo default 25
 ```
 
 ## Updating Java Versions

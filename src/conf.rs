@@ -77,17 +77,17 @@ fn load(path: &Path) -> Result<String, std::io::Error> {
     Ok(java_version)
 }
 
-pub(crate) fn init_project_config(java_version: &str) -> anyhow::Result<()> {
+pub(crate) fn init_project_config(java_version: &str, force: bool) -> anyhow::Result<()> {
     let path = Path::new(JLO_CONFIG_FILE);
-    init_config(path, java_version)
+    init_config(path, java_version, force)
 }
 
-pub(crate) fn init_default_config(java_version: &str) -> anyhow::Result<()> {
+pub(crate) fn init_default_config(java_version: &str, force: bool) -> anyhow::Result<()> {
     let path = default_jlorc_path()?;
-    init_config(&path, java_version)
+    init_config(&path, java_version, force)
 }
 
-fn init_config(path: &Path, latest_release: &str) -> anyhow::Result<()> {
+fn init_config(path: &Path, latest_release: &str, force: bool) -> anyhow::Result<()> {
     // $JLO_HOME need not exist: jlo-bin can be run straight from a build,
     // without install.sh ever having created ~/.jlo.
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
@@ -95,17 +95,25 @@ fn init_config(path: &Path, latest_release: &str) -> anyhow::Result<()> {
             .map_err(|e| anyhow!("could not create directory '{}': {e}", parent.display()))?;
     }
 
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-        .map_err(|e| {
-            if e.kind() == std::io::ErrorKind::AlreadyExists {
-                anyhow!("file '{}' already exists", path.display())
-            } else {
-                anyhow!(e)
-            }
-        })?;
+    // Two opens rather than one, because the message has to distinguish
+    // "created" from "replaced": create_new is the only way to learn whether
+    // the file was already there without a racy pre-check.
+    let mut replaced = false;
+    let mut file = match OpenOptions::new().write(true).create_new(true).open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && force => {
+            replaced = true;
+            OpenOptions::new()
+                .write(true)
+                .truncate(true)
+                .open(path)
+                .map_err(|e| anyhow!("could not open file '{}': {e}", path.display()))?
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            return Err(anyhow!("file '{}' already exists", path.display()));
+        }
+        Err(e) => return Err(anyhow!(e)),
+    };
 
     writeln!(
         file,
@@ -117,7 +125,8 @@ fn init_config(path: &Path, latest_release: &str) -> anyhow::Result<()> {
     // stdout carries only shell code the caller may `eval`. Nothing sources
     // `jlo init` today, which is exactly why the inconsistency was easy to miss.
     crate::ui::created!(
-        "Created config file '{}' with Java {}",
+        "{} config file '{}' with Java {}",
+        if replaced { "Updated" } else { "Created" },
         path.display(),
         latest_release
     );
@@ -212,7 +221,7 @@ mod tests {
     fn init_config_creates_file() {
         let dir = tempdir().unwrap();
         let file = dir.path().join(".jlorc");
-        init_config(&file, "21").unwrap();
+        init_config(&file, "21", false).unwrap();
 
         let content = fs::read_to_string(&file).unwrap();
         let lines: Vec<_> = content.lines().collect();
@@ -225,11 +234,11 @@ mod tests {
 
     #[test]
     fn init_config_creates_missing_parent_directory() {
-        // `jlo default` writes into $JLO_HOME, which does not exist yet when
+        // `jlo init --global` writes into $JLO_HOME, which does not exist yet when
         // jlo-bin is run without the installer having created ~/.jlo.
         let dir = tempdir().unwrap();
         let file = dir.path().join(".jlo").join("default.jlorc");
-        init_config(&file, "21").unwrap();
+        init_config(&file, "21", false).unwrap();
 
         assert_eq!(
             fs::read_to_string(&file).unwrap().lines().nth(1),
@@ -243,7 +252,21 @@ mod tests {
         let file = dir.path().join(".jlorc");
         fs::write(&file, "17\n").unwrap();
 
-        let err = init_config(&file, "21").unwrap_err();
+        let err = init_config(&file, "21", false).unwrap_err();
         assert!(err.to_string().contains("already exists"));
+    }
+
+    #[test]
+    fn init_config_overwrites_if_forced() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join(".jlorc");
+        fs::write(&file, "17\nleftover\n").unwrap();
+
+        init_config(&file, "21", true).unwrap();
+
+        let content = fs::read_to_string(&file).unwrap();
+        assert_eq!(content.lines().nth(1), Some("21"));
+        // Truncated, not patched in place.
+        assert!(!content.contains("leftover"));
     }
 }

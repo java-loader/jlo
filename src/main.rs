@@ -83,8 +83,11 @@ fn main() {
         cli::Command::List { offline } => cmd_list(&client, offline),
         cli::Command::Update { versions } => cmd_update(&client, versions),
         cli::Command::Clean => cmd_clean(),
-        cli::Command::Init { version } => cmd_init(&client, version),
-        cli::Command::Default { version } => cmd_default(&version),
+        cli::Command::Init {
+            version,
+            global,
+            force,
+        } => cmd_init(&client, version, global, force),
         cli::Command::Selfupdate => {
             ui::error!(
                 "self-update is handled by the jlo shell function. Source jlo-init.sh from your shell profile, or re-run the installer."
@@ -535,15 +538,7 @@ fn cmd_clean() {
     ui::clean_report(&report);
 }
 
-fn cmd_default(java_version: &str) {
-    assert_java_version(java_version);
-    conf::init_default_config(java_version).unwrap_or_else(|e| {
-        ui::error!("could not create default config file: {e:#}");
-        exit(1);
-    });
-}
-
-fn cmd_init(client: &AdoptiumClient, version: Option<String>) {
+fn cmd_init(client: &AdoptiumClient, version: Option<String>, global: bool, force: bool) {
     let java_version = version.unwrap_or_else(|| {
         client.latest_major().unwrap_or_else(|e| {
             ui::error!("could not fetch latest JDK version: {e:#}");
@@ -553,8 +548,18 @@ fn cmd_init(client: &AdoptiumClient, version: Option<String>) {
 
     assert_java_version(&java_version);
 
-    conf::init_project_config(&java_version).unwrap_or_else(|e| {
+    let result = if global {
+        conf::init_default_config(&java_version, force)
+    } else {
+        conf::init_project_config(&java_version, force)
+    };
+
+    result.unwrap_or_else(|e| {
+        let already_exists = e.to_string().contains("already exists");
         ui::error!("could not create config file: {e:#}");
+        if already_exists {
+            ui::hint!("Re-run with --force to overwrite it.");
+        }
         exit(1);
     });
 }

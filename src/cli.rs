@@ -183,18 +183,20 @@ the child only; the current shell is untouched.",
     ///
     /// With no argument, pins the latest version Adoptium offers. Only major
     /// versions are accepted: 21, not 21.0.5.
+    ///
+    /// --global writes ~/.jlo/default.jlorc instead: the version jlo env
+    /// falls back to when the current directory has no .jlorc.
     Init {
         /// Java major version. Default: latest release
         version: Option<String>,
-    },
 
-    /// Write ~/.jlo/default.jlorc
-    ///
-    /// The version used by jlo env when the current directory has no
-    /// .jlorc. Only major versions are accepted: 21, not 21.0.5.
-    Default {
-        /// Java major version, e.g. 21
-        version: String,
+        /// Write ~/.jlo/default.jlorc instead of ./.jlorc
+        #[arg(short, long)]
+        global: bool,
+
+        /// Overwrite the config file if it already exists
+        #[arg(short, long)]
+        force: bool,
     },
 
     /// Update jlo itself

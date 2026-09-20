@@ -20,7 +20,6 @@ fn bare_invocation_prints_help() {
         .stdout(predicate::str::contains("update"))
         .stdout(predicate::str::contains("clean"))
         .stdout(predicate::str::contains("init"))
-        .stdout(predicate::str::contains("default"))
         .stdout(predicate::str::contains("selfupdate"))
         .stdout(predicate::str::contains("completions"));
     // No assertion for "version" here: since the `version` subcommand was
@@ -119,13 +118,88 @@ fn unknown_command_suggests_a_real_one() {
 }
 
 #[test]
-fn default_without_version_is_a_usage_error() {
+fn the_default_subcommand_is_gone() {
+    // `jlo default <v>` folded into `jlo init --global <v>`: both only ever
+    // wrote a .jlorc, so one command with a scope flag replaces two.
     let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
-    cmd.arg("default")
+    cmd.args(["default", "21"])
         .assert()
         .failure()
         .code(2)
-        .stderr(predicate::str::contains("VERSION"));
+        .stderr(predicate::str::contains("default"));
+}
+
+#[test]
+fn init_help_mentions_global_and_force() {
+    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
+    cmd.args(["init", "-h"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--global"))
+        .stdout(predicate::str::contains("--force"));
+}
+
+#[test]
+fn init_global_writes_the_default_config() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+
+    Command::cargo_bin("jlo-bin")
+        .unwrap()
+        .args(["init", "--global", "21"])
+        .current_dir(cwd.path())
+        .env("JLO_HOME", home.path())
+        .assert()
+        .success()
+        .code(0)
+        .stderr(predicate::str::contains("default.jlorc"))
+        .stdout("");
+
+    let content = std::fs::read_to_string(home.path().join("default.jlorc")).unwrap();
+    assert_eq!(content.lines().nth(1), Some("21"));
+    // --global must not also touch the project.
+    assert!(!cwd.path().join(".jlorc").exists());
+}
+
+#[test]
+fn init_force_overwrites_an_existing_config() {
+    // The whole point of folding `default` into `init`: setting a version
+    // you already set has to be idempotent, not an error.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join(".jlorc"), "17\n").unwrap();
+
+    Command::cargo_bin("jlo-bin")
+        .unwrap()
+        .args(["init", "--force", "21"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .code(0)
+        .stderr(predicate::str::contains("Updated config file"))
+        .stdout("");
+
+    let content = std::fs::read_to_string(dir.path().join(".jlorc")).unwrap();
+    assert_eq!(content.lines().nth(1), Some("21"));
+}
+
+#[test]
+fn init_without_force_hints_at_force() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join(".jlorc"), "17\n").unwrap();
+
+    Command::cargo_bin("jlo-bin")
+        .unwrap()
+        .args(["init", "21"])
+        .current_dir(dir.path())
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains("already exists"))
+        .stderr(predicate::str::contains("--force"));
+
+    // The existing file is left alone.
+    let content = std::fs::read_to_string(dir.path().join(".jlorc")).unwrap();
+    assert_eq!(content.lines().next(), Some("17"));
 }
 
 #[test]
@@ -138,7 +212,6 @@ fn every_subcommand_has_help() {
         "update",
         "clean",
         "init",
-        "default",
         "selfupdate",
         "completions",
     ] {
