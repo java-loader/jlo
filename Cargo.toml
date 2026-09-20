@@ -26,22 +26,27 @@ unnecessary_debug_formatting = "allow"
 assert_cmd = "2"
 mockito = "1"
 predicates = "3"
-serial_test = "3"
+serial_test = "4"
 
 [dependencies]
 anyhow = "1"
-reqwest = { version = "0.12.23", features = ["blocking", "json"] }
+# jlo is fully synchronous; ureq is a blocking client, so there is no tokio
+# runtime to embed. native-tls keeps the platform TLS stack jlo has always used.
+# ureq gates its native-tls transport on the `native-tls` feature by name, so
+# the bundled-Mozilla-roots dependency it drags in is unavoidable; the agent
+# selects RootCerts::PlatformVerifier so the system trust store is used anyway.
+ureq = { version = "3", default-features = false, features = ["json", "native-tls"] }
 indicatif = "0.18.0"
 console = "0.16.1"
 flate2 = "1.1.4"
 tar = "0.4"
 tempfile = "3.23.0"
-sha2 = "0.10.9"
+sha2 = "0.11.0"
 hex = "0.4.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1.0.145"
 # Adoptium's Windows JDK archives are plain deflate, so drop the default
 # feature set (aes-crypto, bzip2, lzma, ppmd, xz, zstd, deflate64, time).
 # `deflate-flate2` reuses the flate2 backend already pulled in for tar.gz.
-zip = { version = "6.0.0", default-features = false, features = ["deflate-flate2"] }
+zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2"] }
 semver_rs = "0.2.0"

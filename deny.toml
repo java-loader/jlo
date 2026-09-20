@@ -24,7 +24,9 @@ version = 2
 allow = [
     "Apache-2.0",
     "MIT",
-    "BSD-3-Clause",
+    # webpki-root-certs, pulled in unavoidably by ureq's native-tls feature
+    # even though jlo verifies against the platform trust store instead.
+    "CDLA-Permissive-2.0",
     "Unicode-3.0",
     "Zlib",
 ]

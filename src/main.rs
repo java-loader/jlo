@@ -24,10 +24,7 @@ fn main() {
 
     let api_url =
         env::var("JLO_ADOPTIUM_API_URL").unwrap_or_else(|_| adoptium::ADOPTIUM_API_URL.to_string());
-    let client = AdoptiumClient::new(api_url).unwrap_or_else(|e| {
-        eprintln!("Error: {e:#}");
-        exit(1);
-    });
+    let client = AdoptiumClient::new(api_url);
 
     // Get command
     let command = &env::args().nth(1).expect("argument count checked above");

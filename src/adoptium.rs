@@ -1,6 +1,5 @@
 use crate::progress_bar::setup_progress_bar;
 use anyhow::{Context, bail};
-use reqwest::blocking::Client;
 use semver_rs::compare;
 use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
@@ -8,6 +7,8 @@ use std::env;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use ureq::Agent;
+use ureq::tls::{RootCerts, TlsConfig, TlsProvider};
 
 const MARKER_FILE: &str = ".jlo-managed";
 const USER_AGENT: &str = concat!("J'Lo/", env!("CARGO_PKG_VERSION"));
@@ -320,20 +321,34 @@ pub(crate) struct RemoteJdk {
 /// fetching JDK metadata, and downloading packages. `base_url` covers the two
 /// API endpoints; downloads follow whatever URL the metadata hands back.
 pub(crate) struct AdoptiumClient {
-    client: Client,
+    agent: Agent,
     base_url: String,
 }
 
 impl AdoptiumClient {
-    pub(crate) fn new(base_url: impl Into<String>) -> anyhow::Result<Self> {
-        let client = Client::builder()
+    pub(crate) fn new(base_url: impl Into<String>) -> Self {
+        // Statuses are inspected explicitly below, so keep ureq from turning a
+        // non-2xx response into an error and losing the message wording.
+        // ureq defaults its TLS provider to Rustls regardless of which TLS
+        // feature is enabled, and panics on the first https request if that
+        // provider was not compiled in. It also defaults to bundled Mozilla
+        // roots. Select native-tls with the platform trust store, which is what
+        // jlo has always used and what TLS-intercepting corporate proxies need.
+        let agent: Agent = Agent::config_builder()
             .user_agent(USER_AGENT)
+            .http_status_as_error(false)
+            .tls_config(
+                TlsConfig::builder()
+                    .provider(TlsProvider::NativeTls)
+                    .root_certs(RootCerts::PlatformVerifier)
+                    .build(),
+            )
             .build()
-            .context("Could not build HTTP client")?;
-        Ok(Self {
-            client,
+            .into();
+        Self {
+            agent,
             base_url: base_url.into(),
-        })
+        }
     }
 
     pub(crate) fn fetch_metadata(&self, java_version: &str) -> anyhow::Result<JdkMetadata> {
@@ -361,10 +376,10 @@ impl AdoptiumClient {
     /// no build for this OS/architecture. That case is *not* an HTTP error: the
     /// API answers `200` with an empty array.
     fn fetch_latest_asset(&self, api_url: &str) -> anyhow::Result<Option<Asset>> {
-        let response = self
-            .client
+        let mut response = self
+            .agent
             .get(api_url)
-            .send()
+            .call()
             .context("Could not fetch metadata from API")?;
 
         if !response.status().is_success() {
@@ -374,7 +389,10 @@ impl AdoptiumClient {
             );
         }
 
-        let assets: Vec<Asset> = response.json().context("Failed to parse JSON response")?;
+        let assets: Vec<Asset> = response
+            .body_mut()
+            .read_json()
+            .context("Failed to parse JSON response")?;
 
         Ok(assets.into_iter().next())
     }
@@ -434,10 +452,10 @@ impl AdoptiumClient {
     }
 
     fn fetch_available_releases(&self) -> anyhow::Result<AvailableReleases> {
-        let response = self
-            .client
+        let mut response = self
+            .agent
             .get(format!("{}/v3/info/available_releases", self.base_url))
-            .send()
+            .call()
             .context("Could not fetch available releases from API")?;
 
         if !response.status().is_success() {
@@ -447,7 +465,10 @@ impl AdoptiumClient {
             );
         }
 
-        response.json().context("Failed to parse JSON response")
+        response
+            .body_mut()
+            .read_json()
+            .context("Failed to parse JSON response")
     }
 
     pub(crate) fn latest_major(&self) -> anyhow::Result<String> {
@@ -463,7 +484,7 @@ impl AdoptiumClient {
     }
 
     pub(crate) fn download(&self, metadata: &JdkMetadata, file: &mut File) -> anyhow::Result<()> {
-        let mut response = self.client.get(&metadata.download_link).send()?;
+        let mut response = self.agent.get(&metadata.download_link).call()?;
 
         if !response.status().is_success() {
             bail!(
@@ -475,6 +496,7 @@ impl AdoptiumClient {
         }
 
         let total_size = response
+            .body()
             .content_length()
             .context("Failed to get content length")?;
 
@@ -490,8 +512,9 @@ impl AdoptiumClient {
 
         let mut downloaded: u64 = 0;
         let mut buffer = [0; 8192];
+        let mut reader = response.body_mut().as_reader();
         loop {
-            let n = response
+            let n = reader
                 .read(&mut buffer)
                 .context("Could not read package data from response")?;
             if n == 0 {
@@ -928,7 +951,7 @@ mod client_tests {
         let mut server = mockito::Server::new();
         let _m = metadata_mock(&mut server, 200, ASSETS_FIXTURE);
 
-        let client = AdoptiumClient::new(server.url()).unwrap();
+        let client = AdoptiumClient::new(server.url());
         let metadata = client.fetch_metadata("21").unwrap();
 
         assert_eq!(metadata.semver, "21.0.11+10.0.LTS");
@@ -953,7 +976,7 @@ mod client_tests {
         let mut server = mockito::Server::new();
         let _m = metadata_mock(&mut server, 500, "boom");
 
-        let client = AdoptiumClient::new(server.url()).unwrap();
+        let client = AdoptiumClient::new(server.url());
         let err = client.fetch_metadata("21").unwrap_err();
 
         assert!(format!("{err:#}").contains("HTTP 500"), "got: {err:#}");
@@ -964,7 +987,7 @@ mod client_tests {
         let mut server = mockito::Server::new();
         let _m = metadata_mock(&mut server, 200, "this is not json");
 
-        let client = AdoptiumClient::new(server.url()).unwrap();
+        let client = AdoptiumClient::new(server.url());
         let err = client.fetch_metadata("21").unwrap_err();
 
         assert!(
@@ -978,7 +1001,7 @@ mod client_tests {
         let mut server = mockito::Server::new();
         let _m = metadata_mock(&mut server, 200, "[]");
 
-        let client = AdoptiumClient::new(server.url()).unwrap();
+        let client = AdoptiumClient::new(server.url());
         let err = client.fetch_metadata("21").unwrap_err();
 
         assert!(
@@ -993,7 +1016,7 @@ mod client_tests {
         let body = fixture_without_package_field("checksum");
         let _m = metadata_mock(&mut server, 200, &body);
 
-        let client = AdoptiumClient::new(server.url()).unwrap();
+        let client = AdoptiumClient::new(server.url());
         let err = client.fetch_metadata("21").unwrap_err();
 
         assert!(format!("{err:#}").contains("checksum"), "got: {err:#}");
@@ -1005,7 +1028,7 @@ mod client_tests {
         let body = fixture_with_package_field("checksum", serde_json::Value::String(String::new()));
         let _m = metadata_mock(&mut server, 200, &body);
 
-        let client = AdoptiumClient::new(server.url()).unwrap();
+        let client = AdoptiumClient::new(server.url());
         let err = client.fetch_metadata("21").unwrap_err();
 
         assert!(
@@ -1059,7 +1082,7 @@ mod client_tests {
         let _a21 = major_mock(&mut server, 21, 200, &asset_body("21.0.12+101.0.LTS"));
         let _a25 = major_mock(&mut server, 25, 200, &asset_body("25.0.4+101.0.LTS"));
 
-        let client = AdoptiumClient::new(server.url()).unwrap();
+        let client = AdoptiumClient::new(server.url());
         let jdks = client.available_jdks().unwrap();
 
         let rows: Vec<_> = jdks
@@ -1088,7 +1111,7 @@ mod client_tests {
         let _a16 = major_mock(&mut server, 16, 200, "[]");
         let _a21 = major_mock(&mut server, 21, 200, &asset_body("21.0.12+101.0.LTS"));
 
-        let client = AdoptiumClient::new(server.url()).unwrap();
+        let client = AdoptiumClient::new(server.url());
         let jdks = client.available_jdks().unwrap();
 
         assert_eq!(jdks.len(), 1);
@@ -1105,7 +1128,7 @@ mod client_tests {
         let _a17 = major_mock(&mut server, 17, 500, "boom");
         let _a21 = major_mock(&mut server, 21, 200, &asset_body("21.0.12+101.0.LTS"));
 
-        let client = AdoptiumClient::new(server.url()).unwrap();
+        let client = AdoptiumClient::new(server.url());
         let jdks = client.available_jdks().unwrap();
 
         assert_eq!(jdks.len(), 1);
@@ -1121,7 +1144,7 @@ mod client_tests {
             .with_body("nope")
             .create();
 
-        let client = AdoptiumClient::new(server.url()).unwrap();
+        let client = AdoptiumClient::new(server.url());
         let err = client.available_jdks().unwrap_err();
 
         assert!(format!("{err:#}").contains("HTTP 503"), "got: {err:#}");
@@ -1136,7 +1159,7 @@ mod client_tests {
             .create();
         let _a21 = major_mock(&mut server, 21, 200, &asset_body("21.0.12+101.0.LTS"));
 
-        let client = AdoptiumClient::new(server.url()).unwrap();
+        let client = AdoptiumClient::new(server.url());
         let jdks = client.available_jdks().unwrap();
 
         assert_eq!(jdks.len(), 1);
@@ -1151,7 +1174,7 @@ mod client_tests {
             .with_body(RELEASES_FIXTURE)
             .create();
 
-        let client = AdoptiumClient::new(server.url()).unwrap();
+        let client = AdoptiumClient::new(server.url());
         assert_eq!(client.latest_major().unwrap(), "26");
     }
 
@@ -1163,7 +1186,7 @@ mod client_tests {
             .with_body("{}")
             .create();
 
-        let client = AdoptiumClient::new(server.url()).unwrap();
+        let client = AdoptiumClient::new(server.url());
         let err = client.latest_major().unwrap_err();
 
         assert!(
@@ -1182,7 +1205,7 @@ mod client_tests {
             .with_body(FAKE_PACKAGE)
             .create();
 
-        let client = AdoptiumClient::new(server.url()).unwrap();
+        let client = AdoptiumClient::new(server.url());
         let metadata = fake_metadata(
             format!("{}/pkg.tar.gz", server.url()),
             FAKE_PACKAGE_CHECKSUM,
@@ -1205,7 +1228,7 @@ mod client_tests {
             .with_body(FAKE_PACKAGE)
             .create();
 
-        let client = AdoptiumClient::new(server.url()).unwrap();
+        let client = AdoptiumClient::new(server.url());
         let metadata = fake_metadata(format!("{}/pkg.tar.gz", server.url()), "deadbeef");
 
         let mut file = tempfile::tempfile().unwrap();
@@ -1225,7 +1248,7 @@ mod client_tests {
             .with_chunked_body(|w| w.write_all(FAKE_PACKAGE))
             .create();
 
-        let client = AdoptiumClient::new(server.url()).unwrap();
+        let client = AdoptiumClient::new(server.url());
         let metadata = fake_metadata(
             format!("{}/pkg.tar.gz", server.url()),
             FAKE_PACKAGE_CHECKSUM,
@@ -1250,7 +1273,7 @@ mod client_tests {
             .with_body(RELEASES_FIXTURE)
             .create();
 
-        let client = AdoptiumClient::new(server.url()).unwrap();
+        let client = AdoptiumClient::new(server.url());
         let err = client.latest_major().unwrap_err();
 
         assert!(format!("{err:#}").contains("HTTP 500"), "got: {err:#}");
@@ -1265,7 +1288,7 @@ mod client_tests {
             .with_body("not found")
             .create();
 
-        let client = AdoptiumClient::new(server.url()).unwrap();
+        let client = AdoptiumClient::new(server.url());
         let metadata = fake_metadata(
             format!("{}/pkg.tar.gz", server.url()),
             FAKE_PACKAGE_CHECKSUM,
