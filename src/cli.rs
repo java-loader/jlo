@@ -22,7 +22,7 @@ Examples:
   jlo init 21                      Pin Java 21 for this project
   jlo env                          Use the pinned version
   jlo exec 21 -- ./gradlew build   Run a build on Java 21
-  jlo update all                   Bring every installed JDK up to date
+  jlo update --all                 Bring every installed JDK up to date
 
 Docs: https://github.com/java-loader/jlo";
 
@@ -166,11 +166,15 @@ the child only; the current shell is untouched.",
     /// Update installed JDKs to their latest minor release
     ///
     /// With no argument, updates the version from .jlorc or
-    /// ~/.jlo/default.jlorc. Pass 'all' to update every installed major
+    /// ~/.jlo/default.jlorc. Pass --all to update every installed major
     /// version, or list major versions explicitly.
     Update {
-        /// Major versions to update, or 'all'. Default: from .jlorc
+        /// Major versions to update. Default: from .jlorc
         versions: Vec<String>,
+
+        /// Update every installed major version
+        #[arg(short, long, conflicts_with = "versions")]
+        all: bool,
     },
 
     /// Remove superseded minor versions

@@ -185,13 +185,13 @@ The command `jlo update` updates installed Java versions to their latest minor r
 The quickest way to deal with everything `jlo list` flags as `outdated` is:
 
 ```shell
-jlo update all
+jlo update --all
 ```
 
 That updates every installed major version in one go — no need to name them individually.
 
 **Behavior:**
-- A special argument `all` updates all installed Java versions.
+- The `--all` flag updates all installed Java versions; it cannot be combined with explicit versions.
 - Multiple versions can be specified as arguments; each will be updated to its latest minor release.
   Missing versions will be installed automatically.
 - If no arguments are provided, it updates the Java version specified in the `.jlorc` file in the current directory,
@@ -200,7 +200,7 @@ That updates every installed major version in one go — no need to name them in
 **Usage examples:**
 ```shell
 # update all installed Java versions
-jlo update all
+jlo update --all
 
 # update Java version specified in .jlorc or ~/.jlo/default.jlorc
 jlo update
@@ -237,7 +237,7 @@ jlo update 21
 When any row is marked `outdated`, `jlo list` prints a reminder:
 
 ```
-TIP: Use `jlo update all` to update all outdated JDKs.
+TIP: Use `jlo update --all` to update all outdated JDKs.
 ```
 
 The tip goes to standard error, so it never ends up in a pipe alongside the listing.

@@ -81,7 +81,7 @@ fn main() {
         cli::Command::Home { version } => cmd_home(&client, version),
         cli::Command::Exec { args } => cmd_exec(&client, &args),
         cli::Command::List { offline } => cmd_list(&client, offline),
-        cli::Command::Update { versions } => cmd_update(&client, versions),
+        cli::Command::Update { versions, all } => cmd_update(&client, versions, all),
         cli::Command::Clean => cmd_clean(),
         cli::Command::Init {
             version,
@@ -472,7 +472,7 @@ fn print_remote_list(available: &[RemoteJdk], installed: &[adoptium::InstalledJd
         eprintln!(
             "\n{} Use `{}` to update all outdated JDKs.",
             style("TIP:").cyan().bold().for_stderr(),
-            style("jlo update all").bold().for_stderr()
+            style("jlo update --all").bold().for_stderr()
         );
     }
 }
@@ -564,41 +564,43 @@ fn cmd_init(client: &AdoptiumClient, version: Option<String>, global: bool, forc
     });
 }
 
-fn cmd_update(client: &AdoptiumClient, versions: Vec<String>) {
+fn cmd_update(client: &AdoptiumClient, versions: Vec<String>, all: bool) {
     let mut versions_to_install: HashSet<String> = HashSet::new();
 
-    if versions.is_empty() {
+    // `--all` and explicit versions are mutually exclusive (clap enforces it),
+    // so these three arms are the whole input space.
+    if all {
+        find_installed_major_versions(&jdk_base_dir().unwrap_or_else(|e| {
+            ui::error!("{e:#}");
+            exit(1);
+        }))
+        .unwrap_or_else(|e| {
+            ui::error!("could not determine installed JDK versions: {e:#}");
+            exit(1);
+        })
+        .into_iter()
+        .for_each(|v| {
+            versions_to_install.insert(v.to_string());
+        });
+
+        if versions_to_install.is_empty() {
+            ui::error!("no installed JDKs to update");
+            exit(1);
+        }
+    } else if versions.is_empty() {
         let java_version = conf::load_config_java_version().unwrap_or_else(|e| {
             ui::error!("{e:#}");
             exit(1);
         });
         versions_to_install.insert(java_version);
     } else {
-        if versions.iter().any(|arg| arg == "all") {
-            find_installed_major_versions(&jdk_base_dir().unwrap_or_else(|e| {
-                ui::error!("{e:#}");
-                exit(1);
-            }))
-            .unwrap_or_else(|e| {
-                ui::error!("could not determine installed JDK versions: {e:#}");
-                exit(1);
-            })
-            .into_iter()
-            .for_each(|v| {
-                versions_to_install.insert(v.to_string());
-            });
+        for v in versions {
+            if conf::is_valid_version(&v) {
+                versions_to_install.insert(v);
+            } else {
+                ui::warning!("skipping invalid version '{v}'");
+            }
         }
-
-        versions
-            .into_iter()
-            .filter(|arg| arg != "all")
-            .for_each(|v| {
-                if conf::is_valid_version(&v) {
-                    versions_to_install.insert(v);
-                } else {
-                    ui::warning!("skipping invalid version '{v}'");
-                }
-            });
 
         if versions_to_install.is_empty() {
             ui::error!("no valid Java versions provided to update");
