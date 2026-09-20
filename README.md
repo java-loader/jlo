@@ -3,7 +3,7 @@
 The Java Loader (or J'Lo for short) is a minimalistic tool to download and manage Java installations on your machine.
 It is written in Rust, with a main focus on simplicity and ease of use.
 
-J'Lo currently supports Linux (x86_64) and macOS (arm64).
+J'Lo currently supports Linux (x86_64, aarch64) and macOS (arm64).
 
 At the moment, only the [Eclipse Temurin](https://adoptium.net/de/temurin/releases) distribution is available.
 Java versions are supported starting from Java 8, with all newer versions working automatically.

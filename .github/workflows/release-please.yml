@@ -30,6 +30,9 @@ jobs:
           - os: ubuntu-latest
             arch: x86_64
             package: jlo-linux-x86_64
+          - os: ubuntu-24.04-arm
+            arch: aarch64
+            package: jlo-linux-aarch64
           - os: macos-latest
             arch: aarch64
             package: jlo-macos-arm64
