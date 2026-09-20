@@ -91,6 +91,25 @@ fn cmd_home(client: &AdoptiumClient, version: Option<String>) {
 
 fn cmd_exec(client: &AdoptiumClient, args: &[String]) {
     let args = restore_leading_separator(args);
+
+    // clap's own `-h`/`--help` interception only fires before any value has
+    // bound to the `args` positional; once a version is present (`jlo exec
+    // 21 --help`) it no longer triggers, because by then the parser is in
+    // `trailing_var_arg` value-collection mode. Handle it ourselves, but
+    // only for tokens before the `--`: anything after it belongs to the
+    // child command and must be passed through untouched (see
+    // `exec_passes_hyphen_args_through_to_the_child`).
+    let separator = args.iter().position(|a| a == "--").unwrap_or(args.len());
+    let before_separator = &args[..separator];
+    if before_separator.iter().any(|a| a == "--help") {
+        cli::print_exec_help(true);
+        return;
+    }
+    if before_separator.iter().any(|a| a == "-h") {
+        cli::print_exec_help(false);
+        return;
+    }
+
     let (version, command) = parse_exec_args(&args).unwrap_or_else(|e| {
         eprintln!("Error: {e}");
         eprintln!("Usage: jlo exec [VERSION] -- <COMMAND> [ARGS]...");
@@ -100,20 +119,30 @@ fn cmd_exec(client: &AdoptiumClient, args: &[String]) {
     run_exec(client, version, &command);
 }
 
+/// Whether the real, unparsed command line has a literal `--` as the token
+/// immediately following `exec`, i.e. no version was given before it.
+fn separator_immediately_follows_exec(mut raw_args: impl Iterator<Item = String>) -> bool {
+    raw_args
+        .find(|a| a == "exec")
+        .and_then(|_| raw_args.next())
+        .is_some_and(|a| a == "--")
+}
+
 /// clap's `trailing_var_arg` treats a literal `--` as the options/positional
 /// boundary rather than a value whenever it is the very first token handed to
 /// the subcommand - which is exactly `jlo exec -- <command>` (version
 /// omitted). It gets consumed before reaching us, so `args` arrives here
-/// without the separator `parse_exec_args` requires. Detect that exact shape
-/// from the real argv and put the `--` back.
+/// without the separator `parse_exec_args` requires.
+///
+/// This is unambiguous precisely because it only ever happens to the
+/// *first* token: once any value (a version, or the reinstated `--` itself)
+/// has bound to the positional, every later token - including a second,
+/// user-typed `--` that is genuinely part of the command - survives
+/// untouched. So `args` here never already contains the eaten separator;
+/// any `--` already present in it is a distinct, later token that must be
+/// left exactly where it is, not mistaken for "already restored".
 fn restore_leading_separator(args: &[String]) -> Vec<String> {
-    let already_present = args.first().is_some_and(|a| a == "--");
-    let user_typed_it = env::args()
-        .skip_while(|a| a != "exec")
-        .nth(1)
-        .is_some_and(|a| a == "--");
-
-    if already_present || !user_typed_it {
+    if !separator_immediately_follows_exec(env::args()) {
         return args.to_vec();
     }
 
@@ -121,6 +150,57 @@ fn restore_leading_separator(args: &[String]) -> Vec<String> {
     restored.push("--".to_string());
     restored.extend_from_slice(args);
     restored
+}
+
+#[cfg(test)]
+mod exec_arg_recovery_tests {
+    use super::separator_immediately_follows_exec;
+
+    fn raw(tokens: &[&str]) -> impl Iterator<Item = String> {
+        tokens
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect::<Vec<_>>()
+            .into_iter()
+    }
+
+    #[test]
+    fn detects_separator_right_after_exec() {
+        // `jlo exec -- java -version`: clap eats this `--` before `cmd_exec`
+        // ever sees it.
+        assert!(separator_immediately_follows_exec(raw(&[
+            "jlo-bin", "exec", "--", "java", "-version"
+        ])));
+    }
+
+    #[test]
+    fn does_not_trigger_when_a_version_precedes_it() {
+        // `jlo exec 21 -- java -version`: the version binds first, so clap
+        // never touches this `--`.
+        assert!(!separator_immediately_follows_exec(raw(&[
+            "jlo-bin", "exec", "21", "--", "java", "-version"
+        ])));
+    }
+
+    #[test]
+    fn still_detects_it_when_the_command_has_its_own_dash_dash() {
+        // `jlo exec -- -- echo hi`: the first `--` is still the one clap
+        // eats, even though a second, user-typed `--` (part of the command)
+        // immediately follows it. (Regression for the bug where
+        // `args.first() == "--"` was used as a stand-in for "already
+        // restored": that second `--` would land at `args[0]` after clap's
+        // parse and get mistaken for the already-restored separator.)
+        assert!(separator_immediately_follows_exec(raw(&[
+            "jlo-bin", "exec", "--", "--", "echo", "hi"
+        ])));
+    }
+
+    #[test]
+    fn does_not_trigger_without_any_separator() {
+        assert!(!separator_immediately_follows_exec(raw(&[
+            "jlo-bin", "exec", "java", "-version"
+        ])));
+    }
 }
 
 /// Resolve the JDK (installing on demand) and replace the current process with

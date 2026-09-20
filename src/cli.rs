@@ -44,38 +44,97 @@ pub(crate) fn print_help() {
     println!();
 }
 
+/// Print `jlo exec`'s own help, exactly as `jlo exec -h`/`jlo exec --help`
+/// would.
+///
+/// clap intercepts `-h`/`--help` for us only until a value has bound to
+/// `exec`'s `args` positional; `jlo exec 21 --help` arrives past that point,
+/// so `cmd_exec` calls this directly instead. `long` selects between the
+/// short (`-h`) and long (`--help`) renderings, matching clap's own
+/// convention.
+pub(crate) fn print_exec_help(long: bool) {
+    use clap::CommandFactory;
+
+    let mut cmd = Cli::command();
+    // Propagates `bin_name` ("jlo" -> "jlo exec") and other derived state
+    // down to subcommands; without it the extracted `exec` Command doesn't
+    // know its own usage line starts with "jlo ".
+    cmd.build();
+    let exec = cmd
+        .find_subcommand_mut("exec")
+        .expect("the `exec` subcommand is always registered");
+    // A closed stdout (`jlo exec 21 --help | head`) is not an error worth
+    // reporting.
+    let result = if long {
+        exec.print_long_help()
+    } else {
+        exec.print_help()
+    };
+    let _ = result;
+    println!();
+}
+
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
-    /// Set `JAVA_HOME` and PATH in the current shell
-    ///
-    /// Prints `export` statements on stdout; the `jlo` shell function sources
-    /// them. Running the binary directly does not change your shell.
-    ///
-    /// The JDK is downloaded from Adoptium on demand if it is not installed.
-    #[command(alias = "use")]
+    // `about`/`long_about` are given explicitly here rather than as a doc
+    // comment: `clippy::doc_markdown` (part of `clippy::pedantic`, which is
+    // on for this crate) requires bare identifiers like JAVA_HOME to be
+    // backtick-quoted in rustdoc, but clap renders doc-comment backticks
+    // *literally* in terminal help - there is no markdown stripping. Plain
+    // attribute strings are not rustdoc, so the lint doesn't apply to them,
+    // and the help text can say JAVA_HOME without stray backticks leaking
+    // into what the user sees. (No backticks appear anywhere below, in any
+    // command's about/long_about or doc comment, for the same reason.)
+    #[command(
+        visible_alias = "use",
+        about = "Set JAVA_HOME and PATH in the current shell",
+        long_about = "\
+Set JAVA_HOME and PATH in the current shell
+
+Prints export statements on stdout; the jlo shell function sources
+them. Running the binary directly does not change your shell.
+
+The JDK is downloaded from Adoptium on demand if it is not installed.
+
+When VERSION is omitted, it resolves from ./.jlorc, then
+~/.jlo/default.jlorc. Only major versions are accepted: 21, not
+21.0.5."
+    )]
     Env {
-        /// Java major version, e.g. 21 or 25
+        /// Java major version. Default: from .jlorc
         version: Option<String>,
     },
 
-    /// Print the `JAVA_HOME` path for a version
-    ///
-    /// Writes the path and nothing else to stdout, so `$(jlo home 21)` stays
-    /// clean. Unlike `jlo env` it does not modify the current shell.
+    #[command(
+        about = "Print the JAVA_HOME path for a version",
+        long_about = "\
+Print the JAVA_HOME path for a version
+
+Writes the path and nothing else to stdout, so $(jlo home 21) stays
+clean. Unlike jlo env it does not modify the current shell.
+
+When VERSION is omitted, it resolves from ./.jlorc, then
+~/.jlo/default.jlorc. Only major versions are accepted: 21, not
+21.0.5."
+    )]
     Home {
-        /// Java major version, e.g. 21 or 25
+        /// Java major version. Default: from .jlorc
         version: Option<String>,
     },
 
-    /// Run a command with a given JDK active
-    ///
-    /// The literal `--` separates the optional version from the command:
-    ///
-    ///   jlo exec 21 -- ./gradlew build
-    ///   jlo exec -- java -version
-    ///
-    /// `JAVA_HOME` is set and the JDK's bin directory is prepended to PATH for
-    /// the child only; the current shell is untouched.
+    #[command(
+        about = "Run a command with a given JDK active",
+        long_about = "\
+Run a command with a given JDK active
+
+The literal -- separates the optional version from the command:
+
+  jlo exec 21 -- ./gradlew build
+  jlo exec -- java -version
+
+JAVA_HOME is set and the JDK's bin directory is prepended to PATH for
+the child only; the current shell is untouched."
+    )]
     Exec {
         /// [VERSION] -- <COMMAND>...
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -92,10 +151,10 @@ pub(crate) enum Command {
     /// Update installed JDKs to their latest minor release
     ///
     /// With no argument, updates the version from .jlorc or
-    /// ~/.jlo/default.jlorc. Pass `all` to update every installed major
+    /// ~/.jlo/default.jlorc. Pass 'all' to update every installed major
     /// version, or list major versions explicitly.
     Update {
-        /// Major versions to update, or the literal `all`
+        /// Major versions to update, or 'all'. Default: from .jlorc
         versions: Vec<String>,
     },
 
@@ -107,32 +166,38 @@ pub(crate) enum Command {
 
     /// Write .jlorc pinning this project's Java version
     ///
-    /// With no argument, pins the latest version Adoptium offers.
+    /// With no argument, pins the latest version Adoptium offers. Only major
+    /// versions are accepted: 21, not 21.0.5.
     Init {
-        /// Java major version, e.g. 21 or 25
+        /// Java major version. Default: latest release
         version: Option<String>,
     },
 
     /// Write ~/.jlo/default.jlorc
     ///
-    /// The version used by `jlo env` when the current directory has no .jlorc.
+    /// The version used by jlo env when the current directory has no
+    /// .jlorc. Only major versions are accepted: 21, not 21.0.5.
     Default {
-        /// Java major version, e.g. 21 or 25
+        /// Java major version, e.g. 21
         version: String,
     },
 
     /// Update jlo itself
     ///
-    /// Handled by the `jlo` shell function from jlo-init.sh, not by this
+    /// Handled by the jlo shell function from jlo-init.sh, not by this
     /// binary.
     Selfupdate,
 
-    /// Print a shell completion script
-    ///
-    /// The installer writes these to `$JLO_HOME/completions`. To load one
-    /// directly:
-    ///
-    ///   source <(jlo completions bash)
+    #[command(
+        about = "Print a shell completion script",
+        long_about = "\
+Print a shell completion script
+
+The installer writes these to $JLO_HOME/completions. To load one
+directly:
+
+  source <(jlo completions bash)"
+    )]
     Completions {
         /// Shell to generate completions for
         shell: clap_complete::Shell,

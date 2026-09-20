@@ -51,6 +51,31 @@ fn help_mentions_version_resolution_and_examples() {
 }
 
 #[test]
+fn use_alias_is_documented_in_help() {
+    // `jlo-init.sh` has always accepted `use` as an alias for `env`; the
+    // binary silently rejected it until this alias was added. A *hidden*
+    // alias would only half-fix that, so it must show up in `jlo --help`,
+    // not just work when typed.
+    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
+    cmd.arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("[alias: use]"));
+}
+
+#[test]
+fn init_help_states_the_default_when_version_is_omitted() {
+    // `[VERSION]` alone signals "optional" too subtly for the compact `-h`
+    // tier, and doesn't say what filling it in falls back to; that has to
+    // be in the argument's own help line, not just `long_about`.
+    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
+    cmd.args(["init", "-h"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Default: latest release"));
+}
+
+#[test]
 fn version_flag_matches_version_subcommand() {
     let mut flag = Command::cargo_bin("jlo-bin").unwrap();
     let flag_out = flag
@@ -127,6 +152,20 @@ fn every_subcommand_has_help() {
 fn exec_help_is_not_passed_to_the_child() {
     let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
     cmd.args(["exec", "--help"])
+        .assert()
+        .success()
+        .code(0)
+        .stdout(predicate::str::contains("Usage: jlo exec"));
+}
+
+#[test]
+fn exec_help_still_shows_after_an_explicit_version() {
+    // Once a version has bound to the `args` positional, clap's own
+    // `-h`/`--help` interception no longer fires on its own (it only
+    // catches the flag before any value is captured); `cmd_exec` must
+    // still recognise it.
+    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
+    cmd.args(["exec", "21", "--help"])
         .assert()
         .success()
         .code(0)
@@ -418,6 +457,32 @@ fn exec() {
         .failure()
         .code(127)
         .stderr(predicate::str::contains("could not execute"));
+
+    // Only the *first* `--` is the separator; a second, user-typed `--`
+    // belongs to the command and must survive - whether or not a version
+    // precedes it. This must behave identically either way: both try to
+    // execute a program literally named "--" (regression test: the
+    // version-omitted path used to silently drop the second `--` because
+    // clap eats the leading separator before `cmd_exec` ever sees it).
+    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
+    cmd.args([
+        "exec",
+        "25",
+        "--",
+        "--",
+        "definitely-not-a-real-command-xyz",
+    ])
+    .assert()
+    .failure()
+    .code(127)
+    .stderr(predicate::str::contains("could not execute '--'"));
+
+    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
+    cmd.args(["exec", "--", "--", "definitely-not-a-real-command-xyz"])
+        .assert()
+        .failure()
+        .code(127)
+        .stderr(predicate::str::contains("could not execute '--'"));
 
     // leave temp dir and clean up
     std::env::set_current_dir(std::env::temp_dir()).unwrap();
