@@ -810,7 +810,7 @@ fn init_reports_api_http_error() {
         .stderr(predicate::str::contains("HTTP 500"));
 }
 
-/// Where `jlo` installs JDKs, mirroring `jdk_base_dir()` in main.rs.
+/// Where `jlo` installs JDKs, mirroring `JdkStore::discover()` in store.rs.
 /// IntelliJ-compatible: `~/Library/Java/JavaVirtualMachines` on macOS, `~/.jdks` elsewhere.
 fn jdk_base() -> std::path::PathBuf {
     let home = std::env::home_dir().unwrap();

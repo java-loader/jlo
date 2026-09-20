@@ -2,12 +2,11 @@ mod adoptium;
 mod cli;
 mod conf;
 mod extract;
+mod store;
 mod ui;
 
-use crate::adoptium::{
-    AdoptiumClient, JdkMetadata, RemoteJdk, clean_jdks, count_superseded_jdks, find_installed_jdk,
-    find_installed_jdks, find_installed_major_versions, find_suitable_jdk,
-};
+use crate::adoptium::{AdoptiumClient, JdkMetadata, RemoteJdk};
+use crate::store::JdkStore;
 use crate::ui::InstallUi;
 use anyhow::Context;
 use clap::Parser;
@@ -134,10 +133,12 @@ fn cmd_env(client: &AdoptiumClient, version: Option<String>) {
 
 fn cmd_home(client: &AdoptiumClient, version: Option<String>) {
     let java_version = resolve_java_version_from(version);
-    let java_home = resolve_java_home(client, &java_version).unwrap_or_else(|e| {
-        ui::error!("{e:#}");
-        exit(1);
-    });
+    let java_home = JdkStore::discover()
+        .and_then(|store| resolve_java_home(client, &store, &java_version))
+        .unwrap_or_else(|e| {
+            ui::error!("{e:#}");
+            exit(1);
+        });
     println!("{}", java_home.to_string_lossy());
 }
 
@@ -261,10 +262,12 @@ mod exec_arg_recovery_tests {
 #[cfg(unix)]
 fn run_exec(client: &AdoptiumClient, version: Option<String>, command: &[String]) -> ! {
     let java_version = resolve_java_version_from(version);
-    let java_home = resolve_java_home(client, &java_version).unwrap_or_else(|e| {
-        ui::error!("{e:#}");
-        exit(1);
-    });
+    let java_home = JdkStore::discover()
+        .and_then(|store| resolve_java_home(client, &store, &java_version))
+        .unwrap_or_else(|e| {
+            ui::error!("{e:#}");
+            exit(1);
+        });
 
     exec_command(&java_home, command);
 }
@@ -366,17 +369,17 @@ fn exec_failure_code(kind: std::io::ErrorKind) -> i32 {
 /// version - is what `jlo update`, `jlo exec` and `.jlorc` take. Colours switch
 /// themselves off when stdout is not a terminal, so a pipe sees plain text.
 fn cmd_list(client: &AdoptiumClient, offline: bool) {
-    let jdk_base = jdk_base_dir().unwrap_or_else(|e| {
+    let store = JdkStore::discover().unwrap_or_else(|e| {
         ui::error!("{e:#}");
         exit(1);
     });
-    let installed = find_installed_jdks(&jdk_base).unwrap_or_else(|e| {
+    let installed = store.list().unwrap_or_else(|e| {
         ui::error!("could not list installed JDKs: {e:#}");
         exit(1);
     });
 
     if offline {
-        print_offline_list(&installed, &jdk_base);
+        print_offline_list(&installed, store.base());
     } else {
         let available = client.available_jdks().unwrap_or_else(|e| {
             ui::error!("{e:#}");
@@ -387,7 +390,7 @@ fn cmd_list(client: &AdoptiumClient, offline: bool) {
     }
 }
 
-fn print_offline_list(installed: &[adoptium::InstalledJdk], jdk_base: &Path) {
+fn print_offline_list(installed: &[store::InstalledJdk], jdk_base: &Path) {
     if installed.is_empty() {
         eprintln!("No JDKs installed in {}.", jdk_base.display());
         return;
@@ -422,7 +425,7 @@ fn major_column_width(majors: impl IntoIterator<Item = i64>) -> usize {
         .unwrap_or(0)
 }
 
-fn print_remote_list(available: &[RemoteJdk], installed: &[adoptium::InstalledJdk]) {
+fn print_remote_list(available: &[RemoteJdk], installed: &[store::InstalledJdk]) {
     if available.is_empty() {
         eprintln!("Adoptium offers no JDKs for this OS and architecture.");
         return;
@@ -478,7 +481,7 @@ fn print_remote_list(available: &[RemoteJdk], installed: &[adoptium::InstalledJd
 }
 
 /// Whether any major version has an older build installed than Adoptium offers.
-fn has_outdated(available: &[RemoteJdk], installed: &[adoptium::InstalledJdk]) -> bool {
+fn has_outdated(available: &[RemoteJdk], installed: &[store::InstalledJdk]) -> bool {
     available
         .iter()
         .any(|jdk| matches!(installed_status(jdk, installed), InstalledStatus::Older(_)))
@@ -511,7 +514,7 @@ enum InstalledStatus {
     None,
 }
 
-fn installed_status(jdk: &RemoteJdk, installed: &[adoptium::InstalledJdk]) -> InstalledStatus {
+fn installed_status(jdk: &RemoteJdk, installed: &[store::InstalledJdk]) -> InstalledStatus {
     if installed.iter().any(|i| i.version == jdk.version) {
         return InstalledStatus::Latest;
     }
@@ -527,11 +530,11 @@ fn installed_status(jdk: &RemoteJdk, installed: &[adoptium::InstalledJdk]) -> In
 }
 
 fn cmd_clean() {
-    let jdk_base = jdk_base_dir().unwrap_or_else(|e| {
+    let store = JdkStore::discover().unwrap_or_else(|e| {
         ui::error!("{e:#}");
         exit(1);
     });
-    let report = clean_jdks(&jdk_base).unwrap_or_else(|e| {
+    let report = store.clean().unwrap_or_else(|e| {
         ui::error!("could not clean JDKs: {e:#}");
         exit(1);
     });
@@ -570,18 +573,20 @@ fn cmd_update(client: &AdoptiumClient, versions: Vec<String>, all: bool) {
     // `--all` and explicit versions are mutually exclusive (clap enforces it),
     // so these three arms are the whole input space.
     if all {
-        find_installed_major_versions(&jdk_base_dir().unwrap_or_else(|e| {
-            ui::error!("{e:#}");
-            exit(1);
-        }))
-        .unwrap_or_else(|e| {
-            ui::error!("could not determine installed JDK versions: {e:#}");
-            exit(1);
-        })
-        .into_iter()
-        .for_each(|v| {
-            versions_to_install.insert(v.to_string());
-        });
+        JdkStore::discover()
+            .unwrap_or_else(|e| {
+                ui::error!("{e:#}");
+                exit(1);
+            })
+            .installed_majors()
+            .unwrap_or_else(|e| {
+                ui::error!("could not determine installed JDK versions: {e:#}");
+                exit(1);
+            })
+            .into_iter()
+            .for_each(|v| {
+                versions_to_install.insert(v.to_string());
+            });
 
         if versions_to_install.is_empty() {
             ui::error!("no installed JDKs to update");
@@ -630,8 +635,8 @@ fn cmd_update(client: &AdoptiumClient, versions: Vec<String>, all: bool) {
 /// determined. A hint is not worth failing an otherwise successful update, so
 /// an unreadable JDK directory just means no hint.
 fn count_superseded() -> usize {
-    jdk_base_dir()
-        .and_then(|base| count_superseded_jdks(&base))
+    JdkStore::discover()
+        .and_then(|store| store.superseded_count())
         .unwrap_or(0)
 }
 
@@ -660,16 +665,16 @@ fn update(client: &AdoptiumClient, java_version: &str) -> bool {
         exit(1);
     });
 
-    let jdk_base = jdk_base_dir().unwrap_or_else(|e| {
+    let store = JdkStore::discover().unwrap_or_else(|e| {
         ui::error!("{e:#}");
         exit(1);
     });
 
-    if find_installed_jdk(&jdk_metadata, &jdk_base).is_some() {
+    if store.find_exact(&jdk_metadata).is_some() {
         ui::up_to_date(java_version, &jdk_metadata.semver);
         false
     } else {
-        install_jdk(client, &jdk_base, &jdk_metadata).unwrap_or_else(|e| {
+        install_jdk(client, &store, &jdk_metadata).unwrap_or_else(|e| {
             ui::error!("could not install JDK: {e:#}");
             exit(1);
         });
@@ -680,14 +685,16 @@ fn update(client: &AdoptiumClient, java_version: &str) -> bool {
 /// Resolve the `JAVA_HOME` for the requested major version, installing the JDK on
 /// demand if it is not already present. Diagnostics go to stderr; this returns
 /// the path so callers decide what (if anything) to print to stdout.
-fn resolve_java_home(client: &AdoptiumClient, java_version: &str) -> anyhow::Result<PathBuf> {
-    let jdk_base = jdk_base_dir()?;
-
-    if let Some(path) = find_suitable_jdk(&jdk_base, java_version) {
+fn resolve_java_home(
+    client: &AdoptiumClient,
+    store: &JdkStore,
+    java_version: &str,
+) -> anyhow::Result<PathBuf> {
+    if let Some(path) = store.find_matching(java_version) {
         Ok(path)
     } else {
         let metadata = client.fetch_metadata(java_version)?;
-        install_jdk(client, &jdk_base, &metadata)
+        install_jdk(client, store, &metadata)
     }
 }
 
@@ -699,8 +706,8 @@ fn resolve_java_home(client: &AdoptiumClient, java_version: &str) -> anyhow::Res
 /// variable lasts only as long as the shell and is implied by the command the
 /// user ran - it is the install (a JDK on disk) that earns a line, not this.
 fn setup(client: &AdoptiumClient, java_version: &str) -> anyhow::Result<()> {
-    let java_home = resolve_java_home(client, java_version)?;
-    let jdk_base = jdk_base_dir()?;
+    let store = JdkStore::discover()?;
+    let java_home = resolve_java_home(client, &store, java_version)?;
 
     let current_java_home = env::var("JAVA_HOME").unwrap_or_default();
     if current_java_home != java_home.to_string_lossy() {
@@ -709,7 +716,7 @@ fn setup(client: &AdoptiumClient, java_version: &str) -> anyhow::Result<()> {
 
     let java_bin_path = java_home.join("bin").to_string_lossy().into_owned();
     let current_path = env::var("PATH").unwrap_or_default();
-    if let Some(updated_path) = update_path(&java_bin_path, &current_path, &jdk_base)? {
+    if let Some(updated_path) = update_path(&java_bin_path, &current_path, store.base())? {
         println!("export PATH=\"{updated_path}\"");
     }
 
@@ -718,16 +725,15 @@ fn setup(client: &AdoptiumClient, java_version: &str) -> anyhow::Result<()> {
 
 fn install_jdk(
     client: &AdoptiumClient,
-    jdk_base: &Path,
+    store: &JdkStore,
     jdk_metadata: &JdkMetadata,
 ) -> anyhow::Result<PathBuf> {
     // One progress region spans all three phases, so the terminal shows a
     // single line that changes rather than three bars stacking up.
     let ui = InstallUi::new(&jdk_metadata.semver);
-    let dest_dir = jdk_base.join(&jdk_metadata.semver);
 
-    match install_jdk_inner(client, jdk_metadata, &dest_dir, &ui) {
-        Ok(()) => {
+    match install_jdk_inner(client, store, jdk_metadata, &ui) {
+        Ok(dest_dir) => {
             ui.finish(&dest_dir);
             Ok(dest_dir)
         }
@@ -742,10 +748,10 @@ fn install_jdk(
 
 fn install_jdk_inner(
     client: &AdoptiumClient,
+    store: &JdkStore,
     jdk_metadata: &JdkMetadata,
-    dest_dir: &Path,
     ui: &InstallUi,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<PathBuf> {
     // Download JDK
     let temp_dir = tempdir().context("could not create temporary directory")?;
     let temp_file = temp_dir.path().join(&jdk_metadata.package_name);
@@ -755,13 +761,13 @@ fn install_jdk_inner(
     // Extract JDK to temp dir
     extract::extract(&temp_file, temp_dir.path(), ui)?;
 
-    adoptium::install_jdk(jdk_metadata, temp_dir.path(), dest_dir, ui)?;
+    let dest_dir = store.install(jdk_metadata, temp_dir.path(), ui)?;
 
     temp_dir.close().unwrap_or_else(|err| {
         ui::warning!("could not delete temporary directory: {err}");
     });
 
-    Ok(())
+    Ok(dest_dir)
 }
 
 /// J'Lo's own state directory — where `default.jlorc` lives.
@@ -778,23 +784,8 @@ fn jlo_home_dir() -> anyhow::Result<PathBuf> {
     Ok(path)
 }
 
-fn jdk_base_dir() -> anyhow::Result<PathBuf> {
-    let home = env::home_dir().context("could not determine home directory")?;
-    Ok(jdk_base_dir_for(env::consts::OS, &home))
-}
-
-/// JDK install location, matching `IntelliJ` IDEA's layout so both tools see the
-/// same JDKs. Split out from [`jdk_base_dir`] so every platform is testable from
-/// any host.
-fn jdk_base_dir_for(os: &str, home: &Path) -> PathBuf {
-    match os {
-        "macos" => home.join("Library/Java/JavaVirtualMachines"),
-        _ => home.join(".jdks"),
-    }
-}
-
 /// Prepend `java_path` to `current_path`, dropping any entry already under
-/// `jdk_base`. `jdk_base` must be the JDK install directory ([`jdk_base_dir`]) —
+/// `jdk_base`. `jdk_base` must be the JDK install directory ([`JdkStore::base`]) —
 /// the only tree whose PATH entries J'Lo owns. Passing a broader directory (the
 /// home directory, say) would strip unrelated user entries.
 fn update_path(
@@ -972,27 +963,6 @@ mod tests {
     }
 
     #[test]
-    fn jdk_base_dir_matches_intellij_layout_on_macos() {
-        let home = Path::new("/Users/u");
-        assert_eq!(
-            jdk_base_dir_for("macos", home),
-            home.join("Library/Java/JavaVirtualMachines")
-        );
-    }
-
-    #[test]
-    fn jdk_base_dir_matches_intellij_layout_on_linux() {
-        let home = Path::new("/home/u");
-        assert_eq!(jdk_base_dir_for("linux", home), home.join(".jdks"));
-    }
-
-    #[test]
-    fn jdk_base_dir_matches_intellij_layout_on_windows() {
-        let home = Path::new("/Users/u");
-        assert_eq!(jdk_base_dir_for("windows", home), home.join(".jdks"));
-    }
-
-    #[test]
     fn update_path_removes_stale_jdk_entries() {
         let jdk_base = Path::new("/home/u/.jdks");
         let result = update_path(
@@ -1057,8 +1027,8 @@ mod tests {
         }
     }
 
-    fn local(version: &str, major: i64) -> adoptium::InstalledJdk {
-        adoptium::InstalledJdk {
+    fn local(version: &str, major: i64) -> store::InstalledJdk {
+        store::InstalledJdk {
             version: version.to_string(),
             major,
             managed: true,
@@ -1094,7 +1064,7 @@ mod tests {
 
     #[test]
     fn installed_status_reports_newest_local_build_of_the_major() {
-        // find_installed_jdks yields newest first, so the first match for a
+        // `JdkStore::list` yields newest first, so the first match for a
         // major is the newest build the user has.
         let installed = vec![local("21.0.11+10.0.LTS", 21), local("21.0.9+10.0.LTS", 21)];
         match installed_status(&remote("21.0.12+101.0.LTS", 21), &installed) {

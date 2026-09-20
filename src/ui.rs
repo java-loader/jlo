@@ -204,7 +204,7 @@ pub(crate) use {created, error, hint, warning};
 ///
 /// `clean` is the one command that destroys things, so unlike `jlo env` it
 /// always says what it did - including when the answer is "nothing".
-pub(crate) fn clean_report(report: &crate::adoptium::CleanReport) {
+pub(crate) fn clean_report(report: &crate::store::CleanReport) {
     // Styling adds invisible escape bytes, so pad the plain number first and
     // style the padded string - the same rule the `jlo list` columns follow.
     let width = report
