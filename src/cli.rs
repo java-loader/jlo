@@ -8,9 +8,14 @@
 use clap::{Parser, Subcommand};
 
 const AFTER_HELP: &str = "\
+env, home, exec, update and init take a Java major version:
+
+  jlo env [VERSION]          jlo update [VERSION...]
+  jlo home [VERSION]         jlo init [VERSION]
+  jlo exec [VERSION] -- <COMMAND> [ARGS]...
+
 When VERSION is omitted, env, home, exec and update resolve it from ./.jlorc,
-then ~/.jlo/default.jlorc. init instead pins the latest release, and default
-requires VERSION outright.
+then ~/.jlo/default.jlorc. init instead pins the latest release.
 
 Examples:
   jlo env 25                       Use Java 25 in this shell
