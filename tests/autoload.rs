@@ -16,6 +16,7 @@
 #![allow(clippy::unwrap_used)]
 
 use std::fmt::Write as _;
+use std::path::Path;
 use std::process::Command;
 use tempfile::tempdir;
 
@@ -280,4 +281,142 @@ fn zsh_registers_chpwd_hook_once_and_leaves_prompt_command_alone() {
         stdout.contains("pc=\n"),
         "zsh must not touch PROMPT_COMMAND, got {stdout:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Walk-up lookup: the hook must see a project's .jlorc from a subdirectory
+// ---------------------------------------------------------------------------
+
+/// Source the script from an empty directory (so the fresh-shell branch stays
+/// quiet), `cd` to `start`, and report what `jlo_find_jlorc` decides.
+///
+/// `HOME` is the temp tree rather than the real one: the search stops there,
+/// and a test that walked up into the developer's actual home would depend on
+/// whatever lives in it.
+fn finds_jlorc(home: &Path, start: &Path) -> bool {
+    let neutral = tempdir().unwrap();
+    let jlo_home = tempdir().unwrap();
+    let script = autoload_script();
+
+    let body = format!(
+        // `type` under `set -e`: without it a missing function would exit
+        // non-zero and read as an honest "not found".
+        "set -e\n. '{script}'\ntype jlo_find_jlorc >/dev/null\ncd '{}'\n\
+         jlo_find_jlorc && echo FOUND || echo NONE\n",
+        start.display()
+    );
+
+    let out = Command::new(bash_bin())
+        .arg("-c")
+        .arg(&body)
+        .current_dir(neutral.path())
+        .env("HOME", home)
+        .env("JLO_HOME", jlo_home.path())
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run {}: {e}", bash_bin()));
+
+    assert!(
+        out.status.success(),
+        "bash failed ({}): {}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    match stdout.trim() {
+        "FOUND" => true,
+        "NONE" => false,
+        other => panic!("unexpected output {other:?}"),
+    }
+}
+
+/// `tempdir()` hands back `/var/...` on macOS while `$PWD` after `cd` shows
+/// `/private/var/...`; the `$HOME` boundary is a string comparison.
+fn canon(p: &Path) -> std::path::PathBuf {
+    p.canonicalize().unwrap()
+}
+
+#[test]
+fn find_walks_up_from_subdirectory() {
+    let home = tempdir().unwrap();
+    let home = canon(home.path());
+    let project = home.join("project");
+    let deep = project.join("src").join("main");
+    std::fs::create_dir_all(&deep).unwrap();
+    std::fs::write(project.join(".jlorc"), "21\n").unwrap();
+
+    assert!(finds_jlorc(&home, &deep));
+}
+
+#[test]
+fn find_stops_at_vcs_root() {
+    let home = tempdir().unwrap();
+    let home = canon(home.path());
+    let outer = home.join("outer");
+    let repo = outer.join("repo");
+    let deep = repo.join("src");
+    std::fs::create_dir_all(&deep).unwrap();
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    std::fs::write(outer.join(".jlorc"), "17\n").unwrap();
+
+    assert!(!finds_jlorc(&home, &deep));
+}
+
+#[test]
+fn find_stops_at_home() {
+    let outside = tempdir().unwrap();
+    let outside = canon(outside.path());
+    let home = outside.join("home");
+    let project = home.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(outside.join(".jlorc"), "17\n").unwrap();
+
+    assert!(!finds_jlorc(&home, &project));
+}
+
+#[test]
+fn find_reports_none_when_absent() {
+    let home = tempdir().unwrap();
+    let home = canon(home.path());
+    let project = home.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+
+    assert!(!finds_jlorc(&home, &project));
+}
+
+/// The behaviour that matters: `cd` into a subdirectory of a project must set
+/// the env, not leave it to the user default. A stub `jlo` records the call.
+#[test]
+fn hook_runs_jlo_env_from_a_project_subdirectory() {
+    let home = tempdir().unwrap();
+    let home = canon(home.path());
+    let project = home.join("project");
+    let deep = project.join("src");
+    std::fs::create_dir_all(&deep).unwrap();
+    std::fs::write(project.join(".jlorc"), "21\n").unwrap();
+
+    let neutral = tempdir().unwrap();
+    let jlo_home = tempdir().unwrap();
+    let script = autoload_script();
+    let body = format!(
+        "set -e\njlo() {{ echo \"jlo $*\"; }}\n. '{script}'\ncd '{}'\njlo_after_cd\n",
+        deep.display()
+    );
+
+    let out = Command::new(bash_bin())
+        .arg("-c")
+        .arg(&body)
+        .current_dir(neutral.path())
+        .env("HOME", &home)
+        .env("JLO_HOME", jlo_home.path())
+        .output()
+        .unwrap();
+
+    assert!(
+        out.status.success(),
+        "bash failed ({}): {}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(String::from_utf8(out.stdout).unwrap().trim(), "jlo env");
 }

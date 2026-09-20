@@ -8,13 +8,13 @@ const JLO_CONFIG_FILE: &str = ".jlorc";
 const JLO_DEFAULT_CONFIG_FILE: &str = "default.jlorc";
 
 pub(crate) fn load_config_java_version() -> anyhow::Result<String> {
-    // Try project config first; if any error other than NotFound, return it.
-    match load(Path::new(JLO_CONFIG_FILE)) {
-        Ok(v) => return Ok(v),
-        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
-            return Err(anyhow!("could not load configuration: {e}"));
-        }
-        Err(_) => {} // NotFound -> fall through to default config
+    // Project config first, searched upwards: `jlo env` is routinely run from a
+    // subdirectory, and resolving the user default there would hand back a
+    // different JDK without saying so.
+    let cwd = std::env::current_dir()
+        .map_err(|e| anyhow!("could not determine the current directory: {e}"))?;
+    if let Some(path) = find_project_config(&cwd, std::env::home_dir().as_deref()) {
+        return load(&path).map_err(|e| anyhow!("could not load configuration: {e}"));
     }
 
     // Try the default config path.
@@ -22,12 +22,40 @@ pub(crate) fn load_config_java_version() -> anyhow::Result<String> {
     load(&default_path).map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             anyhow!(
-                "Neither '{JLO_CONFIG_FILE}' nor the default config file found. Please run 'jlo init' to create a configuration file."
+                "No '{JLO_CONFIG_FILE}' found in the current directory or its parents, and no default config file. Please run 'jlo init' to create a configuration file."
             )
         } else {
             anyhow!("could not load configuration: {e}")
         }
     })
+}
+
+/// The nearest `.jlorc` at or above `start`.
+///
+/// The search stops after `home` and after a VCS root, both inclusive: a
+/// `.jlorc` outside the repository - or above the user's home directory -
+/// belongs to some other project, and inheriting it silently is the failure
+/// mode this search exists to prevent. `home` is the last directory examined
+/// rather than a skipped one, so a `.jlorc` sitting in `$HOME` keeps applying
+/// as it did when only the current directory was consulted.
+fn find_project_config(start: &Path, home: Option<&Path>) -> Option<PathBuf> {
+    let mut dir = start;
+    loop {
+        let candidate = dir.join(JLO_CONFIG_FILE);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+        if home == Some(dir) || is_vcs_root(dir) {
+            return None;
+        }
+        dir = dir.parent()?;
+    }
+}
+
+/// `.git` is matched with `exists`, not `is_dir`: worktrees and submodules
+/// record it as a file, and both are still repository roots.
+fn is_vcs_root(dir: &Path) -> bool {
+    dir.join(".git").exists()
 }
 
 fn default_jlorc_path() -> anyhow::Result<PathBuf> {
@@ -268,5 +296,129 @@ mod tests {
         assert_eq!(content.lines().nth(1), Some("21"));
         // Truncated, not patched in place.
         assert!(!content.contains("leftover"));
+    }
+
+    /// Walk-up tests. Paths are canonicalized because `tempdir()` hands back
+    /// `/var/...` on macOS while the walk sees `/private/var/...`, and the
+    /// `$HOME` boundary is a path comparison.
+    fn canon(p: &Path) -> PathBuf {
+        p.canonicalize().unwrap()
+    }
+
+    #[test]
+    fn find_project_config_finds_jlorc_in_start_dir() {
+        let home = tempdir().unwrap();
+        let home = canon(home.path());
+        let project = home.join("project");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(project.join(".jlorc"), "21\n").unwrap();
+
+        assert_eq!(
+            find_project_config(&project, Some(&home)),
+            Some(project.join(".jlorc"))
+        );
+    }
+
+    #[test]
+    fn find_project_config_walks_up_from_subdirectory() {
+        // The bug: `jlo env` in project/src/main used to miss project/.jlorc
+        // and silently fall through to the user default.
+        let home = tempdir().unwrap();
+        let home = canon(home.path());
+        let project = home.join("project");
+        let deep = project.join("src").join("main");
+        fs::create_dir_all(&deep).unwrap();
+        fs::write(project.join(".jlorc"), "21\n").unwrap();
+
+        assert_eq!(
+            find_project_config(&deep, Some(&home)),
+            Some(project.join(".jlorc"))
+        );
+    }
+
+    #[test]
+    fn find_project_config_prefers_nearest() {
+        let home = tempdir().unwrap();
+        let home = canon(home.path());
+        let project = home.join("project");
+        let module = project.join("module");
+        fs::create_dir_all(&module).unwrap();
+        fs::write(project.join(".jlorc"), "17\n").unwrap();
+        fs::write(module.join(".jlorc"), "21\n").unwrap();
+
+        assert_eq!(
+            find_project_config(&module, Some(&home)),
+            Some(module.join(".jlorc"))
+        );
+    }
+
+    #[test]
+    fn find_project_config_stops_at_vcs_root() {
+        // A .jlorc outside the repository belongs to someone else's project.
+        let home = tempdir().unwrap();
+        let home = canon(home.path());
+        let outer = home.join("outer");
+        let repo = outer.join("repo");
+        let deep = repo.join("src");
+        fs::create_dir_all(&deep).unwrap();
+        fs::create_dir_all(repo.join(".git")).unwrap();
+        fs::write(outer.join(".jlorc"), "17\n").unwrap();
+
+        assert_eq!(find_project_config(&deep, Some(&home)), None);
+    }
+
+    #[test]
+    fn find_project_config_finds_jlorc_at_vcs_root() {
+        // Stopping at the VCS root still checks the root itself.
+        let home = tempdir().unwrap();
+        let home = canon(home.path());
+        let repo = home.join("repo");
+        let deep = repo.join("src");
+        fs::create_dir_all(&deep).unwrap();
+        fs::create_dir_all(repo.join(".git")).unwrap();
+        fs::write(repo.join(".jlorc"), "21\n").unwrap();
+
+        assert_eq!(
+            find_project_config(&deep, Some(&home)),
+            Some(repo.join(".jlorc"))
+        );
+    }
+
+    #[test]
+    fn find_project_config_stops_at_home() {
+        let outside = tempdir().unwrap();
+        let outside = canon(outside.path());
+        let home = outside.join("home");
+        let project = home.join("project");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(outside.join(".jlorc"), "17\n").unwrap();
+
+        assert_eq!(find_project_config(&project, Some(&home)), None);
+    }
+
+    #[test]
+    fn find_project_config_checks_home_itself() {
+        // `$HOME` is the outermost directory searched, not one skipped: a
+        // `.jlorc` in `$HOME` applied when CWD was `$HOME` before walk-up too.
+        let home = tempdir().unwrap();
+        let home = canon(home.path());
+        let project = home.join("project");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(home.join(".jlorc"), "17\n").unwrap();
+
+        assert_eq!(
+            find_project_config(&project, Some(&home)),
+            Some(home.join(".jlorc"))
+        );
+    }
+
+    #[test]
+    fn find_project_config_returns_none_when_absent() {
+        let home = tempdir().unwrap();
+        let home = canon(home.path());
+        let project = home.join("project");
+        fs::create_dir_all(&project).unwrap();
+
+        assert_eq!(find_project_config(&project, Some(&home)), None);
     }
 }

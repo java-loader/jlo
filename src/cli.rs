@@ -14,8 +14,9 @@ env, home, exec, update and init take a Java major version:
   jlo home [VERSION]         jlo init [VERSION]
   jlo exec [VERSION] -- <COMMAND> [ARGS]...
 
-When VERSION is omitted, env, home, exec and update resolve it from ./.jlorc,
-then ~/.jlo/default.jlorc. init instead pins the latest release.
+When VERSION is omitted, env, home, exec and update resolve it from the
+nearest .jlorc at or above the current directory, then ~/.jlo/default.jlorc.
+init instead pins the latest release.
 
 Examples:
   jlo env 25                       Use Java 25 in this shell
@@ -106,9 +107,9 @@ them. Running the binary directly does not change your shell.
 
 The JDK is downloaded from Adoptium on demand if it is not installed.
 
-When VERSION is omitted, it resolves from ./.jlorc, then
-~/.jlo/default.jlorc. Only major versions are accepted: 21, not
-21.0.5."
+When VERSION is omitted, it resolves from the nearest .jlorc at or
+above the current directory, then ~/.jlo/default.jlorc. Only major
+versions are accepted: 21, not 21.0.5."
     )]
     Env {
         /// Java major version. Default: from .jlorc
@@ -123,9 +124,9 @@ Print the JAVA_HOME path for a version
 Writes the path and nothing else to stdout, so $(jlo home 21) stays
 clean. Unlike jlo env it does not modify the current shell.
 
-When VERSION is omitted, it resolves from ./.jlorc, then
-~/.jlo/default.jlorc. Only major versions are accepted: 21, not
-21.0.5."
+When VERSION is omitted, it resolves from the nearest .jlorc at or
+above the current directory, then ~/.jlo/default.jlorc. Only major
+versions are accepted: 21, not 21.0.5."
     )]
     Home {
         /// Java major version. Default: from .jlorc
@@ -165,8 +166,8 @@ the child only; the current shell is untouched.",
 
     /// Update installed JDKs to their latest minor release
     ///
-    /// With no argument, updates the version from .jlorc or
-    /// ~/.jlo/default.jlorc. Pass --all to update every installed major
+    /// With no argument, updates the version from the nearest .jlorc at or
+    /// above the current directory, or ~/.jlo/default.jlorc. Pass --all to update every installed major
     /// version, or list major versions explicitly.
     Update {
         /// Major versions to update. Default: from .jlorc
@@ -189,7 +190,7 @@ the child only; the current shell is untouched.",
     /// versions are accepted: 21, not 21.0.5.
     ///
     /// --global writes ~/.jlo/default.jlorc instead: the version jlo env
-    /// falls back to when the current directory has no .jlorc.
+    /// falls back to when no .jlorc is found.
     Init {
         /// Java major version. Default: latest release
         version: Option<String>,

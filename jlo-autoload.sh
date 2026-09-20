@@ -1,9 +1,33 @@
 #!/usr/bin/env sh
 
+# Is there a .jlorc at or above $PWD? Mirrors find_project_config() in
+# src/conf.rs: the search stops after $HOME and after a VCS root, both
+# inclusive. Kept in shell rather than delegated to jlo-bin because this runs
+# on every cd, and a process spawn per directory change is not worth it.
+#
+# "${dir%/*}" walks up without forking a dirname; it yields "" at the last
+# component, hence the "/" fixup.
+jlo_find_jlorc() {
+  _jlo_dir="$PWD"
+  while :; do
+    if [ -f "$_jlo_dir/.jlorc" ]; then
+      unset _jlo_dir
+      return 0
+    fi
+    if [ "$_jlo_dir" = "$HOME" ] || [ -e "$_jlo_dir/.git" ] || [ "$_jlo_dir" = "/" ]; then
+      break
+    fi
+    _jlo_dir="${_jlo_dir%/*}"
+    [ -n "$_jlo_dir" ] || _jlo_dir="/"
+  done
+  unset _jlo_dir
+  return 1
+}
+
 jlo_after_cd() {
   [ "$PWD" = "$_JLO_LAST_DIR" ] && return
   _JLO_LAST_DIR="$PWD"
-  [ -f ".jlorc" ] && jlo env
+  jlo_find_jlorc && jlo env
 }
 
 if [ -n "$ZSH_VERSION" ]; then
@@ -40,7 +64,7 @@ elif [ -n "$BASH_VERSION" ]; then
 fi
 
 # Immediate call for fresh spawned shells
-if [ -f ".jlorc" ] || [ -f "$JLO_HOME/default.jlorc" ]; then
+if jlo_find_jlorc || [ -f "$JLO_HOME/default.jlorc" ]; then
   _JLO_LAST_DIR="$PWD"
   jlo env
 fi

@@ -51,7 +51,7 @@ jlo env
 
 > [!TIP]
 > If you enabled the J'Lo autoload feature during installation, J'Lo will automatically set up the Java environment
-> whenever you `cd` into a directory that contains a `.jlorc` file.
+> whenever you `cd` into a project with a `.jlorc` file — including its subdirectories.
 
 JDKs are installed to `~/Library/Java/JavaVirtualMachines/` on macOS and `~/.jdks/` on Linux and Windows —
 the same locations IntelliJ IDEA uses, so both tools see the same JDKs.
@@ -79,8 +79,10 @@ to point to the desired JDK installation.
 `jlo use` is an alias for `jlo env`.
 
 **Behavior:**
-- If the current directory contains a `.jlorc` file, `jlo env` uses the version it specifies.
-- Otherwise, it falls back to `~/.jlo/default.jlorc`.
+- `jlo env` uses the nearest `.jlorc` file, searching the current directory and then its parents. The search stops
+  at your home directory or at a repository root (a directory containing `.git`), so a `.jlorc` outside the project
+  is never picked up.
+- If no `.jlorc` is found, it falls back to `~/.jlo/default.jlorc`.
 - If the requested Java version is not installed, it will be downloaded and installed automatically.
 - This command affects only the current shell session.
 - VERSION is a major version only, e.g. `25`, not `25.0.5`. This applies everywhere a command takes a VERSION
@@ -103,8 +105,8 @@ scripts, Makefiles, CI pipelines, and other non-interactive contexts (see
 [CI / scripting / AI agents](#ci--scripting--ai-agents)).
 
 **Behavior:**
-- Version resolution is identical to `jlo env`: an explicit argument wins, otherwise the current directory's `.jlorc`,
-  otherwise `~/.jlo/default.jlorc`.
+- Version resolution is identical to `jlo env`: an explicit argument wins, otherwise the nearest `.jlorc` at or above
+  the current directory, otherwise `~/.jlo/default.jlorc`.
 - If the requested Java version is not installed, it will be downloaded and installed automatically.
 - Only the resolved path is written to standard output; all diagnostics (download progress, etc.) go to standard error,
   so `$(jlo home …)` stays clean.
@@ -132,7 +134,8 @@ tool against a specific Java version from CI, scripts, or an AI agent (see
 
 **Behavior:**
 - The literal `--` separates the optional version from the command. Version resolution is identical to `jlo env`:
-  an explicit version wins, otherwise `.jlorc`, otherwise `~/.jlo/default.jlorc`.
+  an explicit version wins, otherwise the nearest `.jlorc` at or above the current directory, otherwise
+  `~/.jlo/default.jlorc`.
 - If the requested Java version is not installed, it will be downloaded and installed automatically.
 - On Unix the command replaces the J'Lo process (`execvp`), so its exit code and signals propagate transparently.
 
@@ -153,7 +156,7 @@ The file is used by `jlo env` to determine which Java version to set up.
 Specifying a version is optional; if omitted, the latest available Java version will be used.
 
 With `--global`, the file is written to `~/.jlo/default.jlorc` instead — the default Java version used by
-`jlo env` when no `.jlorc` file is found in the current directory.
+`jlo env` when no `.jlorc` file is found.
 
 This command fails if the config file already exists; pass `--force` to overwrite it.
 
@@ -194,8 +197,8 @@ That updates every installed major version in one go — no need to name them in
 - The `--all` flag updates all installed Java versions; it cannot be combined with explicit versions.
 - Multiple versions can be specified as arguments; each will be updated to its latest minor release.
   Missing versions will be installed automatically.
-- If no arguments are provided, it updates the Java version specified in the `.jlorc` file in the current directory,
-  falling back to `~/.jlo/default.jlorc` if none is found.
+- If no arguments are provided, it updates the Java version specified in the nearest `.jlorc` file at or above the
+  current directory, falling back to `~/.jlo/default.jlorc` if none is found.
 - The superseded minor release stays on disk — an open shell or IDE may still point at it. When an update leaves one
   behind, `jlo update` ends with a reminder to run [`jlo clean`](#cleaning-installed-versions).
 
