@@ -73,440 +73,41 @@ JDKs are installed to `~/Library/Java/JavaVirtualMachines/` on macOS and `~/.jdk
 the same locations IntelliJ IDEA uses, so both tools see the same JDKs.
 This allows automatic discovery of installed JDKs by IDEs like IntelliJ IDEA.
 
-# J’Lo Command Reference
+# Commands
 
-## Table of Contents
+`jlo <verb> --help` is the reference for every flag and every default: it is generated from the same declaration
+that dispatches the command, so it cannot drift from what the binary does. `jlo --help`, or a bare `jlo`, lists all
+of them; `-h` gives the short form of either.
 
-1. [Version Resolution](#version-resolution)
-2. [Environment Setup](#environment-setup)
-3. [Resolving JAVA_HOME](#resolving-java_home)
-4. [Checking What Is Active](#checking-what-is-active)
-5. [Executing a Command](#executing-a-command)
-6. [Initialization](#initialization)
-7. [Installing Java Versions](#installing-java-versions)
-8. [Updating Java Versions](#updating-java-versions)
-9. [Listing Versions](#listing-versions)
-10. [Removing Versions](#removing-versions)
-11. [Using a JDK J'Lo Did Not Install](#using-a-jdk-jlo-did-not-install)
-12. [Managing J’Lo Itself](#managing-jlo-itself)
-13. [Getting Help](#getting-help)
-14. [Supported Shells](#supported-shells)
-15. [Shell Completions](#shell-completions)
-16. [Environment Variables](#environment-variables)
-
-## Version Resolution
-
-`env`, `home`, `exec`, `install` and `update` all take an optional major version. When you leave it out, J'Lo
-resolves one in four steps and stops at the first that answers:
-
-| # | Step | Touches the network? |
-| --- | --- | --- |
-| 1 | The nearest `.jlorc` at or above the current directory. The search stops at your home directory or at a repository root (`.git`), so a `.jlorc` outside the project is never picked up. | no |
-| 2 | `~/.jlo/default.jlorc`, written by `jlo init --global`. | no |
-| 3 | The newest JDK already installed. | no |
-| 4 | The latest release Adoptium offers, downloaded. | yes |
-
-An explicit version on the command line wins over all four, and `jlo current` reports which step the active JDK
-came from.
-
-**Step 3 does not check whether something newer exists.** It takes the newest JDK *on this machine*, not the newest
-one Adoptium offers. A machine holding only an outdated Java 17 resolves to 17 and downloads nothing — otherwise
-every unconfigured `jlo env` would have to make a network round trip just to find out whether it needed one, on the
-hottest path there is, to answer a question [`jlo update`](#updating-java-versions) already answers. Step 4 is
-reached only when no JDK is installed at all.
-
-**`--offline` stops after step 3.** If nothing is installed either, it fails rather than downloading. That is the
-whole reason the autoload hook never starts a download on a `cd`: it calls `jlo env --offline`, so the cascade it
-runs ends at what is already on disk. (The hook is narrower still — it runs only where a `.jlorc` or
-`default.jlorc` applies, so entering an unconfigured directory changes nothing at all.) A typed `jlo env` on a
-fresh machine, by contrast, just works.
-
-**One sharp edge, accepted deliberately:** "the newest installed JDK" moves. A Java 26 installed for one project
-quietly changes what a bare `jlo env` resolves to in a directory that pins nothing. If you want a stable answer on
-neutral ground, run [`jlo init --global`](#initialization) — step 2 then answers before step 3 ever runs.
-
-## Environment Setup
-
-The command `jlo env` configures the current shell session by setting the `JAVA_HOME` and `PATH` environment variables
-to point to the desired JDK installation.
-
-`jlo use` is an alias for `jlo env`.
-
-**Behavior:**
-- `jlo env` uses the nearest `.jlorc` file, searching the current directory and then its parents. The search stops
-  at your home directory or at a repository root (a directory containing `.git`), so a `.jlorc` outside the project
-  is never picked up.
-- If no `.jlorc` is found, it falls back to `~/.jlo/default.jlorc`, then to the newest JDK already installed, and
-  finally to the latest release, which it downloads. See
-  [Version resolution](#version-resolution) for the whole cascade and its one sharp edge.
-- If the requested Java version is not installed, it will be downloaded and installed automatically.
-- `--offline` uses only what is already installed: it sets the environment if the version is there, and otherwise
-  prints one line to standard error and exits with status 1, leaving the environment untouched. This is how the
-  autoload hook calls it, so entering a project never starts a download — see the note below.
-- `jlo env` is silent on success by design — the autoload hook runs it on every new shell and every `cd`, and the
-  export statements on standard output are the whole of what it does. To see which JDK is active and where the
-  version came from, run [`jlo current`](#checking-what-is-active): it starts from the live `JAVA_HOME`, so it can
-  also tell you when the shell and the `.jlorc` disagree.
-- This command affects only the current shell session.
-- VERSION is a major version only, e.g. `25`, not `25.0.5`. This applies everywhere a command takes a VERSION
-  argument.
-
-**Usage examples:**
-```shell
-# set environment based on .jlorc (fallbacks described above)
-jlo env
-
-# set environment for Java 25
-jlo env 25
-
-# set it only if the JDK is already here; never download
-jlo env --offline
-
-# afterwards: say which JDK is active, and why
-jlo current
-````
-
-## Resolving JAVA_HOME
-
-The command `jlo home` prints the `JAVA_HOME` path for the requested Java version to standard output — and nothing else.
-Unlike `jlo env`, it does not modify the current shell; it just tells you where a JDK lives. This makes it suitable for
-scripts, Makefiles, CI pipelines, and other non-interactive contexts (see
-[CI / scripting / AI agents](#ci--scripting--ai-agents)).
-
-**Behavior:**
-- Version resolution is identical to `jlo env`: an explicit argument wins, otherwise the
-  [cascade](#version-resolution) — the nearest `.jlorc`, `~/.jlo/default.jlorc`, the newest JDK already installed,
-  the latest release.
-- If the requested Java version is not installed, it will be downloaded and installed automatically.
-- Only the resolved path is written to standard output; all diagnostics (download progress, etc.) go to standard error,
-  so `$(jlo home …)` stays clean.
-- `--offline` answers from what is already installed and never touches the network: it prints the path if the version
-  is there, and exits with status 1 if it is not. Use it to *ask* whether a JDK is available without risking a
-  several-hundred-megabyte download — in a CI step with a short timeout, or in a network-isolated sandbox.
-
-It is the J'Lo equivalent of macOS's `/usr/libexec/java_home -v <version>`.
-
-**Usage examples:**
-```shell
-# print JAVA_HOME for the version from .jlorc / default.jlorc
-jlo home
-
-# print JAVA_HOME for Java 25
-jlo home 25
-
-# capture it into an environment variable
-export JAVA_HOME="$(jlo home 25)"
-
-# is Java 21 available here? no download, no network, exit code is the answer
-jlo home --offline 21
-```
-
-## Checking What Is Active
-
-The command `jlo current` answers *which JDK is active in this shell, and why*. It starts from the live `JAVA_HOME`
-rather than from `.jlorc` — the two can legitimately disagree, and saying so is most of what the command is for.
-
-**Behavior:**
-- One line on standard output names the active version and where it came from; any advisory goes to standard error.
-- It exits with status 1 exactly when there is no answer to print: `JAVA_HOME` is unset, or it points at a J'Lo
-  install that has since been removed. So `if jlo current >/dev/null; then …` reads the way you would expect.
-- It never touches the network, so there is no `--offline` flag to pass, and it takes no version argument — *current*
-  means the active one. To ask where some other version lives, use [`jlo home`](#resolving-java_home).
-
-**What each line means:**
-
-| Output | Situation |
+| Command | What it does |
 | --- | --- |
-| `25.0.4+101  (from ./.jlorc)` | Active, and it is what that config file pins. |
-| `25.0.4+101  (active)`, plus a warning naming the pin | Active, but the config pins a different major. Run `jlo env` to switch. |
-| `25.0.4+101  (from the newest installed JDK)` | Active, nothing is configured, and this is the newest install on the machine — step 3 of the [cascade](#version-resolution), i.e. exactly what a bare `jlo env` here would pick. |
-| `25.0.4+101  (active, nothing pinned)` | Active, nothing is configured, and this is *not* what a bare `jlo env` would pick either — another build, or another major, is newer. |
-| `/opt/jdk-21  ($JAVA_HOME, set outside jlo)` | `JAVA_HOME` points at a JDK J'Lo does not manage, so there is no version for J'Lo to vouch for — the path is the answer. |
-
-The second row is the one worth knowing about: a shell opened before you entered the project keeps the JDK it
-started with, and `jlo current` is how you find that out instead of wondering why a build picked the wrong
-compiler. `jlo current` never touches the network, so it reports the first three steps of the cascade and never
-the fourth.
-
-**Usage examples:**
-```shell
-# what is active here, and why?
-jlo current
-
-# is *anything* active? exit code is the answer
-jlo current >/dev/null
-```
-
-## Executing a Command
-
-The command `jlo exec [version] -- <command> [args...]` runs a command with `JAVA_HOME` set and the JDK's `bin`
-directory prepended to `PATH`, without changing the current shell. This is the most convenient way to run a build or
-tool against a specific Java version from CI, scripts, or an AI agent (see
-[CI / scripting / AI agents](#ci--scripting--ai-agents)). It is the J'Lo equivalent of `mise exec` / `asdf exec`.
-
-**Behavior:**
-- The literal `--` separates the optional version from the command. Version resolution is identical to `jlo env`:
-  an explicit version wins, otherwise the [cascade](#version-resolution) — the nearest `.jlorc`,
-  `~/.jlo/default.jlorc`, the newest JDK already installed, the latest release.
-- If the requested Java version is not installed, it will be downloaded and installed automatically.
-- On Unix the command replaces the J'Lo process (`execvp`), so its exit code and signals propagate transparently.
-
-**Usage examples:**
-```shell
-# run a Gradle build with Java 21
-jlo exec 21 -- ./gradlew build
-
-# use the version from .jlorc / default.jlorc (no version before --)
-jlo exec -- java -version
-```
-
-## Initialization
-
-The command `jlo init` creates a `.jlorc` file in the current directory that pins a specific Java version.
-The file is used by `jlo env` to determine which Java version to set up.
-
-Specifying a version is optional; if omitted, the latest available Java version will be used.
-
-With `--global`, the file is written to `~/.jlo/default.jlorc` instead — the default Java version used by
-`jlo env` when no `.jlorc` file is found. It is also how you stop `jlo env` resolving to *whatever is newest on
-this machine* on neutral ground; see [Version resolution](#version-resolution).
-
-This command fails if the config file already exists; pass `--force` to overwrite it.
-
-**Usage examples:**
-```shell
-# create .jlorc that pins Java 25
-jlo init 25
-
-# create .jlorc that pins the latest available Java version
-jlo init
-
-# set the user-wide default version
-jlo init --global 25
-
-# change a version that is already pinned
-jlo init --force 21
-```
-
-**Example `.jlorc` file content:**
-```
-# Java version configured by J'Lo - https://github.com/java-loader/jlo
-25
-```
-
-## Installing Java Versions
-
-The command `jlo install` downloads the latest build of each major version you name, and changes nothing else.
-Neither `JAVA_HOME` nor `PATH` moves — here or in any other shell.
-
-```shell
-jlo install 25
-```
-
-Most of the time you do not need it: [`jlo env`](#environment-setup), [`jlo home`](#resolving-java_home) and
-[`jlo exec`](#executing-a-command) all download a missing JDK on demand. An explicit install is for the cases that
-come before that — warming a CI cache, preparing for offline work, or seeding a machine without switching it.
-
-**Behavior:**
-- Multiple versions can be specified as arguments; each is installed at the latest build Adoptium offers.
-- If no arguments are provided, it installs the version the [cascade](#version-resolution) resolves: the nearest
-  `.jlorc` at or above the current directory, then `~/.jlo/default.jlorc`, then the newest JDK already installed,
-  then the latest release.
-- A major version that is already on its latest build is reported and left alone. There is no `--all`: installing
-  *every* major version is not a thing to ask for. To bring what is already installed up to date, that is
-  [`jlo update --all`](#updating-java-versions).
-- Like `jlo update`, a superseded minor release stays on disk and the command ends with a reminder to run
-  [`jlo remove --superseded`](#removing-versions).
-
-**Usage examples:**
-```shell
-# install the latest Java 25 build
-jlo install 25
-
-# install Java 21 and 25 in one go
-jlo install 21 25
-
-# install the Java version specified in .jlorc or ~/.jlo/default.jlorc
-jlo install
-```
-
-## Updating Java Versions
-
-The command `jlo update` updates installed Java versions to their latest minor releases.
-
-The quickest way to deal with everything `jlo list` flags as `outdated` is:
-
-```shell
-jlo update --all
-```
-
-That updates every installed major version in one go — no need to name them individually.
-
-It is the counterpart of [`jlo install`](#installing-java-versions): `install` makes sure a major version is here,
-`update` brings what is already here up to date. They coincide for a single named version, because J'Lo keeps exactly
-one build per major.
-
-**Behavior:**
-- The `--all` flag updates all installed Java versions; it cannot be combined with explicit versions.
-- Multiple versions can be specified as arguments; each will be updated to its latest minor release.
-  Missing versions will be installed automatically.
-- If no arguments are provided, it updates the version the [cascade](#version-resolution) resolves: the nearest
-  `.jlorc` at or above the current directory, then `~/.jlo/default.jlorc`, then the newest JDK already installed,
-  then the latest release.
-- The superseded minor release stays on disk — an open shell or IDE may still point at it. When an update leaves one
-  behind, `jlo update` ends with a reminder to run [`jlo remove --superseded`](#removing-versions).
-
-**Usage examples:**
-```shell
-# update all installed Java versions
-jlo update --all
-
-# update Java version specified in .jlorc or ~/.jlo/default.jlorc
-jlo update
-
-# update Java versions 21 and 25
-jlo update 21 25
-```
-
-## Listing Versions
-
-The command `jlo list` shows one row per JDK version, newest first: what Adoptium offers for this OS and
-architecture, merged with everything installed locally.
-
-```bash
-jlo list
-```
-
-`jlo ls` is an alias for `jlo list`.
-
-```
-    26  26.0.2+101              installed
-    25  25.0.4+101.0.LTS   LTS  update
-    25  25.0.1+9.0.LTS     LTS  installed
-    24  24.0.2+12
- →  21  21.0.12+101.0.LTS  LTS  installed
-    21  21.0.9+10.0.LTS    LTS  superseded
-    17  17.0.20+101        LTS  installed
-     8  8.0.412+8               unmanaged
-```
-
-The arrow in the left-hand gutter marks the install your `$JAVA_HOME` currently points at. The gutter is always
-there, so the columns sit in the same place whether or not anything is active. If `$JAVA_HOME` points somewhere
-J'Lo did not install, no row is marked and `jlo list` says so on standard error.
-
-After the gutter, every row starts with the **major version** — that is the number `jlo update`, `jlo exec` and
-`.jlorc` expect, so you can read a row and use it directly:
-
-```bash
-jlo update 21
-```
-
-Each row ends in at most one status word, and each one names exactly one command:
-
-| Status | Meaning | What acts on it |
-| --- | --- | --- |
-| *(blank)* | Adoptium offers it; you do not have it | `jlo env <major>` |
-| `update` | Adoptium offers it, and it is newer than every build of that major you have | `jlo update <major>` |
-| `installed` | Installed, and the newest build of its major that is | — |
-| `superseded` | Installed, but a newer build of the same major is installed too | `jlo remove --superseded` |
-| `unmanaged` | Installed without J'Lo's marker, so J'Lo will not delete it | remove it by hand |
-
-They are single words on purpose: `jlo list | grep superseded` is a usable way to ask which installs
-`jlo remove --superseded` would take.
-
-`update` and `superseded` are deliberately different rows. Being behind Adoptium is a fact about a **major**, and
-it lands on the row for the build you do not have yet. Being superseded is a fact about one **build** sitting next
-to a newer sibling of its own major, and it lands on that build's own row — which is also where you read the exact
-version `jlo remove` takes.
-
-When either applies, `jlo list` ends on a single line of advice:
-
-```
-TIP: `jlo update --all` (2 outdated) · `jlo remove --superseded` (2 superseded)
-```
-
-One line, whatever applies — this prints on every `jlo list`, and a stack of suggestions under every listing reads
-as nagging rather than as help. It goes to standard error, so it never ends up in a pipe alongside the rows.
-
-Every row is either installable or installed: a major Adoptium has no build for on this platform is left out of the
-catalogue, but a JDK you have installed always gets a row, so there is nowhere for a removable install to hide.
-
-Add `--offline` to skip the network and list only what is installed. The rows and the status words are the same,
-minus the catalogue — so nothing is ever marked `update`, and the LTS column is dropped, there being no catalogue
-to read it from.
-
-```bash
-jlo list --offline
-```
-
-Colours switch off automatically when the output is not a terminal, so `jlo list | grep LTS` and friends work as
-expected.
-
-## Removing Versions
-
-The command `jlo remove` deletes installed JDKs. It is the only command that deletes one, and it takes the target
-either way round: by version, or by rule.
-
-```bash
-jlo remove 17
-```
-
-Several can go at once, and a version may be a whole major or one exact build:
-
-```bash
-jlo remove 11 17.0.11+10
-```
-
-**Behavior:**
-- Each VERSION is either a major version (removing every installed build of it) or the exact version of one install,
-  as shown by `jlo list`. It is not a version range: `17.0` matches nothing.
-- **An installation J'Lo will not delete is reported and skipped; the rest still go.** There are three such cases,
-  and each is an error only when it leaves nothing to remove at all:
-  - nothing installed matches the version — the JDK is already absent, which is what you asked for, so this is a
-    note rather than a failure. `jlo remove 3 4 5 17` removes Java 17 and reports that nothing matched `3`, `4` or `5`.
-  - J'Lo did not install it — no `.jlo-managed` marker. Remove it by hand when you are done with it.
-  - your `JAVA_HOME` points at it. Deleting that one would leave your shell pointing at a path that no longer exists,
-    so J'Lo leaves it and says so. Switch away (`jlo env 21`) and run the command again to get it. There is no flag to
-    override this.
-- None of the three can delete anything, so none of them stops the versions that can: `jlo remove 21 24 25 26` while
-  your shell is on 26 removes 21, 24 and 25, and warns that 26 was left behind.
-- Exit status is 1 when nothing was removed, 0 otherwise.
-
-**Usage examples:**
-```shell
-# remove every installed Java 17
-jlo remove 17
-
-# remove Java 11 and Java 17; a version that is not installed is just reported
-jlo remove 11 17
-
-# remove one exact build, leaving its siblings in the same major alone
-jlo remove 17.0.11+10
-
-# remove every superseded minor release, keeping the newest of each major
-jlo remove --superseded
-```
-
-### Removing by rule
-
-`--superseded` selects by the rule instead of by name: keep the newest minor release of every installed major, delete
-the rest. It takes no version — the rule is the selector — and cannot be combined with one.
-
-```bash
-jlo remove --superseded
-```
-
-It differs from a named removal in one way, and it follows from what was asked for. You named nothing, so an install
-J'Lo did not make is not something you asked to delete: it is skipped, counted in the summary, and is not an error.
-Name that same install explicitly and J'Lo refuses instead.
-
-> Before 1.0 this was its own verb, `jlo clean` and then `jlo prune`. It is a flag now so that "what will J'Lo
-> delete?" has one place to look.
+| `jlo env [VERSION]` | Set `JAVA_HOME` and `PATH` in the current shell. `jlo use` is an alias. |
+| `jlo home [VERSION]` | Print the `JAVA_HOME` path for a version, and nothing else. |
+| `jlo exec [VERSION] -- <CMD>` | Run a command with that JDK active, leaving the current shell alone. |
+| `jlo current` | Say which JDK is active in this shell, and why. |
+| `jlo list` | Show what Adoptium offers and what is installed. `jlo ls` is an alias. |
+| `jlo install [VERSION...]` | Download a major version without changing any shell. |
+| `jlo update [VERSION...]` | Bring installed JDKs up to their latest minor release. `--all` for every one. |
+| `jlo remove <VERSION...>` | Delete installed JDKs by name, or `--superseded` to delete them by rule. |
+| `jlo init [VERSION]` | Write a `.jlorc` pinning this project's version. `--global` for the user-wide default. |
+| `jlo selfupdate` | Update J'Lo itself. |
+| `jlo completions <SHELL>` | Print a completion script. |
+
+Three things are worth knowing before you read any of that:
+
+- **The version is optional on `env`, `home`, `exec`, `install` and `update`.** Left out, it resolves in four steps:
+  the nearest `.jlorc` at or above the current directory, then `~/.jlo/default.jlorc`, then the newest JDK already
+  installed, then the latest release, which is downloaded. `jlo env --help` spells out the whole cascade and its one
+  sharp edge; `jlo current` tells you which step answered.
+- **Only major versions are accepted**, anywhere one is taken: `21`, not `21.0.5`.
+- **`--offline` never touches the network.** On `env`, `home` and `list` it answers from what is already installed
+  and fails if that is nothing. Downloading a JDK and asking whether one is here are otherwise the same command,
+  which is no use in a CI step with a short timeout or a network-isolated sandbox.
 
 ## Using a JDK J'Lo Did Not Install
 
 J'Lo has no command that takes a path, but it does not need one: it finds every JDK in its install directory, whether
-or not it put it there. To make a vendor-supplied JDK, a local OpenJDK build, or an early-access build usable by
+or not it put it there. To make a vendor-supplied JDK, a local OpenJDK build, or an **early-access build** usable by
 `jlo env`, `jlo home` and `jlo exec`, move it into that directory under a version-shaped name:
 
 ```bash
@@ -523,10 +124,13 @@ The directory name is the whole registration: it has to parse as a semantic vers
 
 Such a JDK is **unmanaged**: it carries no `.jlo-managed` marker, so
 
-- `jlo list --offline` shows it, annotated `(unmanaged)`;
+- `jlo list --offline` shows it, with `unmanaged` as its status word;
 - `jlo remove` will not delete it, under either selector — remove it by hand when you are done with it;
 - `jlo update` cannot update it. Adoptium does not list it, so there is no newer minor to resolve. If you also install
   that major from Adoptium, both remain, and `jlo env` picks the highest version of the two.
+
+That is deliberately how J'Lo handles early-access and preview builds: they are yours to drop in and yours to
+remove, and `jlo update` will never reach for one on your behalf.
 
 ## Managing J’Lo Itself
 
@@ -587,24 +191,6 @@ The lines you pasted never change; an upgrade regenerates the files they point a
   Keep only the optional lines you actually had. If your block also sources `completions/_jlo` or `completions/jlo.bash`
   directly (0.3.0 printed that), `completions.sh` is what replaces it. These three lines never change again: an upgrade
   regenerates the files they point at.
-
-## Getting Help
-
-Every command documents itself:
-
-```shell
-# overview of all commands
-jlo --help
-
-# details for one command, including its arguments
-jlo env --help
-jlo exec --help
-```
-
-Running `jlo` with no arguments prints the same overview as `jlo --help`. `-h` prints a shorter summary of the same
-help; `--help` prints the long form (with more explanation on subcommands).
-
-`jlo --version` (or `jlo -V`) prints the installed version.
 
 ## Supported Shells
 
@@ -692,9 +278,15 @@ function, so J'Lo's installer also places a real `jlo` binary on your `PATH` at 
 works there directly except `env`/`use`, which must mutate the current shell. `jlo selfupdate` works there too; it
 just cannot reload a shell function that was never loaded.
 
-For non-interactive use, prefer `jlo exec` and `jlo home` over `jlo env`, since they don't rely on shell integration.
-`jlo exec` runs a command with the right Java on `PATH`; `jlo home` just prints the `JAVA_HOME` path. Both install the
-JDK on demand if needed.
+**`jlo exec` is the answer whenever there is no shell to configure.** It runs one command with the right Java on
+`PATH` and changes nothing outside that command; `jlo home` prints the `JAVA_HOME` path when you only need the path.
+Both install the JDK on demand if needed. Prefer either over `jlo env` outside an interactive shell, since neither
+relies on the shell integration.
+
+J'Lo installs **no shims** — there is no `java` on your `PATH` that J'Lo put there to intercept. Outside a shell
+`jlo env` has configured, `java` is whatever it always was, and `jlo exec` is how you pick a different one for the
+length of one command. A `java` that silently resolves through a version manager is convenient right up to the
+point where something else on the machine needs the one it replaced.
 
 ```shell
 # Run a build against a specific Java version without any shell integration:
