@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 jlo() {
-  local J arg out
+  local J arg out url tmp rc
   J="${JLO_HOME-}/bin/jlo-bin"
   case "$1" in
     env|use)
@@ -31,11 +31,46 @@ jlo() {
       eval "$out"
       ;;
     selfupdate)
-      printf '%s' "Before update: "
-      "$J" --version
-      /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/java-loader/jlo/refs/heads/main/install.sh)"
-      printf '%s' "After update: "
-      "$J" --version
+      # Everything here is progress, not machine output, so it goes to stderr -
+      # including the installer's own stdout. This branch has nothing to say on
+      # the environment channel, and keeping it silent there is what lets a
+      # later version print an eval-able reload line without ambiguity.
+      url='https://raw.githubusercontent.com/java-loader/jlo/refs/heads/main/install.sh'
+      printf 'Before update: ' >&2
+      "$J" --version >&2
+      # Downloaded to a file, not run as `sh -c "$(curl ...)"`. Two failures
+      # that form hides. An HTTP error makes `curl -f` write *nothing*, so the
+      # substitution yields "" and `sh -c ""` exits 0 - a failed update that
+      # reports success. And a connection dropped mid-transfer yields a
+      # truncated but non-empty body, which `-f` cannot catch at all; the file
+      # keeps the bytes where they can be checked, and install.sh holds every
+      # statement inside a function it calls only on its last line, so half of
+      # it parses without doing anything.
+      tmp="$(mktemp "${TMPDIR:-/tmp}/jlo-install.XXXXXX")" || {
+        echo "jlo: could not create a temporary file for the installer" >&2
+        return 1
+      }
+      if ! curl -fsSL "$url" -o "$tmp"; then
+        rm -f "$tmp"
+        echo "jlo: could not download the installer from $url" >&2
+        return 1
+      fi
+      if [ ! -s "$tmp" ]; then
+        rm -f "$tmp"
+        echo "jlo: the installer downloaded from $url was empty" >&2
+        return 1
+      fi
+      # install.sh is '#!/usr/bin/env sh' and written to POSIX; running it under
+      # /bin/bash implied a dependency it never had.
+      sh "$tmp" >&2
+      rc=$?
+      rm -f "$tmp"
+      if [ "$rc" -ne 0 ]; then
+        echo "jlo: the installer failed (exit $rc); jlo was not updated" >&2
+        return "$rc"
+      fi
+      printf 'After update: ' >&2
+      "$J" --version >&2
       ;;
     *)
       "$J" "$@"

@@ -447,7 +447,9 @@ Such a JDK is **unmanaged**: it carries no `.jlo-managed` marker, so
 ## Managing J’Lo Itself
 
 - `jlo --version` prints the currently installed J’Lo version.
-- The command `jlo selfupdate` updates J’Lo itself to the latest version.
+- The command `jlo selfupdate` updates J’Lo itself to the latest version. It re-runs the installer and fails loudly
+  if anything goes wrong: a download that fails or arrives truncated is an error, not a silent no-op, and the
+  installer's exit status becomes `selfupdate`'s own, so scripts can rely on it.
 
 ## Getting Help
 

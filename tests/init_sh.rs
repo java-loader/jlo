@@ -333,3 +333,182 @@ fn shipped_scripts_parse_under_every_supported_shell() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// selfupdate: a failed update must not look like a successful one
+// ---------------------------------------------------------------------------
+
+/// A `curl` stub. With `body`, it writes those bytes to the `-o` path the way a
+/// completed transfer would - truncated content included, which is what a
+/// dropped connection actually leaves behind. Without one, it writes nothing
+/// and fails, which is what `curl -f` does on an HTTP error.
+fn stub_curl(dir: &Path, body: Option<&str>, status: i32) -> PathBuf {
+    let bin = dir.join("stubbin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let write = match body {
+        Some(b) => {
+            format!("[ -n \"$out\" ] && cat > \"$out\" <<'__JLO_BODY__'\n{b}\n__JLO_BODY__\n")
+        }
+        None => String::new(),
+    };
+    let curl = bin.join("curl");
+    std::fs::write(
+        &curl,
+        format!(
+            "#!/bin/sh\n\
+             out=\n\
+             while [ $# -gt 0 ]; do\n\
+             \x20 case \"$1\" in -o) shift; out=\"$1\" ;; esac\n\
+             \x20 shift\n\
+             done\n\
+             {write}\
+             exit {status}\n"
+        ),
+    )
+    .unwrap();
+    let mut perms = std::fs::metadata(&curl).unwrap().permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+    std::fs::set_permissions(&curl, perms).unwrap();
+    bin
+}
+
+/// Sources the wrapper with `stubbin` first on `PATH`, so `curl` is ours.
+fn run_selfupdate(sh: &str, home: &Path, stubbin: &Path) -> Output {
+    let script = format!(
+        r#"
+        export JLO_HOME="{}"
+        . "$JLO_HOME/bin/jlo-init.sh"
+        jlo selfupdate
+        echo "status=$?"
+        "#,
+        home.display()
+    );
+    Command::new(sh)
+        .arg("-c")
+        .arg(script)
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                stubbin.display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        )
+        .output()
+        .unwrap()
+}
+
+/// The bug. `curl -f` writes nothing on an HTTP error, so `sh -c "$(curl ...)"`
+/// ran the empty string, exited 0, and the branch went on to print a version
+/// that only looked like it was already current.
+#[test]
+fn selfupdate_fails_loudly_when_the_download_fails() {
+    for sh in INTERPRETERS {
+        if skip_missing("selfupdate_fails_loudly_when_the_download_fails", sh) {
+            continue;
+        }
+        let home = jlo_home_with_stub("echo 'jlo 0.3.0'");
+        let stubbin = stub_curl(home.path(), None, 22);
+        let out = run_selfupdate(sh, home.path(), &stubbin);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            !stdout.contains("status=0"),
+            "{sh}: a failed download reported success: {stdout:?} {stderr:?}"
+        );
+        assert!(
+            stderr.contains("install.sh"),
+            "{sh}: the error does not name the URL it could not fetch: {stderr:?}"
+        );
+        assert!(
+            !stderr.contains("After update"),
+            "{sh}: announced an update that never happened: {stderr:?}"
+        );
+    }
+}
+
+/// The failure `-f` cannot catch: a connection dropped mid-transfer leaves a
+/// truncated but non-empty script. `install.sh` keeps every statement inside a
+/// function it calls only on its last line, so half of it parses and does
+/// nothing - and the parse error is a non-zero status this branch must report.
+#[test]
+fn selfupdate_fails_on_a_truncated_installer() {
+    let full =
+        std::fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("install.sh"))
+            .unwrap();
+    let lines: Vec<&str> = full.lines().collect();
+    let half = lines[..lines.len() * 2 / 3].join("\n");
+
+    for sh in INTERPRETERS {
+        if skip_missing("selfupdate_fails_on_a_truncated_installer", sh) {
+            continue;
+        }
+        let home = jlo_home_with_stub("echo 'jlo 0.3.0'");
+        let stubbin = stub_curl(home.path(), Some(&half), 0);
+        let out = run_selfupdate(sh, home.path(), &stubbin);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            !stdout.contains("status=0"),
+            "{sh}: a truncated installer reported success: {stdout:?} {stderr:?}"
+        );
+        assert!(
+            stderr.contains("the installer failed"),
+            "{sh}: the truncated installer failed silently: {stderr:?}"
+        );
+    }
+}
+
+/// An installer that runs and fails owns the exit status. The old branch ended
+/// on `"$J" --version`, so the function returned 0 whatever the installer did
+/// and neither a script nor `jlo_after_cd` could tell.
+#[test]
+fn selfupdate_propagates_the_installers_exit_status() {
+    for sh in INTERPRETERS {
+        if skip_missing("selfupdate_propagates_the_installers_exit_status", sh) {
+            continue;
+        }
+        let home = jlo_home_with_stub("echo 'jlo 0.3.0'");
+        let stubbin = stub_curl(home.path(), Some("echo 'boom' >&2\nexit 3\n"), 0);
+        let out = run_selfupdate(sh, home.path(), &stubbin);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            stdout.contains("status=3"),
+            "{sh}: the installer's status never reached the caller: {stdout:?} \
+             stderr={:?}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
+
+/// The happy path still works, and says so - and stdout stays empty, because
+/// that channel belongs to the environment (`env`/`use`), not to progress.
+#[test]
+fn selfupdate_reports_success_only_when_the_installer_succeeded() {
+    for sh in INTERPRETERS {
+        if skip_missing(
+            "selfupdate_reports_success_only_when_the_installer_succeeded",
+            sh,
+        ) {
+            continue;
+        }
+        let home = jlo_home_with_stub("echo 'jlo 0.3.0'");
+        let stubbin = stub_curl(home.path(), Some("echo 'Successfully installed'\n"), 0);
+        let out = run_selfupdate(sh, home.path(), &stubbin);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stdout.contains("status=0"),
+            "{sh}: a successful update did not report success: {stdout:?} {stderr:?}"
+        );
+        assert!(
+            stderr.contains("After update"),
+            "{sh}: a successful update said nothing: {stderr:?}"
+        );
+        assert_eq!(
+            stdout.trim(),
+            "status=0",
+            "{sh}: selfupdate wrote progress to the environment channel: {stdout:?}"
+        );
+    }
+}

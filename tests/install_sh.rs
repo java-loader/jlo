@@ -564,3 +564,64 @@ fn bash_completions_stay_eager() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+/// `install.sh` is fetched over the network and piped into a shell, and a
+/// connection dropped mid-transfer leaves a *truncated but non-empty* body that
+/// `curl -f` cannot catch. Every statement therefore lives inside `main`, which
+/// only the last line calls: a half-downloaded copy either fails to parse or
+/// parses and does nothing, but never runs half an install.
+#[test]
+fn a_truncated_installer_does_nothing() {
+    let full = std::fs::read_to_string(manifest().join("install.sh")).unwrap();
+    let lines: Vec<&str> = full.lines().collect();
+    let main_start = lines
+        .iter()
+        .position(|l| *l == "main() {")
+        .expect("install.sh no longer wraps its body in main()");
+
+    for fraction in [3, 10, 25, 50, 75, 90, 99] {
+        let dir = tempfile::tempdir().unwrap();
+        let tarball = release_tarball(dir.path());
+        let stubbin = stub_curl(dir.path(), &tarball);
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+
+        let cut = lines.len() * fraction / 100;
+        let script = dir.path().join("truncated.sh");
+        std::fs::write(&script, lines[..cut].join("\n")).unwrap();
+
+        let out = Command::new("/bin/sh")
+            .arg(&script)
+            .env("HOME", &home)
+            .env(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    stubbin.display(),
+                    std::env::var("PATH").unwrap_or_default()
+                ),
+            )
+            .env_remove("JLO_HOME")
+            .output()
+            .unwrap();
+
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            !home.join(".jlo").exists(),
+            "a {fraction}% copy of install.sh installed something anyway"
+        );
+        assert!(
+            !stdout.contains("Successfully installed"),
+            "a {fraction}% copy of install.sh announced an install: {stdout}"
+        );
+        // Cut inside main, the function never closes: that is a parse error,
+        // and the caller sees it. Cut above main there is nothing but comments
+        // and `set -eu`, which legitimately succeeds at doing nothing.
+        if cut > main_start {
+            assert!(
+                !out.status.success(),
+                "a {fraction}% copy of install.sh reported success: {stdout}"
+            );
+        }
+    }
+}
