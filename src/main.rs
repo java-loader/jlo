@@ -695,6 +695,24 @@ fn resolve_java_home(
     }
 }
 
+/// Quote a value so the shell assigns it rather than interpreting it.
+///
+/// stdout is the environment channel: the `jlo` shell function evaluates what
+/// arrives there, so a value carrying `$`, a backtick, a backslash or a double
+/// quote would be expanded - or executed - instead of stored. `PATH` is the
+/// sharp case: it is echoed back from the caller's own environment, so a
+/// `$(...)` anywhere in it would run in the user's shell.
+///
+/// The hazard belongs to the channel, not to these two variables: anything
+/// else this function's callers ever print must go through here too.
+///
+/// Single quotes suppress every expansion. The one character they cannot hold
+/// is a single quote, which is spliced in as `'\''`: close, backslash-escaped
+/// quote, reopen.
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', r"'\''"))
+}
+
 /// Emit the `export` lines for the requested version.
 ///
 /// Nothing is written to stderr on this path, even when the environment does
@@ -718,13 +736,16 @@ fn setup(client: &AdoptiumClient, java_version: &str, offline: bool) -> Result<(
 
     let current_java_home = env::var("JAVA_HOME").unwrap_or_default();
     if current_java_home != java_home.to_string_lossy() {
-        println!("export JAVA_HOME=\"{}\"", java_home.to_string_lossy());
+        println!(
+            "export JAVA_HOME={}",
+            shell_quote(&java_home.to_string_lossy())
+        );
     }
 
     let java_bin_path = java_home.join("bin").to_string_lossy().into_owned();
     let current_path = env::var("PATH").unwrap_or_default();
     if let Some(updated_path) = update_path(&java_bin_path, &current_path, store.base())? {
-        println!("export PATH=\"{updated_path}\"");
+        println!("export PATH={}", shell_quote(&updated_path));
     }
 
     Ok(())
@@ -850,6 +871,63 @@ mod tests {
     /// connection error here would be the test itself reporting a regression.
     fn offline_client() -> AdoptiumClient {
         AdoptiumClient::new("http://127.0.0.1:1")
+    }
+
+    // -- shell_quote --
+
+    /// A plain path needs no escaping, but is still quoted: an unquoted value
+    /// would word-split on a space.
+    #[test]
+    fn shell_quote_wraps_a_plain_value() {
+        assert_eq!(shell_quote("/opt/jdk-21"), "'/opt/jdk-21'");
+        assert_eq!(shell_quote("/opt/My JDK"), "'/opt/My JDK'");
+    }
+
+    /// The characters that stay live inside double quotes - which is what this
+    /// function replaced - must all come back out verbatim.
+    #[test]
+    fn shell_quote_neutralises_expansion_characters() {
+        for raw in [
+            "/opt/$(touch pwned)",
+            "/opt/`touch pwned`",
+            "/opt/${HOME}",
+            "/opt/a\\b",
+            "/opt/a\"b",
+        ] {
+            let quoted = shell_quote(raw);
+            assert_eq!(
+                strip_single_quotes(&quoted),
+                raw,
+                "round trip failed for {raw:?} (quoted as {quoted:?})"
+            );
+        }
+    }
+
+    /// A single quote cannot appear inside single quotes, so it is spliced in
+    /// as `'\''`. This is the case a naive implementation gets wrong, and
+    /// getting it wrong is an injection, not a cosmetic bug.
+    #[test]
+    fn shell_quote_splices_embedded_single_quotes() {
+        assert_eq!(shell_quote("it's"), r"'it'\''s'");
+        assert_eq!(
+            strip_single_quotes(&shell_quote("/opt/'; touch pwned; '")),
+            "/opt/'; touch pwned; '"
+        );
+    }
+
+    #[test]
+    fn shell_quote_handles_an_empty_value() {
+        assert_eq!(shell_quote(""), "''");
+    }
+
+    /// Undo `shell_quote` the way a shell would, so the tests above assert a
+    /// real round trip rather than a hand-copied expected string.
+    fn strip_single_quotes(quoted: &str) -> String {
+        let body = quoted
+            .strip_prefix('\'')
+            .and_then(|q| q.strip_suffix('\''))
+            .expect("shell_quote must wrap its output in single quotes");
+        body.replace(r"'\''", "'")
     }
 
     // -- cmd_* error paths --

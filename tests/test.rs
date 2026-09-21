@@ -930,7 +930,8 @@ fn env() {
     // run env
     let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
     cmd.arg("env").assert().success().code(0).stdout(
-        predicate::str::contains("export JAVA_HOME=").and(predicate::str::contains("export PATH=")),
+        predicate::str::contains("export JAVA_HOME='")
+            .and(predicate::str::contains("export PATH='")),
     );
 
     // leave temp dir and clean up
@@ -1016,13 +1017,23 @@ fn jdk_base() -> std::path::PathBuf {
     }
 }
 
-/// Pull the value out of the `export PATH="..."` line of `jlo env` output.
-fn exported_path(stdout: &str) -> Option<String> {
+/// Pull the value out of an `export NAME='...'` line of `jlo env` output,
+/// undoing the single-quoting the binary applies.
+///
+/// The quoting is not cosmetic: the `jlo` shell function evaluates these
+/// lines, so a `$(...)` arriving unquoted in `PATH` would run in the user's
+/// shell. See `shell_quote` in `src/main.rs`.
+fn exported_var(stdout: &str, name: &str) -> Option<String> {
+    let prefix = format!("export {name}='");
     stdout
         .lines()
-        .find_map(|l| l.strip_prefix("export PATH=\""))
-        .and_then(|l| l.strip_suffix('"'))
-        .map(str::to_string)
+        .find_map(|l| l.strip_prefix(prefix.as_str()))
+        .and_then(|l| l.strip_suffix('\''))
+        .map(|v| v.replace(r"'\''", "'"))
+}
+
+fn exported_path(stdout: &str) -> Option<String> {
+    exported_var(stdout, "PATH")
 }
 
 #[test]
@@ -1061,6 +1072,84 @@ fn env_removes_stale_jdk_bin_entries() {
         std::env::remove_var("JLO_HOME");
     }
     temp_dir.close().unwrap();
+}
+
+/// End to end, through a real shell: the `jlo` function evaluates what the
+/// binary writes to stdout, and `PATH` is echoed back out of the caller's own
+/// environment. A `$(...)` in it must therefore arrive as eight literal
+/// characters rather than as a command the user's shell runs.
+///
+/// The marker file is the assertion: if it exists, evaluating `jlo env`'s
+/// output executed an attacker's command in the user's session.
+#[test]
+#[serial]
+fn env_does_not_let_a_hostile_path_execute_when_evaluated() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    unsafe {
+        std::env::set_var("JLO_HOME", temp_dir.path());
+    }
+    std::env::set_current_dir(&temp_dir).unwrap();
+    std::fs::write(".jlorc", "25").unwrap();
+
+    let marker = temp_dir.path().join("pwned");
+    let payload = format!("$(touch '{}')", marker.display());
+    let input_path = format!("/usr/bin:/bin:{payload}");
+
+    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
+    let assert = cmd
+        .arg("env")
+        .env("PATH", &input_path)
+        .assert()
+        .success()
+        .code(0);
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+
+    // The payload survives as data ...
+    let new_path = exported_path(&stdout).expect("env must export PATH");
+    assert!(
+        new_path.ends_with(&payload),
+        "the PATH entry must be preserved verbatim.\n  expected suffix: {payload}\n  got: {new_path}"
+    );
+
+    // ... and evaluating the line does not run it, in any supported shell.
+    for sh in ["/bin/bash", "zsh"] {
+        if std::process::Command::new(sh)
+            .arg("-c")
+            .arg("exit 0")
+            .output()
+            .is_err()
+        {
+            eprintln!("SKIP env_does_not_let_a_hostile_path_execute_when_evaluated: {sh} missing.");
+            continue;
+        }
+        let _ = std::fs::remove_file(&marker);
+        let out = std::process::Command::new(sh)
+            .arg("-c")
+            .arg(format!("eval {}", shell_single_quote(&stdout)))
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{sh} failed to evaluate the export lines: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            !marker.exists(),
+            "{sh}: evaluating jlo env's output executed an injected command"
+        );
+    }
+
+    std::env::set_current_dir(std::env::temp_dir()).unwrap();
+    unsafe {
+        std::env::remove_var("JLO_HOME");
+    }
+    temp_dir.close().unwrap();
+}
+
+/// Hand a string to `sh -c` as one literal argument. Mirrors `shell_quote` in
+/// `src/main.rs`; kept separate so a bug there cannot hide itself here.
+fn shell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', r"'\''"))
 }
 
 #[test]
@@ -1125,12 +1214,8 @@ fn env_is_idempotent() {
         .code(0);
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
     let first_path = exported_path(&stdout).expect("first env run must export PATH");
-    let java_home = stdout
-        .lines()
-        .find_map(|l| l.strip_prefix("export JAVA_HOME=\""))
-        .and_then(|l| l.strip_suffix('"'))
-        .expect("first env run must export JAVA_HOME")
-        .to_string();
+    let java_home =
+        exported_var(&stdout, "JAVA_HOME").expect("first env run must export JAVA_HOME");
 
     // Second run with the environment the first run produced: nothing left to change.
     let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
