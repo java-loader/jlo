@@ -175,14 +175,21 @@ fn cmd_completions(shell: clap_complete::Shell) {
 
 /// Determine the requested major version: the explicit CLI argument if present,
 /// otherwise the project `.jlorc` / user default config.
-fn resolve_java_version_from(explicit: Option<String>) -> anyhow::Result<String> {
-    let java_version = match explicit {
-        Some(version) => version,
-        None => conf::load_config_java_version()?,
+///
+/// Returns where the version came from as well as what it is, because
+/// `jlo env --verbose` reports it and re-deriving it there would be a second
+/// spelling of the same walk.
+fn resolve_java_version_from(explicit: Option<String>) -> anyhow::Result<conf::Resolved> {
+    let resolved = match explicit {
+        Some(version) => conf::Resolved {
+            version,
+            source: conf::Source::Argument,
+        },
+        None => conf::resolve()?,
     };
 
-    assert_java_version(&java_version)?;
-    Ok(java_version)
+    assert_java_version(&resolved.version)?;
+    Ok(resolved)
 }
 
 fn cmd_env(
@@ -190,15 +197,15 @@ fn cmd_env(
     version: Option<String>,
     offline: bool,
 ) -> Result<(), CommandError> {
-    let java_version = resolve_java_version_from(version)?;
-    setup(client, &java_version, offline)?;
+    let resolved = resolve_java_version_from(version)?;
+    setup(client, &resolved.version, offline)?;
 
     // The exports on stdout are the whole effect of this command. If stdout is
     // a terminal nothing captured them, so the exit code says success while
     // nothing happened - the failure shape that sends a CI step, a Makefile
     // recipe or an agent looking for the problem somewhere else entirely.
     if std::io::stdout().is_terminal() {
-        ui::hint!("{}", unsourced_env_hint(&java_version));
+        ui::hint!("{}", unsourced_env_hint(&resolved.version));
     }
 
     Ok(())
@@ -226,7 +233,7 @@ fn cmd_home(
     version: Option<String>,
     offline: bool,
 ) -> Result<(), CommandError> {
-    let java_version = resolve_java_version_from(version)?;
+    let java_version = resolve_java_version_from(version)?.version;
     let store = JdkStore::discover()?;
     let java_home = if offline {
         offline_java_home(&store, &java_version, "home")?
@@ -388,9 +395,9 @@ fn run_exec(client: &AdoptiumClient, version: Option<String>, command: &[String]
     // This function never returns, so it reports its own failures rather than
     // handing them back to `main`.
     let java_home = resolve_java_version_from(version)
-        .and_then(|java_version| {
+        .and_then(|resolved| {
             let store = JdkStore::discover()?;
-            resolve_java_home(client, &store, &java_version)
+            resolve_java_home(client, &store, &resolved.version)
         })
         .unwrap_or_else(|e| {
             ui::error!("{e:#}");
@@ -606,7 +613,7 @@ fn cmd_update(
             return Err(anyhow!("no installed JDKs to update").into());
         }
     } else if versions.is_empty() {
-        versions_to_install.insert(conf::load_config_java_version()?);
+        versions_to_install.insert(conf::resolve()?.version);
     } else {
         for v in versions {
             if conf::is_valid_version(&v) {

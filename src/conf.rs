@@ -7,27 +7,101 @@ use std::path::{Path, PathBuf};
 const JLO_CONFIG_FILE: &str = ".jlorc";
 const JLO_DEFAULT_CONFIG_FILE: &str = "default.jlorc";
 
-pub(crate) fn load_config_java_version() -> anyhow::Result<String> {
-    // Project config first, searched upwards: `jlo env` is routinely run from a
-    // subdirectory, and resolving the user default there would hand back a
-    // different JDK without saying so.
+/// A resolved Java major version, and where it came from.
+///
+/// The provenance is the point: `jlo current` and `jlo env --verbose` both
+/// report it, and a bare `String` forgets it the moment the walk finishes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Resolved {
+    /// The Java major version, e.g. "21".
+    pub version: String,
+    pub source: Source,
+}
+
+/// Where a version in play came from.
+///
+/// Deliberately open: a later change that falls back to the newest installed
+/// JDK - or to the latest release - adds a variant here rather than reshaping
+/// the callers. The variant names are the vocabulary: the machine-readable
+/// output that is still to come tags each source with a stable string derived
+/// from them, so nothing downstream has to invent a second spelling.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Source {
+    /// An explicit CLI argument: `jlo env 21`.
+    Argument,
+    /// The nearest `.jlorc` at or above the cwd.
+    ProjectConfig(PathBuf),
+    /// `$JLO_HOME/default.jlorc`.
+    DefaultConfig(PathBuf),
+}
+
+/// The configured Java version, or `Ok(None)` when nothing is configured.
+///
+/// `None` is an ordinary state rather than a failure, because `jlo current`
+/// asks this question of a shell that may well have a JDK active with no
+/// `.jlorc` anywhere. The commands for which absence *is* a failure call
+/// [`resolve`] instead.
+pub(crate) fn find() -> anyhow::Result<Option<Resolved>> {
     let cwd = std::env::current_dir()
         .map_err(|e| anyhow!("could not determine the current directory: {e}"))?;
-    if let Some(path) = find_project_config(&cwd, std::env::home_dir().as_deref()) {
-        return load(&path).map_err(|e| anyhow!("could not load configuration: {e}"));
+    find_in(
+        &cwd,
+        std::env::home_dir().as_deref(),
+        &default_jlorc_path()?,
+    )
+}
+
+/// The configured Java version, or today's "run 'jlo init'" error.
+pub(crate) fn resolve() -> anyhow::Result<Resolved> {
+    find()?.ok_or_else(|| {
+        anyhow!(
+            "No '{JLO_CONFIG_FILE}' found in the current directory or its parents, and no default config file. Please run 'jlo init' to create a configuration file."
+        )
+    })
+}
+
+/// The walk, with every input passed in so it can be tested without mutating
+/// the process environment.
+///
+/// Project config first, searched upwards: `jlo env` is routinely run from a
+/// subdirectory, and resolving the user default there would hand back a
+/// different JDK without saying so.
+fn find_in(
+    cwd: &Path,
+    home: Option<&Path>,
+    default_path: &Path,
+) -> anyhow::Result<Option<Resolved>> {
+    if let Some(path) = find_project_config(cwd, home) {
+        let version = load(&path).map_err(|e| anyhow!("could not load configuration: {e}"))?;
+        return Ok(Some(Resolved {
+            version,
+            source: Source::ProjectConfig(shorten_against(&path, cwd)),
+        }));
     }
 
-    // Try the default config path.
-    let default_path = default_jlorc_path()?;
-    load(&default_path).map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
-            anyhow!(
-                "No '{JLO_CONFIG_FILE}' found in the current directory or its parents, and no default config file. Please run 'jlo init' to create a configuration file."
-            )
-        } else {
-            anyhow!("could not load configuration: {e}")
-        }
-    })
+    match load(default_path) {
+        Ok(version) => Ok(Some(Resolved {
+            version,
+            source: Source::DefaultConfig(default_path.to_path_buf()),
+        })),
+        // Neither file exists. Whether that is a problem is the caller's call.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(anyhow!("could not load configuration: {e}")),
+    }
+}
+
+/// Render a found config path the way the user typed their way to it: a
+/// `.jlorc` in the current directory reads as `./.jlorc`, one further up keeps
+/// its absolute path so it is clear the pin comes from somewhere else.
+///
+/// Done here, where the cwd is already in hand, so that formatting stays a
+/// pure function of what `Source` carries. The result is still a path that
+/// opens.
+fn shorten_against(path: &Path, cwd: &Path) -> PathBuf {
+    match path.strip_prefix(cwd) {
+        Ok(relative) => Path::new(".").join(relative),
+        Err(_) => path.to_path_buf(),
+    }
 }
 
 /// The nearest `.jlorc` at or above `start`.
@@ -416,6 +490,99 @@ mod tests {
         assert_eq!(
             find_project_config(&project, Some(&home)),
             Some(home.join(".jlorc"))
+        );
+    }
+
+    // -- find_in: the walk, plus where the answer came from --
+    //
+    // Same temp-dir fixtures as the `find_project_config` tests below; the
+    // only addition is that the `Source` variant is asserted, because that is
+    // the fact the bare `String` used to drop.
+
+    #[test]
+    fn find_in_reports_a_project_config_as_its_source() {
+        let home = tempdir().unwrap();
+        let home = canon(home.path());
+        let project = home.join("project");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(project.join(".jlorc"), "21\n").unwrap();
+        let default = home.join("missing").join("default.jlorc");
+
+        let resolved = find_in(&project, Some(&home), &default)
+            .unwrap()
+            .expect("the project .jlorc answers");
+        assert_eq!(resolved.version, "21");
+        // Shortened against the cwd, so a status line reads `./.jlorc`
+        // rather than an absolute path the user never typed.
+        assert_eq!(
+            resolved.source,
+            Source::ProjectConfig(PathBuf::from("./.jlorc"))
+        );
+    }
+
+    /// A `.jlorc` in a parent keeps its absolute path: the pin comes from
+    /// somewhere other than where the user is standing, and the line says so.
+    #[test]
+    fn find_in_keeps_an_absolute_path_for_a_parent_config() {
+        let home = tempdir().unwrap();
+        let home = canon(home.path());
+        let project = home.join("project");
+        let deep = project.join("src");
+        fs::create_dir_all(&deep).unwrap();
+        fs::write(project.join(".jlorc"), "17\n").unwrap();
+        let default = home.join("missing").join("default.jlorc");
+
+        let resolved = find_in(&deep, Some(&home), &default).unwrap().unwrap();
+        assert_eq!(resolved.version, "17");
+        assert_eq!(
+            resolved.source,
+            Source::ProjectConfig(project.join(".jlorc"))
+        );
+    }
+
+    #[test]
+    fn find_in_reports_the_default_config_as_its_source() {
+        let home = tempdir().unwrap();
+        let home = canon(home.path());
+        let project = home.join("project");
+        fs::create_dir_all(&project).unwrap();
+        let default = home.join(".jlo").join("default.jlorc");
+        fs::create_dir_all(default.parent().unwrap()).unwrap();
+        fs::write(&default, "25\n").unwrap();
+
+        let resolved = find_in(&project, Some(&home), &default).unwrap().unwrap();
+        assert_eq!(resolved.version, "25");
+        assert_eq!(resolved.source, Source::DefaultConfig(default));
+    }
+
+    /// Nothing configured is `Ok(None)`, not an error: `jlo current` asks this
+    /// of shells that have a JDK active with no `.jlorc` anywhere.
+    #[test]
+    fn find_in_returns_none_when_nothing_is_configured() {
+        let home = tempdir().unwrap();
+        let home = canon(home.path());
+        let project = home.join("project");
+        fs::create_dir_all(&project).unwrap();
+        let default = home.join(".jlo").join("default.jlorc");
+
+        assert_eq!(find_in(&project, Some(&home), &default).unwrap(), None);
+    }
+
+    /// A `.jlorc` that exists but is unreadable is still an error - absence is
+    /// the only thing `Ok(None)` means.
+    #[test]
+    fn find_in_still_fails_on_an_invalid_config() {
+        let home = tempdir().unwrap();
+        let home = canon(home.path());
+        let project = home.join("project");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(project.join(".jlorc"), "7\n").unwrap();
+        let default = home.join("missing").join("default.jlorc");
+
+        let err = find_in(&project, Some(&home), &default).unwrap_err();
+        assert!(
+            err.to_string().contains("could not load configuration"),
+            "{err}"
         );
     }
 
