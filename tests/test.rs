@@ -567,6 +567,22 @@ fn list_rejects_unknown_option() {
         .stderr(predicate::str::contains("--nope"));
 }
 
+/// The JDK store lives under `$HOME`, so a `jlo list` test that does not
+/// override it lists whatever the developer happens to have installed.
+fn jdk_store_in(home: &std::path::Path) -> std::path::PathBuf {
+    if cfg!(target_os = "macos") {
+        home.join("Library/Java/JavaVirtualMachines")
+    } else {
+        home.join(".jdks")
+    }
+}
+
+fn install_fake_jdk(home: &std::path::Path, version: &str) {
+    let dir = jdk_store_in(home).join(version);
+    std::fs::create_dir_all(dir.join("bin")).unwrap();
+    std::fs::write(dir.join(".jlo-managed"), "").unwrap();
+}
+
 #[test]
 fn list_remote_shows_available_versions() {
     let mut server = mockito::Server::new();
@@ -582,16 +598,59 @@ fn list_remote_shows_available_versions() {
         .match_query(mockito::Matcher::Any)
         .with_body(include_str!("fixtures/assets_latest.json"))
         .create();
+    let home = tempfile::tempdir().unwrap();
 
     Command::cargo_bin("jlo-bin")
         .unwrap()
         .arg("list")
+        .env("HOME", home.path())
         .env("JLO_ADOPTIUM_API_URL", server.url())
         .assert()
         .success()
-        // The major version leads the line - that is what `jlo update` takes.
-        .stdout(predicate::str::starts_with("21  21.0.11+10.0.LTS"))
+        // The major version leads the row, after the gutter column that marks
+        // which install `$JAVA_HOME` points at - the major is what
+        // `jlo update` takes.
+        .stdout(predicate::str::starts_with("    21  21.0.11+10.0.LTS"))
         .stdout(predicate::str::contains("LTS"));
+}
+
+/// The case `jlo remove 17.0.11+10` had nowhere to read its argument from:
+/// a build older than the catalogue's used to collapse into a parenthetical
+/// on the row above it.
+#[test]
+fn list_remote_gives_a_superseded_build_its_own_row() {
+    let mut server = mockito::Server::new();
+    let _r = server
+        .mock("GET", "/v3/info/available_releases")
+        .with_body(r#"{"available_releases":[21],"available_lts_releases":[21]}"#)
+        .create();
+    let _a = server
+        .mock(
+            "GET",
+            mockito::Matcher::Regex(r"^/v3/assets/latest/21/hotspot".to_string()),
+        )
+        .match_query(mockito::Matcher::Any)
+        .with_body(include_str!("fixtures/assets_latest.json"))
+        .create();
+
+    let home = tempfile::tempdir().unwrap();
+    install_fake_jdk(home.path(), "21.0.11+10.0.LTS");
+    install_fake_jdk(home.path(), "21.0.9+10.0.LTS");
+    let active = jdk_store_in(home.path()).join("21.0.9+10.0.LTS");
+
+    Command::cargo_bin("jlo-bin")
+        .unwrap()
+        .arg("list")
+        .env("HOME", home.path())
+        .env("JAVA_HOME", &active)
+        .env("JLO_ADOPTIUM_API_URL", server.url())
+        .assert()
+        .success()
+        .stdout(
+            "    21  21.0.11+10.0.LTS  LTS  installed\n \u{2192}  21  21.0.9+10.0.LTS   LTS  superseded\n",
+        )
+        // The advice belongs on stderr, so a pipe sees only the rows.
+        .stderr(predicate::str::contains("`jlo prune` (1 superseded)"));
 }
 
 #[test]

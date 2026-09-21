@@ -485,8 +485,13 @@ fn cmd_list(client: &AdoptiumClient, offline: bool) -> Result<(), CommandError> 
     let store = JdkStore::discover()?;
     let installed = store.list().context("could not list installed JDKs")?;
 
+    // Resolved once, before either listing: the gutter marks a row by version
+    // name, and the path-to-version step is the store's job, not the UI's.
+    let java_home = active_java_home();
+    let active = store.active_version(&installed, java_home.as_deref());
+
     if offline {
-        ui::offline_list(&installed, &store);
+        ui::offline_list(&installed, active.as_deref(), &store);
     } else {
         let available = client.available_jdks().map_err(|e| {
             CommandError::with_hint(
@@ -494,7 +499,13 @@ fn cmd_list(client: &AdoptiumClient, offline: bool) -> Result<(), CommandError> 
                 "Use 'jlo list --offline' to list the JDKs already installed.",
             )
         })?;
-        ui::remote_list(&available, &installed);
+        ui::remote_list(&available, &installed, active.as_deref());
+    }
+
+    // After the listing, so it reads as a footnote to the missing gutter mark
+    // rather than as a warning about the command.
+    if let (Some(path), None) = (&java_home, &active) {
+        ui::foreign_java_home(path);
     }
 
     Ok(())

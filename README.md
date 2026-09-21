@@ -226,8 +226,8 @@ jlo update 21 25
 
 ## Listing Versions
 
-The command `jlo list` shows every JDK Adoptium offers for this OS and architecture, newest first, with the
-latest build of each major version — annotated with what you already have installed.
+The command `jlo list` shows one row per JDK version, newest first: what Adoptium offers for this OS and
+architecture, merged with everything installed locally.
 
 ```bash
 jlo list
@@ -236,34 +236,60 @@ jlo list
 `jlo ls` is an alias for `jlo list`.
 
 ```
-26  26.0.2+101              installed
-25  25.0.4+101.0.LTS   LTS  installed
-24  24.0.2+12
-21  21.0.12+101.0.LTS  LTS  outdated (21.0.11+10.0.LTS)
-17  17.0.20+101        LTS  installed
-11  11.0.32+101        LTS
+    26  26.0.2+101              installed
+    25  25.0.4+101.0.LTS   LTS  update
+    25  25.0.1+9.0.LTS     LTS  installed
+    24  24.0.2+12
+ →  21  21.0.12+101.0.LTS  LTS  installed
+    21  21.0.9+10.0.LTS    LTS  superseded
+    17  17.0.20+101        LTS  installed
+     8  8.0.412+8               unmanaged
 ```
 
-Every line starts with the **major version** — that is the number `jlo update`, `jlo exec` and `.jlorc` expect, so
-you can read a row and use it directly:
+The arrow in the left-hand gutter marks the install your `$JAVA_HOME` currently points at. The gutter is always
+there, so the columns sit in the same place whether or not anything is active. If `$JAVA_HOME` points somewhere
+J'Lo did not install, no row is marked and `jlo list` says so on standard error.
+
+After the gutter, every row starts with the **major version** — that is the number `jlo update`, `jlo exec` and
+`.jlorc` expect, so you can read a row and use it directly:
 
 ```bash
 jlo update 21
 ```
 
-When any row is marked `outdated`, `jlo list` prints a reminder:
+Each row ends in at most one status word, and each one names exactly one command:
+
+| Status | Meaning | What acts on it |
+| --- | --- | --- |
+| *(blank)* | Adoptium offers it; you do not have it | `jlo env <major>` |
+| `update` | Adoptium offers it, and it is newer than every build of that major you have | `jlo update <major>` |
+| `installed` | Installed, and the newest build of its major that is | — |
+| `superseded` | Installed, but a newer build of the same major is installed too | `jlo prune` |
+| `unmanaged` | Installed without J'Lo's marker, so J'Lo will not delete it | remove it by hand |
+
+They are single words on purpose: `jlo list | grep superseded` is a usable way to ask which installs `jlo prune`
+would take.
+
+`update` and `superseded` are deliberately different rows. Being behind Adoptium is a fact about a **major**, and
+it lands on the row for the build you do not have yet. Being superseded is a fact about one **build** sitting next
+to a newer sibling of its own major, and it lands on that build's own row — which is also where you read the exact
+version `jlo remove` takes.
+
+When either applies, `jlo list` ends on a single line of advice:
 
 ```
-TIP: Use `jlo update --all` to update all outdated JDKs.
+TIP: `jlo update --all` (2 outdated) · `jlo prune` (2 superseded)
 ```
 
-The tip goes to standard error, so it never ends up in a pipe alongside the listing.
+One line, whatever applies — this prints on every `jlo list`, and a stack of suggestions under every listing reads
+as nagging rather than as help. It goes to standard error, so it never ends up in a pipe alongside the rows.
 
-Major versions Adoptium has no build for on this platform are omitted, so everything listed is installable.
+Every row is either installable or installed: a major Adoptium has no build for on this platform is left out of the
+catalogue, but a JDK you have installed always gets a row, so there is nowhere for a removable install to hide.
 
-Add `--offline` to skip the network and list only what is installed locally — including every minor version you
-have, not just the newest per major. Installations J'Lo did not create are marked `(unmanaged)`; `jlo prune` and
-`jlo remove` leave those alone.
+Add `--offline` to skip the network and list only what is installed. The rows and the status words are the same,
+minus the catalogue — so nothing is ever marked `update`, and the LTS column is dropped, there being no catalogue
+to read it from.
 
 ```bash
 jlo list --offline
@@ -290,7 +316,7 @@ jlo remove 11 17.0.11+10
 
 **Behavior:**
 - Each VERSION is either a major version (removing every installed build of it) or the exact version of one install,
-  as shown by `jlo list --offline`. It is not a version range: `17.0` matches nothing.
+  as shown by `jlo list`. It is not a version range: `17.0` matches nothing.
 - **An installation J'Lo will not delete is reported and skipped; the rest still go.** There are three such cases,
   and each is an error only when it leaves nothing to remove at all:
   - nothing installed matches the version — the JDK is already absent, which is what you asked for, so this is a

@@ -201,6 +201,25 @@ impl JdkStore {
             .collect())
     }
 
+    /// The installed version `$JAVA_HOME` currently points at, if that is one
+    /// of ours.
+    ///
+    /// Resolved here rather than in `ui` so the listing works on version
+    /// names and never has to know where the store lives. Returns `None` when
+    /// `$JAVA_HOME` is unset or points outside the store - a system JDK or
+    /// one another tool manages - which the caller reports rather than hides.
+    pub(crate) fn active_version(
+        &self,
+        installed: &[InstalledJdk],
+        active_java_home: Option<&Path>,
+    ) -> Option<String> {
+        let active = active_java_home?;
+        installed
+            .iter()
+            .find(|jdk| same_dir(&self.base.join(&jdk.version), active))
+            .map(|jdk| jdk.version.clone())
+    }
+
     /// The newest installed JDK whose major version is `major`, if any.
     ///
     /// Matched on the parsed major rather than on a name prefix: a prefix
@@ -1462,5 +1481,41 @@ mod tests {
             .unwrap();
 
         assert_eq!(dest, dest_parent.path().join("21.0.3+9"));
+    }
+
+    #[test]
+    fn active_version_names_the_install_java_home_points_at() {
+        let dir = tempdir().unwrap();
+        create_jdk_dir(dir.path(), "17.0.2+8", true);
+        create_jdk_dir(dir.path(), "21.0.3+9", true);
+        let store = JdkStore::at(dir.path());
+        let installed = store.list().unwrap();
+
+        let active = dir.path().join("21.0.3+9");
+        assert_eq!(
+            store.active_version(&installed, Some(&active)).as_deref(),
+            Some("21.0.3+9")
+        );
+    }
+
+    #[test]
+    fn active_version_is_none_when_java_home_points_outside_the_store() {
+        let dir = tempdir().unwrap();
+        create_jdk_dir(dir.path(), "21.0.3+9", true);
+        let store = JdkStore::at(dir.path());
+        let installed = store.list().unwrap();
+
+        let outside = Path::new("/usr/lib/jvm/java-21-openjdk");
+        assert_eq!(store.active_version(&installed, Some(outside)), None);
+    }
+
+    #[test]
+    fn active_version_is_none_without_java_home() {
+        let dir = tempdir().unwrap();
+        create_jdk_dir(dir.path(), "21.0.3+9", true);
+        let store = JdkStore::at(dir.path());
+        let installed = store.list().unwrap();
+
+        assert_eq!(store.active_version(&installed, None), None);
     }
 }
