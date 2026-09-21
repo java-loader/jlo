@@ -4,6 +4,14 @@ on:
   push:
     branches:
       - main
+  # Recovery hatch: release-please only creates a tag once, so if the build or
+  # upload job fails the release is left with no assets and nothing re-triggers
+  # them. This lets you rebuild and upload for a tag that already exists.
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: Existing release tag to build and upload assets for
+        required: true
 
 permissions:
   contents: write
@@ -11,6 +19,7 @@ permissions:
 
 jobs:
   release-please:
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     outputs:
       releases_created: ${{ steps.release.outputs.releases_created }}
@@ -21,9 +30,24 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-  build:
+  # Single source of truth for "which tag are we packaging", so build and upload
+  # agree whether this run came from release-please or from a manual dispatch.
+  resolve:
     needs: release-please
-    if: ${{ needs.release-please.outputs.releases_created == 'true' }}
+    if: ${{ always() && (needs.release-please.outputs.releases_created == 'true' || github.event_name == 'workflow_dispatch') }}
+    runs-on: ubuntu-latest
+    outputs:
+      tag_name: ${{ steps.pick.outputs.tag_name }}
+    steps:
+      - id: pick
+        # Via env rather than inline ${{ }}, so a tag name never lands in the
+        # shell as code.
+        env:
+          TAG_NAME: ${{ inputs.tag_name || needs.release-please.outputs.tag_name }}
+        run: echo "tag_name=$TAG_NAME" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: resolve
     strategy:
       matrix:
         include:
@@ -40,10 +64,18 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
+      # Build the tagged source, not whatever main happens to be: on a manual
+      # dispatch the workflow file comes from main but the sources must not.
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.resolve.outputs.tag_name }}
 
       - name: Install Rust (if needed)
         run: rustup update
+
+      - name: Install zsh (autoload tests source the hook in a real zsh)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y zsh
 
       - name: Build and test
         run: cargo test --release
@@ -60,7 +92,7 @@ jobs:
           path: jlo-*.tar.gz
 
   upload:
-    needs: [release-please, build]
+    needs: [resolve, build]
     runs-on: ubuntu-latest
     steps:
       - name: Download all artifacts
@@ -72,7 +104,7 @@ jobs:
       - name: Upload to versioned release
         uses: softprops/action-gh-release@v3
         with:
-          tag_name: ${{ needs.release-please.outputs.tag_name }}
+          tag_name: ${{ needs.resolve.outputs.tag_name }}
           files: jlo-*.tar.gz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
