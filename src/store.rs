@@ -104,18 +104,16 @@ impl JdkStore {
             .collect())
     }
 
-    /// The newest installed JDK whose directory name starts with `major`, if
-    /// any. A prefix match, not a semver comparison: `major` has passed
-    /// [`crate::conf::is_valid_version`], so it is a bare integer, and only a
-    /// directory named something like `21-broken` would match spuriously.
+    /// The newest installed JDK whose major version is `major`, if any.
+    ///
+    /// Matched on the parsed major rather than on a name prefix: a prefix
+    /// match makes `1` select `17`, and the only reason that is unreachable
+    /// today is the `>= 8` floor in [`crate::conf::is_valid_version`]. A
+    /// `major` that is not an integer matches nothing.
     pub(crate) fn find_matching(&self, major: &str) -> Option<PathBuf> {
+        let major: i64 = major.parse().ok()?;
         let mut matching_versions = self.scan().ok()?;
-        matching_versions.retain(|candidate| {
-            candidate
-                .name
-                .as_deref()
-                .is_some_and(|name| name.starts_with(major))
-        });
+        matching_versions.retain(|candidate| candidate.major == Some(major));
 
         sort_by_semver_desc(&mut matching_versions);
 
@@ -456,6 +454,40 @@ mod tests {
     fn find_matching_empty_dir() {
         let dir = tempdir().unwrap();
         assert!(JdkStore::at(dir.path()).find_matching("21").is_none());
+    }
+
+    #[test]
+    fn find_matching_respects_version_boundaries() {
+        let dir = tempdir().unwrap();
+        create_jdk_dir(dir.path(), "17.0.2+8", true);
+        create_jdk_dir(dir.path(), "1.8.0+402", true);
+
+        let store = JdkStore::at(dir.path());
+        // The boundary case a prefix match got wrong: "1" is a prefix of both
+        // "17.0.2+8" and "1.8.0+402", but only the latter is major 1.
+        assert_eq!(
+            store
+                .find_matching("1")
+                .unwrap()
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "1.8.0+402"
+        );
+        assert_eq!(
+            store
+                .find_matching("17")
+                .unwrap()
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "17.0.2+8"
+        );
+        // A major that is not an integer selects nothing rather than whatever
+        // happens to share its leading characters.
+        assert!(store.find_matching("17.0").is_none());
     }
 
     // -- find_exact --

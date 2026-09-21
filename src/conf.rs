@@ -95,9 +95,9 @@ fn load(path: &Path) -> Result<String, std::io::Error> {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             format!(
-                "Unsupported Java version specified in '{}': '{}'.",
-                path.display(),
-                java_version
+                "unsupported version '{}' in '{}': only major versions 8, 11, ... are supported",
+                java_version,
+                path.display()
             ),
         ));
     }
@@ -235,6 +235,13 @@ mod tests {
         fs::write(&file, "7\n").unwrap();
         let err = load(&file).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        // Same wording as `assert_java_version` in main.rs: whichever path
+        // rejects the version, the user is told what would be accepted.
+        assert!(
+            err.to_string()
+                .contains("only major versions 8, 11, ... are supported"),
+            "{err}"
+        );
     }
 
     #[test]
