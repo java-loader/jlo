@@ -15,9 +15,11 @@ env, home, exec, install, update and init take a Java major version:
   jlo exec [VERSION] -- <COMMAND> [ARGS]...
   jlo init [VERSION]
 
-When VERSION is omitted, env, home, exec, install and update resolve it from
-the nearest .jlorc at or above the current directory, then
-~/.jlo/default.jlorc. init instead pins the latest release.
+When VERSION is omitted, env, home, exec, install and update resolve it in
+four steps: the nearest .jlorc at or above the current directory, then
+~/.jlo/default.jlorc, then the newest JDK already installed, then the latest
+release, which is downloaded. --offline stops after the third step rather
+than downloading. init instead pins the latest release.
 
 Examples:
   jlo env 25                       Use Java 25 in this shell
@@ -137,8 +139,12 @@ the JDK is there, exit status 1 and no exports if it is not, and no
 network access either way. That is how the autoload hook calls it, so
 entering a directory never starts a download.
 
-When VERSION is omitted, it resolves from the nearest .jlorc at or
-above the current directory, then ~/.jlo/default.jlorc. Only major
+When VERSION is omitted, it resolves in four steps: the nearest
+.jlorc at or above the current directory, then ~/.jlo/default.jlorc,
+then the newest JDK already installed, then the latest release, which
+is downloaded. The third step does not ask Adoptium whether something
+newer exists, so a machine holding only Java 17 resolves to 17.
+--offline stops after that step instead of downloading. Only major
 versions are accepted: 21, not 21.0.5.
 
 Pass --verbose for one line on stderr naming the JDK that is now
@@ -147,7 +153,7 @@ already on it. The autoload hook never passes it, which is why the
 report is opt-in: it runs on every new shell and every cd."
     )]
     Env {
-        /// Java major version. Default: from .jlorc
+        /// Java major version. Default: .jlorc, the newest installed JDK, then the latest release
         version: Option<String>,
 
         /// Only look at installed JDKs; never download, never touch the network
@@ -172,12 +178,13 @@ Pass --offline to answer from what is already installed instead: the
 path if it is there, exit status 1 if it is not, and no network access
 either way.
 
-When VERSION is omitted, it resolves from the nearest .jlorc at or
-above the current directory, then ~/.jlo/default.jlorc. Only major
-versions are accepted: 21, not 21.0.5."
+When VERSION is omitted, it resolves in four steps: the nearest
+.jlorc at or above the current directory, then ~/.jlo/default.jlorc,
+then the newest JDK already installed, then the latest release, which
+is downloaded. Only major versions are accepted: 21, not 21.0.5."
     )]
     Home {
-        /// Java major version. Default: from .jlorc
+        /// Java major version. Default: .jlorc, the newest installed JDK, then the latest release
         version: Option<String>,
 
         /// Only look at installed JDKs; never download, never touch the network
@@ -262,22 +269,25 @@ is for the cases that come before that - warming a CI cache, preparing
 for offline work, or seeding a machine without switching it. A major
 already on its latest build is reported and left alone.
 
-When VERSION is omitted, it resolves from the nearest .jlorc at or
-above the current directory, then ~/.jlo/default.jlorc. Only major
-versions are accepted: 21, not 21.0.5."
+When VERSION is omitted, it resolves in four steps: the nearest
+.jlorc at or above the current directory, then ~/.jlo/default.jlorc,
+then the newest JDK already installed, then the latest release, which
+is downloaded. Only major versions are accepted: 21, not 21.0.5."
     )]
     Install {
-        /// Major versions to install. Default: from .jlorc
+        /// Major versions to install. Default: .jlorc, the newest installed JDK, then the latest release
         versions: Vec<String>,
     },
 
     /// Update installed JDKs to their latest minor release
     ///
-    /// With no argument, updates the version from the nearest .jlorc at or
-    /// above the current directory, or ~/.jlo/default.jlorc. Pass --all to update every installed major
-    /// version, or list major versions explicitly.
+    /// With no argument, updates the version resolved in four steps: the
+    /// nearest .jlorc at or above the current directory, then
+    /// ~/.jlo/default.jlorc, then the newest JDK already installed, then the
+    /// latest release. Pass --all to update every installed major version, or
+    /// list major versions explicitly.
     Update {
-        /// Major versions to update. Default: from .jlorc
+        /// Major versions to update. Default: .jlorc, the newest installed JDK, then the latest release
         versions: Vec<String>,
 
         /// Update every installed major version
@@ -325,7 +335,8 @@ Use jlo prune to remove superseded minor versions by rule instead."
     /// versions are accepted: 21, not 21.0.5.
     ///
     /// --global writes ~/.jlo/default.jlorc instead: the version jlo env
-    /// falls back to when no .jlorc is found.
+    /// falls back to when no .jlorc is found, ahead of the newest JDK
+    /// already installed.
     Init {
         /// Java major version. Default: latest release
         version: Option<String>,

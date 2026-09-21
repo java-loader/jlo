@@ -240,11 +240,13 @@ fn install_rejects_an_invalid_version_without_writing_to_stdout() {
 }
 
 /// A bare `jlo install` resolves the version the same way env/home/exec do.
-/// With no .jlorc anywhere above the run directory and no user default, that
-/// resolution is what fails - not the download.
+/// With no .jlorc anywhere above the run directory, no user default and no
+/// JDK installed, the cascade runs all the way to its last stage - so what
+/// fails here is the request for the latest release, not the resolution.
+/// `install` has no --offline flag, so there is nothing to stop it earlier.
 #[test]
 #[serial]
-fn install_without_a_version_resolves_from_config() {
+fn install_without_a_version_falls_through_to_the_latest_release() {
     let home = tempfile::tempdir().unwrap();
     let project = tempfile::tempdir().unwrap();
 
@@ -258,8 +260,12 @@ fn install_without_a_version_resolves_from_config() {
         .failure()
         .code(1)
         .stdout(predicate::str::is_empty())
-        .stderr(predicate::str::contains(".jlorc"))
-        .stderr(predicate::str::contains("jlo init"));
+        .stderr(predicate::str::contains(
+            "could not fetch latest JDK version",
+        ))
+        // Not the old "run jlo init" refusal: a missing config is no longer
+        // the end of the road.
+        .stderr(predicate::str::contains("jlo init").not());
 }
 
 #[test]
@@ -1400,19 +1406,26 @@ fn store_base(home: &std::path::Path) -> std::path::PathBuf {
     }
 }
 
-/// A temp `$HOME` holding one installed JDK, plus the project directory the
-/// command runs from. The project sits *inside* `$HOME` so the `.jlorc` walk
-/// stops there rather than climbing into the real filesystem.
-fn current_fixture(version: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+/// A temp `$HOME` holding the named JDK installs, plus the project directory
+/// the command runs from. The project sits *inside* `$HOME` so the `.jlorc`
+/// walk stops there rather than climbing into the real filesystem and finding
+/// a config that belongs to something else.
+fn store_fixture(versions: &[&str]) -> (tempfile::TempDir, std::path::PathBuf) {
     let home = tempfile::tempdir().unwrap();
-    let jdk = store_base(home.path()).join(version);
-    std::fs::create_dir_all(jdk.join("bin")).unwrap();
-    std::fs::write(jdk.join("bin").join("java"), "").unwrap();
-    std::fs::File::create(jdk.join(".jlo-managed")).unwrap();
+    for version in versions {
+        let jdk = store_base(home.path()).join(version);
+        std::fs::create_dir_all(jdk.join("bin")).unwrap();
+        std::fs::write(jdk.join("bin").join("java"), "").unwrap();
+        std::fs::File::create(jdk.join(".jlo-managed")).unwrap();
+    }
 
     let project = home.path().join("project");
     std::fs::create_dir_all(&project).unwrap();
     (home, project)
+}
+
+fn current_fixture(version: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+    store_fixture(&[version])
 }
 
 /// Every `jlo current` invocation starts from a shell that inherits nothing:
@@ -1479,10 +1492,12 @@ fn current_warns_but_still_answers_when_the_config_disagrees() {
         ));
 }
 
-/// Case 4. "Nothing pinned" is a different statement from case 3's silence
-/// about the pin, and the line has to distinguish them.
+/// Case 4. Nothing is configured, but the active JDK is the newest installed
+/// one - which is stage 3 of the cascade, i.e. exactly what a bare `jlo env`
+/// here would resolve to. Saying so is more useful than "nothing pinned",
+/// which used to be the answer and said nothing about why this JDK.
 #[test]
-fn current_says_when_nothing_is_pinned() {
+fn current_names_the_newest_installed_jdk_when_nothing_is_configured() {
     let (home, project) = current_fixture("25.0.4+101");
 
     current_cmd(home.path(), &project)
@@ -1490,7 +1505,42 @@ fn current_says_when_nothing_is_pinned() {
         .assert()
         .success()
         .code(0)
-        .stdout("25.0.4+101  (active, nothing pinned)\n")
+        .stdout("25.0.4+101  (from the newest installed JDK)\n")
+        .stderr(predicate::str::is_empty());
+}
+
+/// Stage 3 names an *install*, not a major, so the check behind it has to be
+/// one too. Nothing configured, 21.0.5+11 active, 21.0.6+7 installed beside
+/// it: the majors agree, but a bare `jlo env` here would resolve major 21 and
+/// then hand back 21.0.6+7, so calling the active build "the newest installed
+/// JDK" would claim more than is true.
+#[test]
+fn current_does_not_call_an_older_build_of_the_same_major_the_newest_install() {
+    let (home, project) = store_fixture(&["21.0.5+11", "21.0.6+7"]);
+
+    current_cmd(home.path(), &project)
+        .env("JAVA_HOME", store_base(home.path()).join("21.0.5+11"))
+        .assert()
+        .success()
+        .code(0)
+        .stdout("21.0.5+11  (active, nothing pinned)\n")
+        .stderr(predicate::str::is_empty());
+}
+
+/// "Nothing pinned" survives as the answer for the state it actually
+/// describes: nothing configured, and the active JDK is not what the cascade
+/// would pick either. No warning - stage 3 is not a pin, so a shell on an
+/// older major is not wrong about anything anyone asked for.
+#[test]
+fn current_says_nothing_is_pinned_when_the_cascade_would_pick_another_major() {
+    let (home, project) = store_fixture(&["17.0.11+9", "25.0.4+101"]);
+
+    current_cmd(home.path(), &project)
+        .env("JAVA_HOME", store_base(home.path()).join("17.0.11+9"))
+        .assert()
+        .success()
+        .code(0)
+        .stdout("17.0.11+9  (active, nothing pinned)\n")
         .stderr(predicate::str::is_empty());
 }
 
@@ -1545,7 +1595,7 @@ fn current_never_touches_the_network() {
         .assert()
         .success()
         .code(0)
-        .stdout("25.0.4+101  (active, nothing pinned)\n");
+        .stdout("25.0.4+101  (from the newest installed JDK)\n");
 }
 
 /// No `--offline` flag: a flag that would always be on is noise, so the fact
@@ -1664,4 +1714,176 @@ fn home_has_no_verbose_flag() {
         .assert()
         .failure()
         .code(2);
+}
+
+// -- the version-resolution cascade, end to end --
+//
+// Four stages: the nearest `.jlorc`, `$JLO_HOME/default.jlorc`, the newest
+// JDK already installed, then the latest release, downloaded. `jlo home` is
+// the probe throughout: it resolves exactly as `env` and `exec` do, and prints
+// the answer as one line on stdout instead of exports a shell has to source.
+//
+// Every command below points `JLO_ADOPTIUM_API_URL` at a port nothing listens
+// on. That turns "no network access" into an assertion rather than a claim: a
+// run that reaches Adoptium fails with a connection error instead of printing
+// a path.
+
+/// `jlo home` against a fixture store, with the network wired to fail.
+fn cascade_cmd(home: &std::path::Path, project: &std::path::Path, args: &[&str]) -> Command {
+    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
+    cmd.arg("home")
+        .args(args)
+        .current_dir(project)
+        .env("HOME", home)
+        .env("JLO_HOME", home.join(".jlo"))
+        .env("JLO_ADOPTIUM_API_URL", "http://127.0.0.1:1")
+        .env_remove("JAVA_HOME");
+    cmd
+}
+
+fn installed_path(home: &std::path::Path, version: &str) -> String {
+    format!("{}\n", store_base(home).join(version).display())
+}
+
+/// Stage 3. Nothing is configured, so the newest JDK on disk answers - and
+/// answers without a round trip, which the unreachable API proves.
+#[test]
+fn home_falls_back_to_the_newest_installed_jdk() {
+    let (home, project) = store_fixture(&["17.0.11+9", "21.0.5+11"]);
+
+    cascade_cmd(home.path(), &project, &[])
+        .assert()
+        .success()
+        .code(0)
+        .stdout(installed_path(home.path(), "21.0.5+11"));
+}
+
+/// The case this cascade is most easily got wrong in. A machine holding only
+/// an outdated major resolves to *that* major: stage 3 never asks Adoptium
+/// whether something newer exists, because putting a network round trip on
+/// every bare `jlo env` to answer a question `jlo update` already answers
+/// would be the wrong trade. Nothing is downloaded, and 25 does not appear.
+#[test]
+fn home_keeps_an_outdated_install_rather_than_downloading_a_newer_major() {
+    let (home, project) = store_fixture(&["17.0.11+9"]);
+
+    cascade_cmd(home.path(), &project, &[])
+        .assert()
+        .success()
+        .code(0)
+        .stdout(installed_path(home.path(), "17.0.11+9"));
+}
+
+/// Stage 4, reached only when nothing is configured *and* nothing is
+/// installed. The download is what fails here, which is the point: the old
+/// behaviour refused to resolve at all and sent the user to `jlo init`.
+#[test]
+fn home_reaches_for_the_latest_release_when_nothing_is_installed() {
+    let (home, project) = store_fixture(&[]);
+
+    cascade_cmd(home.path(), &project, &[])
+        .assert()
+        .failure()
+        .code(1)
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains(
+            "could not fetch latest JDK version",
+        ))
+        .stderr(predicate::str::contains("jlo init").not());
+}
+
+/// The same machine with `--offline`: the cascade stops one stage short and
+/// reports the refusal it has always reported. This is why the autoload hook,
+/// which calls `jlo env --offline` on every `cd`, can never start a download.
+#[test]
+fn home_offline_refuses_instead_of_downloading() {
+    let (home, project) = store_fixture(&[]);
+
+    // The whole sentence, not two substrings of it: the decision was that
+    // this message stays exactly as it was when a missing config was the
+    // ordinary outcome, so the wording is the thing under test.
+    cascade_cmd(home.path(), &project, &["--offline"])
+        .assert()
+        .failure()
+        .code(1)
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains(
+            "No '.jlorc' found in the current directory or its parents, and no default \
+             config file. Please run 'jlo init' to create a configuration file.",
+        ));
+}
+
+/// `--offline` stops *after* stage 3, not before it: what is already on disk
+/// costs no network, so it is still an answer.
+#[test]
+fn home_offline_still_uses_the_newest_installed_jdk() {
+    let (home, project) = store_fixture(&["21.0.5+11"]);
+
+    cascade_cmd(home.path(), &project, &["--offline"])
+        .assert()
+        .success()
+        .code(0)
+        .stdout(installed_path(home.path(), "21.0.5+11"));
+}
+
+/// Stage 2 beats stage 3. `jlo init --global` is how a user asks for a stable
+/// answer on neutral ground, and a JDK installed for some other project must
+/// not quietly override it - which is the one sharp edge of resolving to
+/// "whatever is newest here".
+#[test]
+fn a_default_config_beats_the_newest_installed_jdk() {
+    let (home, project) = store_fixture(&["17.0.11+9", "25.0.4+101"]);
+    let jlo_home = home.path().join(".jlo");
+    std::fs::create_dir_all(&jlo_home).unwrap();
+    std::fs::write(jlo_home.join("default.jlorc"), "17\n").unwrap();
+
+    cascade_cmd(home.path(), &project, &[])
+        .assert()
+        .success()
+        .code(0)
+        .stdout(installed_path(home.path(), "17.0.11+9"));
+}
+
+/// Stage 1 beats stage 2, which beats stage 3 - the whole order in one run.
+#[test]
+fn a_project_config_beats_both_the_default_and_the_newest_install() {
+    let (home, project) = store_fixture(&["17.0.11+9", "21.0.5+11", "25.0.4+101"]);
+    let jlo_home = home.path().join(".jlo");
+    std::fs::create_dir_all(&jlo_home).unwrap();
+    std::fs::write(jlo_home.join("default.jlorc"), "17\n").unwrap();
+    std::fs::write(project.join(".jlorc"), "21\n").unwrap();
+
+    cascade_cmd(home.path(), &project, &[])
+        .assert()
+        .success()
+        .code(0)
+        .stdout(installed_path(home.path(), "21.0.5+11"));
+}
+
+/// `jlo env --verbose` names the stage too, through the same formatter
+/// `jlo current` uses. The exports still go to stdout; the report is the
+/// stderr line.
+#[test]
+fn env_verbose_names_the_newest_installed_jdk_as_the_source() {
+    let (home, project) = store_fixture(&["21.0.5+11"]);
+
+    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
+    cmd.args(["env", "--offline", "--verbose"])
+        .current_dir(&project)
+        .env("HOME", home.path())
+        .env("JLO_HOME", home.path().join(".jlo"))
+        .env("JLO_ADOPTIUM_API_URL", "http://127.0.0.1:1")
+        .env_remove("JAVA_HOME")
+        .assert()
+        .success()
+        .code(0)
+        // stdout is the environment channel: the report must not leak into
+        // the stream the jlo shell function evaluates.
+        .stdout(
+            predicate::str::is_match(
+                r"^export JAVA_HOME='[^']*21\.0\.5\+11'\nexport PATH='[^']*'\n$",
+            )
+            .unwrap(),
+        )
+        .stderr("21.0.5+11  (from the newest installed JDK)\n");
 }

@@ -166,23 +166,98 @@ fn cmd_completions(shell: clap_complete::Shell) {
     let _ = std::io::stdout().write_all(&cli::completion_script(shell));
 }
 
-/// Determine the requested major version: the explicit CLI argument if present,
-/// otherwise the project `.jlorc` / user default config.
+/// Determine the requested major version: the explicit CLI argument if
+/// present, otherwise the fallback cascade below.
 ///
 /// Returns where the version came from as well as what it is, because
-/// `jlo env --verbose` reports it and re-deriving it there would be a second
-/// spelling of the same walk.
-fn resolve_java_version_from(explicit: Option<String>) -> anyhow::Result<conf::Resolved> {
+/// `jlo current` and `jlo env --verbose` report it and re-deriving it there
+/// would be a second spelling of the same walk.
+fn resolve_java_version_from(
+    explicit: Option<String>,
+    store: &JdkStore,
+    client: &AdoptiumClient,
+    offline: bool,
+) -> anyhow::Result<conf::Resolved> {
     let resolved = match explicit {
         Some(version) => conf::Resolved {
             version,
             source: conf::Source::Argument,
         },
-        None => conf::resolve()?,
+        None => cascade(conf::find()?, newest_installed(store), offline, || {
+            client
+                .latest_major()
+                .context("could not fetch latest JDK version")
+        })?,
     };
 
     assert_java_version(&resolved.version)?;
     Ok(resolved)
+}
+
+/// The version-resolution cascade, once the explicit argument is out of the
+/// way. Four stages, in order:
+///
+/// 1. the nearest `.jlorc` at or above the cwd,
+/// 2. `$JLO_HOME/default.jlorc`,
+/// 3. the newest JDK already installed,
+/// 4. the latest release Adoptium offers, downloaded.
+///
+/// It lives in `main` rather than in `conf` deliberately. `conf` knows about
+/// config files and nothing else - not where JDKs are installed, not how to
+/// reach Adoptium - and moving the cascade there would hand it both, so the
+/// module that answers "what does this file say" would start answering "what
+/// is on this machine" and "what does the network offer" too. Stages 1 and 2
+/// stay `conf::find`, unchanged; stages 3 and 4 are added here, where the
+/// store and the client already are.
+///
+/// Every input is passed in rather than read from the filesystem or the
+/// process environment - the same reason `conf::find_in` takes its cwd - so
+/// the decisions here, including the one that must *not* download, are
+/// testable without a store, a network or a temp directory.
+fn cascade(
+    configured: Option<conf::Resolved>,
+    newest_installed: Option<conf::Resolved>,
+    offline: bool,
+    latest_release: impl FnOnce() -> anyhow::Result<String>,
+) -> anyhow::Result<conf::Resolved> {
+    if let Some(resolved) = configured.or(newest_installed) {
+        return Ok(resolved);
+    }
+
+    // `--offline` stops here, one stage short of the download, and that is the
+    // whole of why entering a directory never starts one: the autoload hook
+    // calls `jlo env --offline`, so the cascade it runs ends at what is
+    // already on disk.
+    if offline {
+        return Err(conf::nothing_configured());
+    }
+
+    Ok(conf::Resolved {
+        version: latest_release()?,
+        source: conf::Source::LatestRelease,
+    })
+}
+
+/// Stage 3 of the cascade: the newest JDK already on disk, whatever major it
+/// is.
+///
+/// Deliberately no comparison against Adoptium. Asking whether the newest
+/// installed JDK is also the newest release would put a network round trip on
+/// the hottest path there is - every bare `jlo env` - to answer a question
+/// `jlo update` already exists for. So a machine holding only an outdated 17
+/// resolves to 17 and downloads nothing; stage 4 is reached only when no JDK
+/// is installed at all.
+///
+/// A store holding nothing but pre-8 JDKs falls through rather than resolving
+/// to a version the rest of jlo would then reject.
+fn newest_installed(store: &JdkStore) -> Option<conf::Resolved> {
+    store
+        .newest_major()
+        .map(|major| conf::Resolved {
+            version: major.to_string(),
+            source: conf::Source::NewestInstalled,
+        })
+        .filter(|resolved| conf::is_valid_version(&resolved.version))
 }
 
 fn cmd_env(
@@ -191,8 +266,9 @@ fn cmd_env(
     offline: bool,
     verbose: bool,
 ) -> Result<(), CommandError> {
-    let resolved = resolve_java_version_from(version)?;
-    let change = setup(client, &resolved.version, offline)?;
+    let store = JdkStore::discover()?;
+    let resolved = resolve_java_version_from(version, &store, client, offline)?;
+    let change = setup(client, &store, &resolved.version, offline)?;
 
     // Opt-in, for the reason `setup` prints nothing at all: the autoload hook
     // calls it from PROMPT_COMMAND/chpwd, and the hook never passes --verbose.
@@ -248,8 +324,8 @@ fn cmd_home(
     version: Option<String>,
     offline: bool,
 ) -> Result<(), CommandError> {
-    let java_version = resolve_java_version_from(version)?.version;
     let store = JdkStore::discover()?;
+    let java_version = resolve_java_version_from(version, &store, client, offline)?.version;
     let java_home = if offline {
         offline_java_home(&store, &java_version, "home")?
     } else {
@@ -409,9 +485,12 @@ mod exec_arg_recovery_tests {
 fn run_exec(client: &AdoptiumClient, version: Option<String>, command: &[String]) -> ! {
     // This function never returns, so it reports its own failures rather than
     // handing them back to `main`.
-    let java_home = resolve_java_version_from(version)
-        .and_then(|resolved| {
-            let store = JdkStore::discover()?;
+    // No --offline flag on `exec`: the command's whole job is to run
+    // something on that JDK, so declining to fetch it would only move the
+    // failure. The cascade may therefore reach its last stage here.
+    let java_home = JdkStore::discover()
+        .and_then(|store| {
+            let resolved = resolve_java_version_from(version, &store, client, false)?;
             resolve_java_home(client, &store, &resolved.version)
         })
         .unwrap_or_else(|e| {
@@ -602,6 +681,19 @@ fn cmd_current() -> Result<(), CommandError> {
         return Ok(());
     };
 
+    // Whether the active JDK is the *exact* install stage 3 of the cascade
+    // would pick, not merely one of its major. `list` yields newest first, so
+    // that is its head. The distinction matters because the cascade resolves
+    // a major and `jlo env` then takes the newest build of it: a shell on
+    // 21.0.5 with 21.0.6 sitting beside it agrees on the major but is not
+    // what a bare `jlo env` would hand back, so calling it "the newest
+    // installed JDK" would claim more than is true. The version floor is
+    // checked here for the same reason it is checked in `newest_installed`: a
+    // store of nothing but pre-8 JDKs is one the cascade walks straight past.
+    let is_newest_install = installed.first().is_some_and(|newest| {
+        newest.version == version && conf::is_valid_version(&newest.major.to_string())
+    });
+
     let mut active = ui::Active {
         major: installed
             .iter()
@@ -614,14 +706,24 @@ fn cmd_current() -> Result<(), CommandError> {
         unchanged: false,
     };
 
+    // The same cascade `jlo env` resolves through, stopped after stage 3:
+    // this command never touches the network, so "download the latest
+    // release" is not an answer it can give - and it would be a strange one
+    // anyway, since something is demonstrably active already.
+    //
     // A config that fails to load is still a failure: it is a file the user
     // wrote and meant, and answering around it would hide the mistake.
-    if let Some(pinned) = conf::find()? {
-        if pinned.version.parse::<i64>().ok() == active.major {
-            active.source = Some(pinned.source);
+    if let Some(configured) = conf::find()? {
+        if configured.version.parse::<i64>().ok() == active.major {
+            active.source = Some(configured.source);
         } else {
-            active.pinned_elsewhere = Some(pinned);
+            active.pinned_elsewhere = Some(configured);
         }
+    } else if is_newest_install {
+        // Stage 3. No mismatch counterpart: nobody asked for the newest
+        // installed JDK, so a shell that is on something else is not wrong
+        // about anything and gets no warning - it reads as "nothing pinned".
+        active.source = Some(conf::Source::NewestInstalled);
     }
 
     ui::print_lines([ui::provenance_line(&active)]);
@@ -722,7 +824,7 @@ fn cmd_init(
 /// major - while `update` keeps its own meaning and wording.
 fn cmd_install(client: &AdoptiumClient, versions: Vec<String>) -> Result<(), CommandError> {
     let store = JdkStore::discover()?;
-    let versions = requested_versions(versions, "install")?;
+    let versions = requested_versions(versions, "install", &store, client)?;
     install_each(client, &store, versions)
 }
 
@@ -748,23 +850,33 @@ fn cmd_update(
         }
         installed
     } else {
-        requested_versions(versions, "update")?
+        requested_versions(versions, "update", &store, client)?
     };
 
     install_each(client, &store, versions_to_install)
 }
 
 /// The majors an explicit run should download: the list given, or the version
-/// resolved from config when the list is empty - the same resolution `env`,
-/// `home` and `exec` do, so a bare `jlo install` means the pinned version like
-/// everywhere else.
+/// the cascade resolves when the list is empty - the same resolution `env`,
+/// `home` and `exec` do, so a bare `jlo install` means the same version they
+/// would pick.
+///
+/// Neither verb takes `--offline`, so the cascade here may reach its last
+/// stage: `jlo install` on a machine with no config and no JDK installs the
+/// latest release, which is the only thing it could sensibly mean.
 ///
 /// An invalid entry is warned about and skipped, so one typo in a list of four
 /// does not cost the other three. A list that leaves nothing valid behind is
 /// an error naming `verb`, the command that asked.
-fn requested_versions(versions: Vec<String>, verb: &str) -> Result<HashSet<String>, CommandError> {
+fn requested_versions(
+    versions: Vec<String>,
+    verb: &str,
+    store: &JdkStore,
+    client: &AdoptiumClient,
+) -> Result<HashSet<String>, CommandError> {
     if versions.is_empty() {
-        return Ok(HashSet::from([conf::resolve()?.version]));
+        let resolved = resolve_java_version_from(None, store, client, false)?;
+        return Ok(HashSet::from([resolved.version]));
     }
 
     let mut requested = HashSet::new();
@@ -899,14 +1011,14 @@ fn shell_quote(value: &str) -> String {
 /// export would be worse than no export at all.
 fn setup(
     client: &AdoptiumClient,
+    store: &JdkStore,
     java_version: &str,
     offline: bool,
 ) -> Result<EnvChange, CommandError> {
-    let store = JdkStore::discover()?;
     let java_home = if offline {
-        offline_java_home(&store, java_version, "env")?
+        offline_java_home(store, java_version, "env")?
     } else {
-        resolve_java_home(client, &store, java_version)?
+        resolve_java_home(client, store, java_version)?
     };
 
     // Collected rather than printed as they are decided: both lines are one
@@ -1072,6 +1184,12 @@ mod tests {
         AdoptiumClient::new("http://127.0.0.1:1")
     }
 
+    /// A store rooted at a path that does not exist, i.e. one holding no
+    /// JDKs. Enough for the tests that never reach stage 3 of the cascade.
+    fn empty_store() -> JdkStore {
+        JdkStore::at("/nonexistent/jlo-test-store")
+    }
+
     // -- shell_quote --
 
     /// A plain path needs no escaping, but is still quoted: an unquoted value
@@ -1197,12 +1315,137 @@ mod tests {
         );
     }
 
+    // -- cascade --
+    //
+    // Every input is passed in, so these run without a store, a network or a
+    // temp directory. `refuse_network` is the assertion that matters most in
+    // half of them: stage 4 is a several-hundred-megabyte download, and the
+    // cases below are exactly the ones in which it must not be reached.
+
+    fn configured(version: &str) -> conf::Resolved {
+        conf::Resolved {
+            version: version.to_string(),
+            source: conf::Source::DefaultConfig(PathBuf::from("/home/u/.jlo/default.jlorc")),
+        }
+    }
+
+    fn installed(version: &str) -> conf::Resolved {
+        conf::Resolved {
+            version: version.to_string(),
+            source: conf::Source::NewestInstalled,
+        }
+    }
+
+    /// A stage 4 that fails if it is ever called, so "no network access" is an
+    /// assertion rather than a comment.
+    fn refuse_network() -> anyhow::Result<String> {
+        Err(anyhow!("the network was consulted"))
+    }
+
+    /// Stage 2 beats stage 3: `jlo init --global` is how a user asks for a
+    /// stable answer on neutral ground, and a JDK installed for some other
+    /// project must not quietly override it.
+    #[test]
+    fn cascade_prefers_a_config_over_the_newest_install() {
+        let resolved = cascade(
+            Some(configured("21")),
+            Some(installed("25")),
+            false,
+            refuse_network,
+        )
+        .expect("the default config answers");
+
+        assert_eq!(resolved.version, "21");
+        assert!(matches!(resolved.source, conf::Source::DefaultConfig(_)));
+    }
+
+    /// Stage 3: no config anywhere, so the newest JDK on disk answers - and
+    /// answers without a round trip to Adoptium.
+    #[test]
+    fn cascade_falls_back_to_the_newest_installed_jdk() {
+        let resolved = cascade(None, Some(installed("25")), false, refuse_network)
+            .expect("the installed JDK answers");
+
+        assert_eq!(resolved.version, "25");
+        assert_eq!(resolved.source, conf::Source::NewestInstalled);
+    }
+
+    /// The case the cascade is most easily got wrong in: a machine holding
+    /// only an outdated major resolves to *that* major. Stage 3 does not ask
+    /// Adoptium whether something newer exists - that is what `jlo update` is
+    /// for - so nothing is downloaded here.
+    #[test]
+    fn cascade_keeps_an_outdated_install_rather_than_downloading_a_newer_major() {
+        let resolved = cascade(None, Some(installed("17")), false, refuse_network)
+            .expect("the outdated install still answers");
+
+        assert_eq!(resolved.version, "17");
+        assert_eq!(resolved.source, conf::Source::NewestInstalled);
+    }
+
+    /// Stage 4, reached only when nothing is configured *and* nothing is
+    /// installed.
+    #[test]
+    fn cascade_downloads_the_latest_release_when_nothing_is_installed() {
+        let resolved = cascade(None, None, false, || Ok("26".to_string()))
+            .expect("the latest release answers");
+
+        assert_eq!(resolved.version, "26");
+        assert_eq!(resolved.source, conf::Source::LatestRelease);
+    }
+
+    /// `--offline` stops one stage short of the download. This is the whole of
+    /// why the autoload hook - which calls `jlo env --offline` on every `cd` -
+    /// can never start one.
+    #[test]
+    fn cascade_refuses_to_download_when_offline() {
+        let err =
+            cascade(None, None, true, refuse_network).expect_err("offline has nowhere left to go");
+
+        assert!(err.to_string().contains(".jlorc"), "{err}");
+        assert!(err.to_string().contains("jlo init"), "{err}");
+    }
+
+    /// `--offline` stops *after* stage 3, not before it: an installed JDK is
+    /// already on disk, so handing it back costs no network at all.
+    #[test]
+    fn cascade_still_uses_an_installed_jdk_when_offline() {
+        let resolved = cascade(None, Some(installed("21")), true, refuse_network)
+            .expect("the installed JDK needs no network");
+
+        assert_eq!(resolved.version, "21");
+        assert_eq!(resolved.source, conf::Source::NewestInstalled);
+    }
+
+    /// Stage 3 reads a major out of a directory name, so a store holding only
+    /// pre-8 JDKs would otherwise resolve to a version every other part of jlo
+    /// rejects. It falls through to stage 4 instead.
+    #[test]
+    fn newest_installed_ignores_a_store_of_pre_8_jdks() {
+        let dir = tempdir().expect("a temp directory");
+        std::fs::create_dir_all(dir.path().join("7.0.4+101")).expect("the fake JDK directory");
+
+        assert_eq!(newest_installed(&JdkStore::at(dir.path())), None);
+    }
+
+    /// Nothing installed is `None`, not a failure - including when the store
+    /// directory has never been created.
+    #[test]
+    fn newest_installed_is_none_for_an_empty_store() {
+        assert_eq!(newest_installed(&empty_store()), None);
+    }
+
     // -- requested_versions --
 
     #[test]
     fn requested_versions_keeps_the_valid_entries_of_a_mixed_list() {
-        let requested = requested_versions(owned(&["21", "abc", "25"]), "install")
-            .expect("two of the three are valid");
+        let requested = requested_versions(
+            owned(&["21", "abc", "25"]),
+            "install",
+            &empty_store(),
+            &offline_client(),
+        )
+        .expect("two of the three are valid");
         assert_eq!(
             requested,
             HashSet::from(["21".to_string(), "25".to_string()])
@@ -1213,8 +1456,13 @@ mod tests {
     /// `install_each`.
     #[test]
     fn requested_versions_deduplicates() {
-        let requested =
-            requested_versions(owned(&["21", "21"]), "install").expect("21 is a valid major");
+        let requested = requested_versions(
+            owned(&["21", "21"]),
+            "install",
+            &empty_store(),
+            &offline_client(),
+        )
+        .expect("21 is a valid major");
         assert_eq!(requested, HashSet::from(["21".to_string()]));
     }
 

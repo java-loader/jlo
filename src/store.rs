@@ -249,6 +249,20 @@ impl JdkStore {
         }
     }
 
+    /// The major version of the newest JDK in the store, or `None` when
+    /// nothing is installed.
+    ///
+    /// Stage 3 of `main`'s version cascade: what a bare `jlo env` resolves to
+    /// when no config anywhere names a version. "Newest" is by semver across
+    /// every major, so a store holding 17.0.11 and 21.0.5 answers 21.
+    ///
+    /// An unreadable store reads as "nothing installed", matching
+    /// [`Self::find_matching`]: both answer "is there one here", and neither
+    /// is the place to fail over a directory that cannot be read.
+    pub(crate) fn newest_major(&self) -> Option<i64> {
+        self.list().ok()?.first().map(|jdk| jdk.major)
+    }
+
     /// The major versions present in the store, ascending.
     pub(crate) fn installed_majors(&self) -> anyhow::Result<Vec<i64>> {
         let major_versions: HashSet<i64> = self

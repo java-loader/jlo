@@ -20,13 +20,17 @@ pub(crate) struct Resolved {
 
 /// Where a version in play came from.
 ///
-/// Deliberately open: a later change that falls back to the newest installed
-/// JDK - or to the latest release - adds a variant here rather than reshaping
-/// the callers. The variant names are the vocabulary, and their tags are
-/// fixed - `argument`, `project_config`, `default_config`, `foreign` - so the
-/// machine-readable output still to come reports this fact under names that
-/// are already settled rather than inventing a second spelling. Renaming a
-/// variant is therefore a wire-format change, not a refactor.
+/// The variant names are the vocabulary, and their tags are fixed -
+/// `argument`, `project_config`, `default_config`, `newest_installed`,
+/// `latest_release`, `foreign` - so the machine-readable output still to come
+/// reports this fact under names that are already settled rather than
+/// inventing a second spelling. Renaming a variant is therefore a wire-format
+/// change, not a refactor.
+///
+/// The last two were added with the fallback cascade and are the reason this
+/// enum was left open: `main` resolves a version through four stages, and only
+/// the first two are this module's to answer. The cascade itself lives in
+/// `main` for the same reason - see the comment on `cascade` there.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Source {
     /// An explicit CLI argument: `jlo env 21`.
@@ -35,6 +39,16 @@ pub(crate) enum Source {
     ProjectConfig(PathBuf),
     /// `$JLO_HOME/default.jlorc`.
     DefaultConfig(PathBuf),
+    /// Nothing was configured, so the cascade fell back to the newest JDK
+    /// already installed. No comparison against Adoptium was made: this says
+    /// "the newest one here", not "the newest one there". Never produced by
+    /// [`find`] - this module does not know where JDKs live.
+    NewestInstalled,
+    /// Nothing was configured and nothing was installed, so the cascade fell
+    /// back to the latest release Adoptium offers. The only stage that
+    /// downloads, and the only one `--offline` refuses. Never produced by
+    /// [`find`] - this module does not touch the network.
+    LatestRelease,
     /// Not a resolution at all: `$JAVA_HOME` was set outside jlo, so no
     /// config had any say. Never produced by [`find`] - it is how a command
     /// that starts from the live `$JAVA_HOME` reports a JDK jlo does not
@@ -52,6 +66,8 @@ impl Source {
         match self {
             Self::Argument => "the command line".to_string(),
             Self::ProjectConfig(path) | Self::DefaultConfig(path) => path.display().to_string(),
+            Self::NewestInstalled => "the newest installed JDK".to_string(),
+            Self::LatestRelease => "the latest release".to_string(),
             Self::Foreign => "$JAVA_HOME".to_string(),
         }
     }
@@ -59,10 +75,9 @@ impl Source {
 
 /// The configured Java version, or `Ok(None)` when nothing is configured.
 ///
-/// `None` is an ordinary state rather than a failure, because `jlo current`
-/// asks this question of a shell that may well have a JDK active with no
-/// `.jlorc` anywhere. The commands for which absence *is* a failure call
-/// [`resolve`] instead.
+/// `None` is an ordinary state rather than a failure, because absence is where
+/// the cascade in `main` takes over: the newest installed JDK, then the latest
+/// release. This is stages 1 and 2 of that cascade and nothing more.
 pub(crate) fn find() -> anyhow::Result<Option<Resolved>> {
     let cwd = std::env::current_dir()
         .map_err(|e| anyhow!("could not determine the current directory: {e}"))?;
@@ -73,13 +88,16 @@ pub(crate) fn find() -> anyhow::Result<Option<Resolved>> {
     )
 }
 
-/// The configured Java version, or today's "run 'jlo init'" error.
-pub(crate) fn resolve() -> anyhow::Result<Resolved> {
-    find()?.ok_or_else(|| {
-        anyhow!(
-            "No '{JLO_CONFIG_FILE}' found in the current directory or its parents, and no default config file. Please run 'jlo init' to create a configuration file."
-        )
-    })
+/// The error reported when the whole cascade runs dry.
+///
+/// Reachable only with `--offline` now: without it the cascade ends in a
+/// download rather than a failure. The wording is unchanged from when this was
+/// the ordinary outcome of a missing config, because the remedy is the same
+/// one - write a config, and every stage before this becomes irrelevant.
+pub(crate) fn nothing_configured() -> anyhow::Error {
+    anyhow!(
+        "No '{JLO_CONFIG_FILE}' found in the current directory or its parents, and no default config file. Please run 'jlo init' to create a configuration file."
+    )
 }
 
 /// The walk, with every input passed in so it can be tested without mutating
