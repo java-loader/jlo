@@ -1,5 +1,37 @@
 # Changelog
 
+## [0.4.0](https://github.com/java-loader/jlo/compare/jlo-bin-v0.3.0...jlo-bin-v0.4.0) (2026-09-21)
+
+
+### ⚠ BREAKING CHANGES
+
+* **selfupdate:** `jlo selfupdate` no longer runs install.sh. Upgrading from 0.3.x still works through the old wrapper's curl path; restart the shell once afterwards, as README's new Upgrading section describes.
+* **shell:** the release tarball no longer contains jlo-init.sh or jlo-autoload.sh, and $JLO_HOME/bin/jlo-init.sh is replaced by jlo-init.{bash,zsh}. The three profile lines are unchanged.
+* **cli:** drop the 'version' transition shim
+
+### Features
+
+* **cli:** drop the 'version' transition shim ([39f4c8f](https://github.com/java-loader/jlo/commit/39f4c8fb4e5c4beec4cc34317faac7153c948a02))
+* **current:** add 'jlo current', which says what is active and why ([08159af](https://github.com/java-loader/jlo/commit/08159af688f74ef98901b17456cb2c31abcda950))
+* **env:** add 'jlo env --verbose', which says what it set and why ([5b1ad63](https://github.com/java-loader/jlo/commit/5b1ad638f80065409bcdbd979ad111a89e34311b))
+* **install:** generate profile entry files instead of a twelve-line paste ([2ed0998](https://github.com/java-loader/jlo/commit/2ed0998ed904e8b106e8ce43ee2b9542cdc82daa))
+* **selfupdate:** update J'Lo from the binary, not from curl | bash ([f582780](https://github.com/java-loader/jlo/commit/f582780a0b482274f4e5fb945089ea43780a5a47))
+* **shell:** generate the shell layout from the binary ([3220955](https://github.com/java-loader/jlo/commit/3220955c0dcbcecadcc1b5e4cf2f9a065c9b1729))
+
+
+### Bug Fixes
+
+* **adoptium:** require API path fields to be plain names ([61f2efd](https://github.com/java-loader/jlo/commit/61f2efd08e03ebd51e05a477440f4ca3311a30f1))
+* **env:** stop 'jlo env' crashing when the reader closes the pipe ([06f8ebd](https://github.com/java-loader/jlo/commit/06f8ebd9ca5acef175ce0c8a49a8dc946760e955))
+* **install:** keep published installs from loading the old wrapper forever ([ae091b1](https://github.com/java-loader/jlo/commit/ae091b194a1353665b432c9da22d56984625cfa2))
+* **install:** stop handing tar a path it reinterprets ([6e00601](https://github.com/java-loader/jlo/commit/6e006012fb872d7d3ba4a0e1ad83f40a84adfb3d))
+* **selfupdate:** report failure instead of reporting success ([bace452](https://github.com/java-loader/jlo/commit/bace45206289dd78bca4baf1175a393f3ae79ed8))
+
+
+### Performance Improvements
+
+* **completions:** autoload the zsh completion from $fpath ([4ba3963](https://github.com/java-loader/jlo/commit/4ba39634a95303573074ca2c532be62940378612))
+
 ## [0.3.0](https://github.com/java-loader/jlo/compare/jlo-bin-v0.2.0...jlo-bin-v0.3.0) (2026-09-21)
 
 
