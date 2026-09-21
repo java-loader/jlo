@@ -537,3 +537,84 @@ fn hook_reports_success_even_when_jlo_env_fails() {
     let stdout = run_bash(&body, &home, jlo_home.path(), neutral.path());
     assert_eq!(stdout.trim(), "status=0");
 }
+
+/// The fresh-shell branch runs while the profile is still being sourced. Since
+/// `jlo env` propagates the binary's status, an unsatisfiable `--offline`
+/// lookup there would abort a profile running under `set -e` - taking the rest
+/// of the user's shell setup with it.
+#[test]
+fn fresh_shell_survives_a_failing_jlo_env_under_set_e() {
+    let home = tempdir().unwrap();
+    let home = canon(home.path());
+    let project = home.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(project.join(".jlorc"), "99\n").unwrap();
+
+    let jlo_home = tempdir().unwrap();
+    let script = autoload_script();
+    let body = format!("set -eu\njlo() {{ return 1; }}\n. '{script}'\necho 'profile-continued'\n");
+
+    let out = Command::new(bash_bin())
+        .arg("-c")
+        .arg(&body)
+        .current_dir(&project)
+        .env("HOME", &home)
+        .env("JLO_HOME", jlo_home.path())
+        .env_remove("PROMPT_COMMAND")
+        .output()
+        .unwrap();
+
+    assert!(
+        out.status.success(),
+        "sourcing aborted the profile ({}): {}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap().trim(),
+        "profile-continued"
+    );
+}
+
+/// A profile may well run under `set -u`; the script must not abort it by
+/// touching `PROMPT_COMMAND`, `ZSH_VERSION`, `BASH_VERSION`, `JLO_HOME` or
+/// `_JLO_LAST_DIR` before they exist. Checked in every supported interpreter,
+/// including the POSIX `sh` some profiles are still sourced from.
+#[test]
+fn sources_and_runs_the_hook_under_set_u() {
+    let home = tempdir().unwrap();
+    let home = canon(home.path());
+    let neutral = home.join("neutral");
+    std::fs::create_dir_all(&neutral).unwrap();
+    let jlo_home = tempdir().unwrap();
+    let script = autoload_script();
+
+    for sh in ["/bin/bash", "zsh", "/bin/sh"] {
+        if Command::new(sh).arg("-c").arg("exit 0").output().is_err() {
+            eprintln!("SKIP sources_and_runs_the_hook_under_set_u: {sh} is not installed here.");
+            continue;
+        }
+        let body =
+            format!("set -u\njlo() {{ return 1; }}\n. '{script}'\njlo_after_cd\necho \"rc=$?\"\n");
+        let out = Command::new(sh)
+            .arg("-c")
+            .arg(&body)
+            .current_dir(&neutral)
+            .env("HOME", &home)
+            .env("JLO_HOME", jlo_home.path())
+            .env_remove("PROMPT_COMMAND")
+            .output()
+            .unwrap();
+
+        assert!(
+            out.status.success(),
+            "{sh} aborted under set -u: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            String::from_utf8(out.stdout).unwrap().trim(),
+            "rc=0",
+            "{sh}: the hook must not leak a failure into $?"
+        );
+    }
+}

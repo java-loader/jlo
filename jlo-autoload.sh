@@ -37,16 +37,16 @@ jlo_find_jlorc() {
 # runs between the user's command and their prompt, and a hook that reported
 # its own failure there would overwrite the status their prompt is showing.
 jlo_after_cd() {
-  [ "$PWD" = "$_JLO_LAST_DIR" ] && return 0
+  [ "$PWD" = "${_JLO_LAST_DIR-}" ] && return 0
   _JLO_LAST_DIR="$PWD"
   jlo_find_jlorc && jlo env --offline
   return 0
 }
 
-if [ -n "$ZSH_VERSION" ]; then
+if [ -n "${ZSH_VERSION-}" ]; then
   autoload -U add-zsh-hook
   add-zsh-hook chpwd jlo_after_cd
-elif [ -n "$BASH_VERSION" ]; then
+elif [ -n "${BASH_VERSION-}" ]; then
   # bash has no add-zsh-hook equivalent, so guard against stacking duplicates
   # when this file is sourced again (e.g. `source ~/.bashrc`).
   #
@@ -54,15 +54,24 @@ elif [ -n "$BASH_VERSION" ]; then
   # recognises an existing registration whether PROMPT_COMMAND is a scalar or
   # (bash 5.1+) an array. Matching the ";"-delimited token, not the bare name,
   # keeps `echo jlo_after_cd` from passing as the hook itself.
+  #
+  # The same loop counts the elements. "${#PROMPT_COMMAND[@]}" would be the
+  # obvious way, but it has no unset-default form and so aborts a profile
+  # running under `set -u`; the "-" in the expansion below makes the loop safe
+  # there, at the cost of yielding one empty word for an unset or empty
+  # PROMPT_COMMAND - which lands on the scalar branch, exactly where a count of
+  # 0 did.
   _jlo_registered=
+  _jlo_count=0
   for _jlo_cmd in "${PROMPT_COMMAND[@]-}"; do
+    _jlo_count=$((_jlo_count + 1))
     case ";$_jlo_cmd;" in
       *";jlo_after_cd;"*) _jlo_registered=1 ;;
     esac
   done
 
   if [ -z "$_jlo_registered" ]; then
-    if [ "${#PROMPT_COMMAND[@]}" -gt 1 ]; then
+    if [ "$_jlo_count" -gt 1 ]; then
       # bash 5.1+ runs each array element as its own command; splicing into
       # element 0 would glue our hook onto the user's first one. `eval` keeps
       # the array syntax out of reach of POSIX sh parsers reading this file.
@@ -73,12 +82,16 @@ elif [ -n "$BASH_VERSION" ]; then
       PROMPT_COMMAND="jlo_after_cd${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
     fi
   fi
-  unset _jlo_registered _jlo_cmd
+  unset _jlo_registered _jlo_count _jlo_cmd
 fi
 
 # Immediate call for fresh spawned shells. --offline for the same reason as in
 # the hook, and more sharply: a download here delays every new terminal.
-if jlo_find_jlorc || [ -f "$JLO_HOME/default.jlorc" ]; then
+if jlo_find_jlorc || [ -f "${JLO_HOME-}/default.jlorc" ]; then
   _JLO_LAST_DIR="$PWD"
-  jlo env --offline
+  # `|| :` for the same reason as the hook's `return 0`, one step earlier:
+  # this runs while the profile is still being sourced, and jlo env now
+  # propagates the binary's status, so an unsatisfiable --offline lookup
+  # would abort a profile running under `set -e`.
+  jlo env --offline || :
 fi

@@ -74,8 +74,9 @@ This allows automatic discovery of installed JDKs by IDEs like IntelliJ IDEA.
 9. [Using a JDK J'Lo Did Not Install](#using-a-jdk-jlo-did-not-install)
 10. [Managing J’Lo Itself](#managing-jlo-itself)
 11. [Getting Help](#getting-help)
-12. [Shell Completions](#shell-completions)
-13. [Environment Variables](#environment-variables)
+12. [Supported Shells](#supported-shells)
+13. [Shell Completions](#shell-completions)
+14. [Environment Variables](#environment-variables)
 
 ## Environment Setup
 
@@ -413,6 +414,28 @@ help; `--help` prints the long form (with more explanation on subcommands).
 
 `jlo --version` (or `jlo -V`) prints the installed version.
 
+## Supported Shells
+
+The shell integration (`jlo-init.sh`, `jlo-autoload.sh`) is written for **bash and zsh**, and is verified against
+every version in the table below:
+
+| Shell | Versions verified                                      | Notes                                                       |
+|-------|--------------------------------------------------------|-------------------------------------------------------------|
+| bash  | 3.2.57, 4.0, 4.1, 4.2, 4.3, 4.4, 5.0, 5.1, 5.2, 5.3    | 3.2.57 is what macOS ships as `/bin/bash`                   |
+| zsh   | 5.0.8, 5.3, 5.4.2, 5.8, 5.9                            | macOS's default login shell since Catalina                  |
+
+The installer (`install.sh`) and the autoload hook (`jlo-autoload.sh`) are POSIX `sh` clean and also parse and run
+under `dash`. `jlo-init.sh` uses `local`, so it needs bash, zsh or another shell that has it — but it parses
+everywhere, so a profile that sources it unconditionally will not fail with a syntax error.
+
+All three files are safe to source from a profile that runs under `set -e` or `set -u`.
+
+Fish is not supported — see the note under [Shell Completions](#shell-completions).
+
+> **If you are on macOS's `/bin/bash`, update J'Lo.** Earlier releases sourced the binary's output from a process
+> substitution, which bash 3.2 cannot read: `jlo env` set nothing and still exited 0, with no error. zsh and
+> bash 4.0+ were never affected. Run `jlo selfupdate` to pick up the fix.
+
 ## Shell Completions
 
 The installer generates completion scripts for **bash and zsh** and writes them to `$JLO_HOME/completions`, then
@@ -441,8 +464,11 @@ jlo completions fish > ~/.config/fish/completions/jlo.fish
 completions without a file:
 
 ```shell
-source <(jlo completions bash)
+eval "$(jlo completions bash)"
 ```
+
+> Use `eval "$(...)"`, not `source <(...)`: bash 3.2 — the `/bin/bash` macOS ships — cannot `source` a process
+> substitution. It reads nothing, sets up no completions, and still exits 0.
 
 ## Environment Variables
 
