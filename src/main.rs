@@ -138,7 +138,7 @@ fn run() -> Result<(), CommandError> {
     let client = AdoptiumClient::new(api_url);
 
     match command {
-        cli::Command::Env { version } => cmd_env(&client, version),
+        cli::Command::Env { version, offline } => cmd_env(&client, version, offline),
         cli::Command::Home { version, offline } => cmd_home(&client, version, offline),
         cli::Command::Exec { args } => cmd_exec(&client, &args),
         cli::Command::List { offline } => cmd_list(&client, offline),
@@ -185,9 +185,13 @@ fn resolve_java_version_from(explicit: Option<String>) -> anyhow::Result<String>
     Ok(java_version)
 }
 
-fn cmd_env(client: &AdoptiumClient, version: Option<String>) -> Result<(), CommandError> {
+fn cmd_env(
+    client: &AdoptiumClient,
+    version: Option<String>,
+    offline: bool,
+) -> Result<(), CommandError> {
     let java_version = resolve_java_version_from(version)?;
-    setup(client, &java_version)?;
+    setup(client, &java_version, offline)?;
 
     // The exports on stdout are the whole effect of this command. If stdout is
     // a terminal nothing captured them, so the exit code says success while
@@ -225,7 +229,7 @@ fn cmd_home(
     let java_version = resolve_java_version_from(version)?;
     let store = JdkStore::discover()?;
     let java_home = if offline {
-        offline_java_home(&store, &java_version)?
+        offline_java_home(&store, &java_version, "home")?
     } else {
         resolve_java_home(client, &store, &java_version)?
     };
@@ -233,19 +237,26 @@ fn cmd_home(
     Ok(())
 }
 
-/// `jlo home --offline`: answer from the store alone.
+/// `--offline`: answer from the store alone.
 ///
 /// The point of the flag is that asking the question cannot trigger the
-/// several-hundred-megabyte answer - a CI step with a short timeout, or a
-/// network-isolated sandbox, needs a probe that fails fast rather than one
-/// that hangs on a connection attempt. The exit status is the answer, so
-/// there is no distinct code for "not installed": 1, like every other
-/// failure here.
-fn offline_java_home(store: &JdkStore, java_version: &str) -> Result<PathBuf, CommandError> {
+/// several-hundred-megabyte answer - a CI step with a short timeout, a
+/// network-isolated sandbox, or the autoload hook on a `cd`, needs a probe
+/// that fails fast rather than one that hangs on a connection attempt. The
+/// exit status is the answer, so there is no distinct code for "not
+/// installed": 1, like every other failure here.
+///
+/// `command` is the subcommand to name in the advice line, so `env` does not
+/// send the reader to `home` (and vice versa).
+fn offline_java_home(
+    store: &JdkStore,
+    java_version: &str,
+    command: &str,
+) -> Result<PathBuf, CommandError> {
     store.find_matching(java_version).ok_or_else(|| {
         CommandError::with_hint(
             anyhow!("no installed JDK matches Java {java_version}"),
-            format!("Run 'jlo home {java_version}' without --offline to install it."),
+            format!("Run 'jlo {command} {java_version}' without --offline to install it."),
         )
     })
 }
@@ -691,9 +702,19 @@ fn resolve_java_home(
 /// status line here would print on every new shell and every `cd`. Exporting a
 /// variable lasts only as long as the shell and is implied by the command the
 /// user ran - it is the install (a JDK on disk) that earns a line, not this.
-fn setup(client: &AdoptiumClient, java_version: &str) -> anyhow::Result<()> {
+///
+/// `offline` is the whole of the "a `cd` must not start a download" rule, and
+/// it lives here rather than in `jlo-autoload.sh` so it is decided once, in
+/// Rust, instead of once per shell dialect. When it declines, it declines
+/// before anything reaches stdout: the hook sources that stream, so a partial
+/// export would be worse than no export at all.
+fn setup(client: &AdoptiumClient, java_version: &str, offline: bool) -> Result<(), CommandError> {
     let store = JdkStore::discover()?;
-    let java_home = resolve_java_home(client, &store, java_version)?;
+    let java_home = if offline {
+        offline_java_home(&store, java_version, "env")?
+    } else {
+        resolve_java_home(client, &store, java_version)?
+    };
 
     let current_java_home = env::var("JAVA_HOME").unwrap_or_default();
     if current_java_home != java_home.to_string_lossy() {
@@ -838,13 +859,43 @@ mod tests {
 
     #[test]
     fn cmd_env_rejects_an_unsupported_version() {
-        let err = cmd_env(&offline_client(), Some("nope".to_string()))
+        let err = cmd_env(&offline_client(), Some("nope".to_string()), false)
             .expect_err("'nope' is not a major version");
         assert_eq!(
             format!("{:#}", err.error),
             "unsupported version 'nope': only major versions 8, 11, ... are supported"
         );
         assert!(err.hint.is_none(), "{:?}", err.hint);
+    }
+
+    /// The argument check has to come before the store lookup, so `--offline`
+    /// reports the same thing the online form does rather than "no installed
+    /// JDK matches Java nope".
+    #[test]
+    fn cmd_env_offline_rejects_an_unsupported_version() {
+        let err = cmd_env(&offline_client(), Some("nope".to_string()), true)
+            .expect_err("'nope' is not a major version");
+        assert_eq!(
+            format!("{:#}", err.error),
+            "unsupported version 'nope': only major versions 8, 11, ... are supported"
+        );
+        assert!(err.hint.is_none(), "{:?}", err.hint);
+    }
+
+    /// `env` must not send the reader to `home`: the advice line names the
+    /// command they actually ran.
+    #[test]
+    fn offline_java_home_names_the_calling_command_in_its_hint() {
+        let store = JdkStore::at(tempdir().unwrap().path());
+        let err = offline_java_home(&store, "99", "env").expect_err("the store is empty");
+        assert_eq!(
+            format!("{:#}", err.error),
+            "no installed JDK matches Java 99"
+        );
+        assert_eq!(
+            err.hint.as_deref(),
+            Some("Run 'jlo env 99' without --offline to install it.")
+        );
     }
 
     #[test]
@@ -895,7 +946,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let store = store_with(dir.path(), "21.0.3+9");
 
-        let path = offline_java_home(&store, "21").expect("21 is installed");
+        let path = offline_java_home(&store, "21", "home").expect("21 is installed");
         assert_eq!(path, dir.path().join("21.0.3+9"));
     }
 
@@ -907,7 +958,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let store = store_with(dir.path(), "21.0.3+9");
 
-        let err = offline_java_home(&store, "17").expect_err("17 is not installed");
+        let err = offline_java_home(&store, "17", "home").expect_err("17 is not installed");
         assert_eq!(
             format!("{:#}", err.error),
             "no installed JDK matches Java 17"

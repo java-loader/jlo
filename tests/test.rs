@@ -113,6 +113,26 @@ fn home_offline_fails_without_touching_the_network() {
         .stderr(predicate::str::contains("without --offline"));
 }
 
+/// The autoload hook's contract, checked at the binary rather than through a
+/// shell: entering a directory whose .jlorc pins an uninstalled version must
+/// cost nothing. Empty stdout is the load-bearing half - the hook *sources*
+/// this stream, so a decline that emitted a partial export would leave the
+/// shell worse off than one that emitted none.
+#[test]
+fn env_offline_fails_without_touching_the_network() {
+    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
+    cmd.args(["env", "--offline", "99"])
+        .env("JLO_ADOPTIUM_API_URL", "http://127.0.0.1:1")
+        .assert()
+        .failure()
+        .code(1)
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("no installed JDK matches Java 99"))
+        .stderr(predicate::str::contains(
+            "Run 'jlo env 99' without --offline to install it.",
+        ));
+}
+
 #[test]
 fn remove_refuses_a_version_that_is_not_installed() {
     // Major 99 is not a real release, so this exercises the refusal without

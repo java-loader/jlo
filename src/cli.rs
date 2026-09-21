@@ -114,6 +114,10 @@ Prints export statements on stdout; the jlo shell function sources
 them. Running the binary directly does not change your shell.
 
 The JDK is downloaded from Adoptium on demand if it is not installed.
+Pass --offline to use only what is already installed: the exports if
+the JDK is there, exit status 1 and no exports if it is not, and no
+network access either way. That is how the autoload hook calls it, so
+entering a directory never starts a download.
 
 When VERSION is omitted, it resolves from the nearest .jlorc at or
 above the current directory, then ~/.jlo/default.jlorc. Only major
@@ -122,6 +126,10 @@ versions are accepted: 21, not 21.0.5."
     Env {
         /// Java major version. Default: from .jlorc
         version: Option<String>,
+
+        /// Only look at installed JDKs; never download, never touch the network
+        #[arg(long)]
+        offline: bool,
     },
 
     #[command(

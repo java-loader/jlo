@@ -386,6 +386,10 @@ fn find_reports_none_when_absent() {
 
 /// The behaviour that matters: `cd` into a subdirectory of a project must set
 /// the env, not leave it to the user default. A stub `jlo` records the call.
+///
+/// `--offline` is part of the assertion, not incidental: without it a `cd`
+/// into a project pinning an uninstalled JDK stalls the shell on a
+/// several-hundred-megabyte download.
 #[test]
 fn hook_runs_jlo_env_from_a_project_subdirectory() {
     let home = tempdir().unwrap();
@@ -418,5 +422,118 @@ fn hook_runs_jlo_env_from_a_project_subdirectory() {
         out.status,
         String::from_utf8_lossy(&out.stderr)
     );
-    assert_eq!(String::from_utf8(out.stdout).unwrap().trim(), "jlo env");
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap().trim(),
+        "jlo env --offline"
+    );
+}
+
+/// Run `body` under bash with `HOME`, `JLO_HOME` and the working directory
+/// pinned to the given temp trees, and hand back stdout. The stub `jlo`
+/// defined by the callers below records what the script asked for.
+fn run_bash(body: &str, home: &Path, jlo_home: &Path, cwd: &Path) -> String {
+    let out = Command::new(bash_bin())
+        .arg("-c")
+        .arg(body)
+        .current_dir(cwd)
+        .env("HOME", home)
+        .env("JLO_HOME", jlo_home)
+        .env_remove("PROMPT_COMMAND")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run {}: {e}", bash_bin()));
+
+    assert!(
+        out.status.success(),
+        "bash failed ({}): {}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout).unwrap()
+}
+
+/// The fresh-shell branch at the tail of the script. A new terminal is the
+/// worst possible place to start a download, so it too must ask offline.
+#[test]
+fn fresh_shell_applies_the_user_default_offline() {
+    let home = tempdir().unwrap();
+    let home = canon(home.path());
+    let neutral = home.join("neutral");
+    std::fs::create_dir_all(&neutral).unwrap();
+
+    let jlo_home = tempdir().unwrap();
+    std::fs::write(jlo_home.path().join("default.jlorc"), "21\n").unwrap();
+
+    let script = autoload_script();
+    let body = format!("set -e\njlo() {{ echo \"jlo $*\"; }}\n. '{script}'\n");
+
+    let stdout = run_bash(&body, &home, jlo_home.path(), &neutral);
+    assert_eq!(stdout.trim(), "jlo env --offline");
+}
+
+/// With neither a `.jlorc` above the cwd nor a `default.jlorc`, the fresh-shell
+/// branch must not run the binary at all - there is nothing for it to resolve.
+#[test]
+fn fresh_shell_stays_quiet_without_any_config() {
+    let home = tempdir().unwrap();
+    let home = canon(home.path());
+    let neutral = home.join("neutral");
+    std::fs::create_dir_all(&neutral).unwrap();
+    let jlo_home = tempdir().unwrap();
+
+    let script = autoload_script();
+    let body = format!("set -e\njlo() {{ echo \"jlo $*\"; }}\n. '{script}'\n");
+
+    let stdout = run_bash(&body, &home, jlo_home.path(), &neutral);
+    assert_eq!(stdout.trim(), "");
+}
+
+/// bash runs the hook from `PROMPT_COMMAND`, i.e. before every prompt, but the
+/// body is guarded on `$PWD` changing. Three prompts in one directory are one
+/// call - which is what keeps the "not installed" line from repeating under
+/// every command the user runs there.
+#[test]
+fn hook_runs_once_per_directory_not_once_per_prompt() {
+    let home = tempdir().unwrap();
+    let home = canon(home.path());
+    let project = home.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(project.join(".jlorc"), "21\n").unwrap();
+
+    let neutral = tempdir().unwrap();
+    let jlo_home = tempdir().unwrap();
+    let script = autoload_script();
+    let body = format!(
+        "set -e\njlo() {{ echo \"jlo $*\"; }}\n. '{script}'\ncd '{}'\n\
+         jlo_after_cd\njlo_after_cd\njlo_after_cd\n",
+        project.display()
+    );
+
+    let stdout = run_bash(&body, &home, jlo_home.path(), neutral.path());
+    assert_eq!(stdout.trim(), "jlo env --offline");
+}
+
+/// The hook runs between the user's command and their prompt. A version the
+/// store cannot satisfy makes `jlo env --offline` exit non-zero, and that must
+/// not become the status their prompt reports.
+#[test]
+fn hook_reports_success_even_when_jlo_env_fails() {
+    let home = tempdir().unwrap();
+    let home = canon(home.path());
+    let project = home.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(project.join(".jlorc"), "99\n").unwrap();
+
+    let neutral = tempdir().unwrap();
+    let jlo_home = tempdir().unwrap();
+    let script = autoload_script();
+    let body = format!(
+        // `set -e` is deliberately absent: the point is the status, and the
+        // stub fails on purpose.
+        "jlo() {{ return 1; }}\n. '{script}'\ncd '{}'\n\
+         jlo_after_cd\necho \"status=$?\"\n",
+        project.display()
+    );
+
+    let stdout = run_bash(&body, &home, jlo_home.path(), neutral.path());
+    assert_eq!(stdout.trim(), "status=0");
 }

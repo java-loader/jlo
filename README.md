@@ -51,7 +51,9 @@ jlo env
 
 > [!TIP]
 > If you enabled the J'Lo autoload feature during installation, J'Lo will automatically set up the Java environment
-> whenever you `cd` into a project with a `.jlorc` file — including its subdirectories.
+> whenever you `cd` into a project with a `.jlorc` file — including its subdirectories. It never downloads anything:
+> entering a project that pins a JDK you do not have prints one line telling you so, and leaves the environment alone.
+> Run `jlo env` yourself to install it.
 
 JDKs are installed to `~/Library/Java/JavaVirtualMachines/` on macOS and `~/.jdks/` on Linux and Windows —
 the same locations IntelliJ IDEA uses, so both tools see the same JDKs.
@@ -88,6 +90,9 @@ to point to the desired JDK installation.
   is never picked up.
 - If no `.jlorc` is found, it falls back to `~/.jlo/default.jlorc`.
 - If the requested Java version is not installed, it will be downloaded and installed automatically.
+- `--offline` uses only what is already installed: it sets the environment if the version is there, and otherwise
+  prints one line to standard error and exits with status 1, leaving the environment untouched. This is how the
+  autoload hook calls it, so entering a project never starts a download — see the note below.
 - This command affects only the current shell session.
 - VERSION is a major version only, e.g. `25`, not `25.0.5`. This applies everywhere a command takes a VERSION
   argument.
@@ -99,6 +104,9 @@ jlo env
 
 # set environment for Java 25
 jlo env 25
+
+# set it only if the JDK is already here; never download
+jlo env --offline
 ````
 
 ## Resolving JAVA_HOME

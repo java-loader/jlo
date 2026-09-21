@@ -24,10 +24,23 @@ jlo_find_jlorc() {
   return 1
 }
 
+# The guard is what keeps this to one run per directory rather than one per
+# prompt: bash drives it from PROMPT_COMMAND, which fires before every prompt.
+#
+# --offline is the whole of "a cd must never start a download". jlo env would
+# otherwise install on demand, so stepping into a project pinning a JDK you do
+# not have would stall the shell on ~100MB. The binary decides that, not this
+# file, so the rule cannot drift between the zsh and bash paths; when it
+# declines it prints one line to stderr and leaves the environment alone.
+#
+# The explicit `return 0` keeps a declined lookup out of `$?`: PROMPT_COMMAND
+# runs between the user's command and their prompt, and a hook that reported
+# its own failure there would overwrite the status their prompt is showing.
 jlo_after_cd() {
-  [ "$PWD" = "$_JLO_LAST_DIR" ] && return
+  [ "$PWD" = "$_JLO_LAST_DIR" ] && return 0
   _JLO_LAST_DIR="$PWD"
-  jlo_find_jlorc && jlo env
+  jlo_find_jlorc && jlo env --offline
+  return 0
 }
 
 if [ -n "$ZSH_VERSION" ]; then
@@ -63,8 +76,9 @@ elif [ -n "$BASH_VERSION" ]; then
   unset _jlo_registered _jlo_cmd
 fi
 
-# Immediate call for fresh spawned shells
+# Immediate call for fresh spawned shells. --offline for the same reason as in
+# the hook, and more sharply: a download here delays every new terminal.
 if jlo_find_jlorc || [ -f "$JLO_HOME/default.jlorc" ]; then
   _JLO_LAST_DIR="$PWD"
-  jlo env
+  jlo env --offline
 fi
