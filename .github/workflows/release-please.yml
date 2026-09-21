@@ -48,6 +48,10 @@ jobs:
 
   build:
     needs: resolve
+    # An explicit result check, because a skipped job propagates down the whole
+    # needs chain: on a manual dispatch release-please is skipped, and without
+    # this build would be skipped too even though resolve succeeded.
+    if: ${{ always() && needs.resolve.result == 'success' }}
     strategy:
       matrix:
         include:
@@ -93,6 +97,7 @@ jobs:
 
   upload:
     needs: [resolve, build]
+    if: ${{ always() && needs.resolve.result == 'success' && needs.build.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - name: Download all artifacts
