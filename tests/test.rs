@@ -1274,3 +1274,51 @@ fn completions_do_not_hit_the_network() {
         .assert()
         .success();
 }
+
+/// `jlo env` writes the environment to stdout, and a user may pipe it - to
+/// `head`, to `grep`, to anything that stops reading early. `println!` panics
+/// on a closed pipe, which would turn an ordinary pipeline into a crash and a
+/// stack-trace-shaped diagnostic. `jlo list` has always handled this; `env`
+/// writes to the same channel and must behave the same way.
+#[test]
+#[serial]
+fn env_survives_a_reader_that_stops_early() {
+    let home = tempfile::tempdir().unwrap();
+    // Mirrors base_dir_for(): the store is derived from $HOME, so a throwaway
+    // home is enough to stand a JDK up without installing one.
+    let store = if cfg!(target_os = "macos") {
+        home.path().join("Library/Java/JavaVirtualMachines")
+    } else {
+        home.path().join(".jdks")
+    };
+    std::fs::create_dir_all(store.join("21.0.5+11/bin")).unwrap();
+
+    let bin = assert_cmd::cargo::cargo_bin("jlo-bin");
+    let out = std::process::Command::new("/bin/bash")
+        .arg("-c")
+        .arg(format!(
+            "set -o pipefail; {} env --offline 21 | true",
+            shell_escape(&bin.display().to_string())
+        ))
+        .env("HOME", home.path())
+        .env("JLO_ADOPTIUM_API_URL", "http://127.0.0.1:1")
+        .output()
+        .unwrap();
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("Broken pipe") && !stderr.contains("panicked"),
+        "jlo env crashed on a closed pipe: {stderr}"
+    );
+    assert!(
+        out.status.success(),
+        "jlo env failed on a closed pipe: status={:?} stderr={stderr}",
+        out.status.code()
+    );
+}
+
+/// POSIX single-quoting, so a cargo target directory with an odd character in
+/// it cannot break the `-c` string above.
+fn shell_escape(value: &str) -> String {
+    format!("'{}'", value.replace('\'', r"'\''"))
+}

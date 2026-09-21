@@ -734,19 +734,27 @@ fn setup(client: &AdoptiumClient, java_version: &str, offline: bool) -> Result<(
         resolve_java_home(client, &store, java_version)?
     };
 
+    // Collected rather than printed as they are decided: both lines are one
+    // environment, and `print_lines` is also the only writer here that treats
+    // a closed pipe as an ending rather than panicking - `jlo env | head` is
+    // an ordinary thing to type.
+    let mut exports = Vec::new();
+
     let current_java_home = env::var("JAVA_HOME").unwrap_or_default();
     if current_java_home != java_home.to_string_lossy() {
-        println!(
+        exports.push(format!(
             "export JAVA_HOME={}",
             shell_quote(&java_home.to_string_lossy())
-        );
+        ));
     }
 
     let java_bin_path = java_home.join("bin").to_string_lossy().into_owned();
     let current_path = env::var("PATH").unwrap_or_default();
     if let Some(updated_path) = update_path(&java_bin_path, &current_path, store.base())? {
-        println!("export PATH={}", shell_quote(&updated_path));
+        exports.push(format!("export PATH={}", shell_quote(&updated_path)));
     }
+
+    ui::print_lines(exports);
 
     Ok(())
 }

@@ -400,7 +400,7 @@ pub(crate) fn foreign_java_home(path: &Path) {
 
 /// `println!` panics when the reader goes away, and this output is meant to be
 /// piped (`jlo list | head`), so treat a closed pipe as a normal end of output.
-fn print_lines(lines: impl IntoIterator<Item = String>) {
+pub(crate) fn print_lines(lines: impl IntoIterator<Item = String>) {
     use std::io::Write;
 
     let stdout = std::io::stdout();
