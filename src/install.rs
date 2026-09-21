@@ -163,7 +163,13 @@ pub(crate) struct Lock {
     /// Never read: the lock lives on the open file description, so holding
     /// this alive *is* the whole behaviour. Underscore-prefixed so that stays
     /// legible rather than looking like an oversight.
-    _file: fs::File,
+    ///
+    /// `None` for the lock inherited across `selfupdate`'s `exec`: the fd is
+    /// open in this process, but no `File` here owns it.
+    _file: Option<fs::File>,
+    /// Unlinked on drop. The lock file is the one thing under `$JLO_HOME`
+    /// with no purpose once the run that took it is over.
+    path: PathBuf,
 }
 
 #[cfg(unix)]
@@ -171,30 +177,70 @@ impl Lock {
     /// `None` when somebody else holds it. Fails only when the lock file
     /// itself cannot be opened or locked.
     pub(crate) fn try_acquire(home: &Path) -> Result<Option<Self>> {
+        use std::os::unix::fs::MetadataExt as _;
+
         fs::create_dir_all(home).with_context(|| format!("could not create {home:?}"))?;
         let path = home.join(LOCK_FILE);
-        let file = fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(false)
-            .open(&path)
-            .with_context(|| format!("could not open the update lock {path:?}"))?;
 
-        // The lock lives on the open file description, not on the fd number,
-        // so it survives `exec` - but only if the fd does. std opens every
-        // file `O_CLOEXEC`, which would drop the lock at exactly the moment
-        // `selfupdate` is half-published: the new binary in place, its scripts
-        // and receipt not yet written. Silently, with no error to report.
-        rustix::io::fcntl_setfd(&file, rustix::io::FdFlags::empty())
-            .with_context(|| format!("could not keep {path:?} open across exec"))?;
+        // Bounded retry rather than a single attempt, because [`Drop`] below
+        // unlinks the file: a miss is a holder that finished between our
+        // `open` and our `flock`, and the next pass opens whatever is at the
+        // path now - or creates it. Three is a count, not a timeout; nothing
+        // here waits on anything.
+        for _ in 0..3 {
+            let file = fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(false)
+                .open(&path)
+                .with_context(|| format!("could not open the update lock {path:?}"))?;
 
-        match rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
-            Ok(()) => Ok(Some(Self { _file: file })),
-            // Non-blocking on purpose: an unbounded wait on a lock nobody can
-            // see is worse than a message, and the self-heal below has
-            // somewhere better to go than waiting.
-            Err(rustix::io::Errno::WOULDBLOCK) => Ok(None),
-            Err(e) => Err(anyhow!("could not lock {path:?}: {e}")),
+            // The lock lives on the open file description, not on the fd
+            // number, so it survives `exec` - but only if the fd does. std
+            // opens every file `O_CLOEXEC`, which would drop the lock at
+            // exactly the moment `selfupdate` is half-published: the new
+            // binary in place, its scripts and receipt not yet written.
+            // Silently, with no error to report.
+            rustix::io::fcntl_setfd(&file, rustix::io::FdFlags::empty())
+                .with_context(|| format!("could not keep {path:?} open across exec"))?;
+
+            match rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
+                Ok(()) => {}
+                // Non-blocking on purpose: an unbounded wait on a lock nobody
+                // can see is worse than a message, and the self-heal below has
+                // somewhere better to go than waiting.
+                Err(rustix::io::Errno::WOULDBLOCK) => return Ok(None),
+                Err(e) => return Err(anyhow!("could not lock {path:?}: {e}")),
+            }
+
+            // We hold a lock on an inode the previous holder already unlinked.
+            // It guards nothing - the next process creates a fresh file at the
+            // path and locks that instead, and the two publish side by side.
+            // `nlink == 0` is precisely that state, and the answer is to open
+            // the path again.
+            if file.metadata().is_ok_and(|m| m.nlink() == 0) {
+                continue;
+            }
+
+            return Ok(Some(Self {
+                _file: Some(file),
+                path,
+            }));
+        }
+        Ok(None)
+    }
+
+    /// The lock this process inherited across `selfupdate`'s `exec`.
+    ///
+    /// The fd, and the `flock` on it, came across with the process image, so
+    /// there is nothing to take here - and taking it again from a second open
+    /// file description would deadlock us against ourselves. Dropping this
+    /// still removes the file, which is what makes the `exec`ed half of an
+    /// update tidy up after the half that could not.
+    pub(crate) fn inherited(home: &Path) -> Self {
+        Self {
+            _file: None,
+            path: home.join(LOCK_FILE),
         }
     }
 
@@ -207,6 +253,21 @@ impl Lock {
                 home.join(LOCK_FILE)
             )
         })
+    }
+}
+
+/// Unlink the lock file at the end of the run.
+///
+/// Safe only because it happens *while the lock is still held*: a struct's
+/// fields are dropped after its `Drop::drop` body, so `_file` - and the
+/// `flock` on it - outlives this line. A process that opened the file before
+/// the unlink and locked it after sees `nlink == 0` in [`Lock::try_acquire`]
+/// and opens the path again, so it can never end up guarding an inode that
+/// nobody else will ever reach.
+#[cfg(unix)]
+impl Drop for Lock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
     }
 }
 
@@ -224,6 +285,10 @@ impl Lock {
         Err(anyhow!(
             "J'Lo cannot lock its install directory on this platform."
         ))
+    }
+
+    pub(crate) fn inherited(_home: &Path) -> Self {
+        Self
     }
 }
 
@@ -256,9 +321,9 @@ pub(crate) fn cmd_install(args: &[String]) -> Result<()> {
     // fd came across the exec with it. Taking it again from a second open file
     // description would deadlock against ourselves, so the caller says so.
     let _lock = if locked {
-        None
+        Lock::inherited(layout.home())
     } else {
-        Some(Lock::acquire(layout.home())?)
+        Lock::acquire(layout.home())?
     };
     // Read before writing: the three re-install cases below turn on whether a
     // receipt was already there, and the new one is about to replace it.
@@ -330,6 +395,19 @@ fn write_layout(layout: &Layout) -> Result<()> {
     ] {
         write_atomic(&layout.bin.join(name), body.as_bytes())?;
     }
+
+    // The two compatibility shims, at the exact paths every *released*
+    // install.sh (0.2.0 and 0.3.0) pasted into the user's profile. Fatal for
+    // the same reason the dialect files above are: for anyone still carrying
+    // that block these are the only load points there are.
+    write_atomic(
+        &layout.bin.join("jlo-init.sh"),
+        compat_init_sh(layout).as_bytes(),
+    )?;
+    write_atomic(
+        &layout.bin.join("jlo-autoload.sh"),
+        compat_autoload_sh(layout).as_bytes(),
+    )?;
 
     write_completions(layout);
 
@@ -403,11 +481,37 @@ fn write_completions(layout: &Layout) {
 // ---------------------------------------------------------------------------
 
 fn jlo_sh(layout: &Layout) -> String {
-    format!(
-        "{GENERATED_HEADER}\
+    init_stub(
+        layout,
+        "\
 # Source this from your shell profile. The line never changes: an upgrade
 # regenerates the files it points at.
-export JLO_HOME={home}
+",
+    )
+}
+
+/// `bin/jlo-init.sh` - the path every published `install.sh` told users to
+/// source, and therefore the only load point in every profile in the wild.
+///
+/// 0.2.0 and 0.3.0 are the only releases there have ever been, and both print
+/// the same three-line block. The generated entry files landed after 0.3.0 was
+/// tagged, so *no* released version knows `jlo.sh` exists. Writing the dialect
+/// files beside this one and leaving it at its 0.3.0 contents would leave
+/// every existing user loading the old wrapper permanently - including its
+/// `curl | bash` selfupdate, which never reaches the Rust command - with
+/// nothing about it looking broken.
+///
+/// So it is generated too, with the same body as `jlo.sh`: the same dialect
+/// test, the same baked `JLO_HOME`. The baked path is the truth here rather
+/// than the `export` the old block puts above this line, because that export
+/// says `$HOME/.jlo` whatever directory the files actually went to.
+fn compat_init_sh(layout: &Layout) -> String {
+    init_stub(layout, &compat_note("jlo.sh", layout))
+}
+
+fn init_stub(layout: &Layout, note: &str) -> String {
+    format!(
+        "{GENERATED_HEADER}{note}export JLO_HOME={home}
 {DIALECT_DISPATCH}\
 if [ -n \"$_jlo_d\" ] && [ -s \"$JLO_HOME/bin/jlo-init.$_jlo_d\" ]; then
   . \"$JLO_HOME/bin/jlo-init.$_jlo_d\"
@@ -416,6 +520,51 @@ unset _jlo_d
 ",
         home = sq(&display(&layout.home))
     )
+}
+
+/// The comment the two shims carry: what they are, why they exist, and when
+/// they go away. `replaced_by` is the entry file the modern one-line form
+/// loads instead, spelled out so the file answers "and what do I do about it"
+/// without the user leaving it.
+fn compat_note(replaced_by: &str, layout: &Layout) -> String {
+    let line = commented(
+        &source_line(&sq(&display(&layout.home.join(replaced_by)))),
+        "    ",
+    );
+    format!(
+        "\
+# Compatibility shim - not part of the layout, and removed in v1.0.0.
+#
+# J'Lo 0.2.0 and 0.3.0 (every release there has been) print a profile block
+# that sources this path directly. Nothing in those profiles knows about the
+# entry files, so without this shim an upgrade leaves them loading the old
+# wrapper forever, including its 'curl | bash' selfupdate - and nothing about
+# it looks broken.
+#
+# The one line that replaces the old block, and outlives this file:
+#
+{line}#
+"
+    )
+}
+
+/// Comment out `body`, one `#` per **physical** line.
+///
+/// The paths in these files come from the user's `JLO_HOME`, and a directory
+/// name may contain a newline. A single leading `#` would then end at the
+/// first one and leave the rest of the path standing as shell code with an
+/// unmatched quote - a file that does not parse, sourced from a profile. The
+/// rest of the layout is safe by construction because a path only ever appears
+/// inside single quotes there; a comment is the one place that is not true.
+fn commented(body: &str, indent: &str) -> String {
+    let mut out = String::new();
+    for line in body.lines() {
+        out.push('#');
+        out.push_str(indent);
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
 }
 
 fn autoload_sh(layout: &Layout) -> String {
@@ -428,9 +577,24 @@ fn autoload_sh(layout: &Layout) -> String {
     // inert, not a stream of errors on every cd. `typeset -f` needs no
     // subshell, and under a shell that lacks it the guard fails closed - which
     // is the right answer there anyway.
-    format!(
-        "{GENERATED_HEADER}\
+    autoload_stub(
+        layout,
+        "\
 # Optional: switches JDK on cd when a .jlorc is in scope. Source after jlo.sh.
+",
+    )
+}
+
+/// `bin/jlo-autoload.sh` - the second path the old profile block sources. Same
+/// reasoning as [`compat_init_sh`]; the old block sources it unconditionally,
+/// so re-pointing it preserves exactly the hook those users already had.
+fn compat_autoload_sh(layout: &Layout) -> String {
+    autoload_stub(layout, &compat_note("autoload.sh", layout))
+}
+
+fn autoload_stub(layout: &Layout, note: &str) -> String {
+    format!(
+        "{GENERATED_HEADER}{note}\
 {DIALECT_DISPATCH}\
 if [ -n \"$_jlo_d\" ]; then
   _jlo_f={prefix}\"$_jlo_d\"
@@ -677,14 +841,41 @@ pub(crate) fn same_path(a: &Path, b: &Path) -> bool {
 fn report(layout: &Layout, had_receipt: bool, symlink: Option<&Path>) {
     let home_dir = std::env::home_dir();
     let profile = home_dir.as_deref().map(login_shell_profile);
-    let activated = profile.as_deref().is_some_and(profile_sources_jlo);
+    // Read once: the profile answers two questions now, and reading it twice
+    // could answer them from two different versions of the file.
+    let body = profile
+        .as_deref()
+        .and_then(|p| fs::read_to_string(p).ok())
+        .unwrap_or_default();
+    let activated = sources_actively(&body, "jlo.sh");
+    let legacy = home_dir
+        .as_deref()
+        .zip(profile.as_deref())
+        .and_then(|(home, login)| find_legacy_block(home, login));
 
     ui::created!(
         "J'Lo {VERSION} installed to {}.",
         tilde(&layout.home, home_dir.as_deref())
     );
 
-    if had_receipt && activated {
+    // The old block is worth naming wherever it is - it is the one thing a
+    // v1.0.0 upgrade will break - so the notice is printed on its own terms,
+    // before the activation cases below and independent of the receipt.
+    if let Some((found_in, block)) = &legacy {
+        legacy_notice(layout, found_in, home_dir.as_deref(), *block);
+    }
+
+    // What the notice must *not* do is take the place of the activation
+    // instructions. It only does that when the block is in the very file the
+    // login shell reads, because only then is J'Lo actually loaded. A stale
+    // block in a file this shell never opens would otherwise send someone
+    // away with no working install and an edit to make in the wrong file -
+    // the one failure mode this whole check exists to avoid.
+    let loaded_by_the_login_shell = legacy
+        .as_ref()
+        .is_some_and(|(found_in, _)| profile.as_deref() == Some(found_in.as_path()));
+
+    if loaded_by_the_login_shell || (had_receipt && activated) {
         path_nudge(symlink);
         return;
     }
@@ -781,19 +972,114 @@ fn login_shell_profile(home: &Path) -> PathBuf {
 /// the instructions to someone who did not need them, and the same is true of
 /// the other way this can be wrong, a line that lives in `~/.zprofile` or in a
 /// file sourced from the candidate. Both cost one duplicated line.
-fn profile_sources_jlo(profile: &Path) -> bool {
-    fs::read_to_string(profile).is_ok_and(|body| {
-        body.lines().any(|line| {
-            let code = match line
-                .char_indices()
-                .find(|&(i, c)| c == '#' && (i == 0 || line[..i].ends_with(char::is_whitespace)))
-            {
-                Some((i, _)) => &line[..i],
-                None => line,
-            };
-            code.contains("jlo.sh")
-        })
+fn sources_actively(body: &str, needle: &str) -> bool {
+    body.lines().any(|line| {
+        let code = match line
+            .char_indices()
+            .find(|&(i, c)| c == '#' && (i == 0 || line[..i].ends_with(char::is_whitespace)))
+        {
+            Some((i, _)) => &line[..i],
+            None => line,
+        };
+        code.contains(needle)
     })
+}
+
+/// Which parts of the pre-0.4.0 profile block this profile still carries.
+///
+/// The shims make that block keep working, so this is not a failure to
+/// report. It is the one moment J'Lo gets to name the form that replaces it,
+/// while the shims are still there to make either one work.
+///
+/// Each line is tracked separately because the old block was three opt-ins,
+/// and the replacement has to offer back exactly what the user had: the
+/// autoload line only to someone who sources the hook, the completions line
+/// only to someone on 0.3.0, whose block had one (0.2.0's did not).
+#[derive(Debug, Clone, Copy)]
+struct LegacyBlock {
+    init: bool,
+    autoload: bool,
+    completions: bool,
+}
+
+impl LegacyBlock {
+    fn found_in(body: &str) -> Self {
+        Self {
+            init: sources_actively(body, "bin/jlo-init.sh"),
+            autoload: sources_actively(body, "bin/jlo-autoload.sh"),
+            // 0.3.0's block sources the generated completion scripts straight
+            // out of completions/, under its own $BASH_VERSION/$ZSH_VERSION
+            // test. Those files are still generated, so that half keeps
+            // working on its own - but completions.sh is what replaces it.
+            completions: sources_actively(body, "completions/jlo.bash")
+                || sources_actively(body, "completions/_jlo"),
+        }
+    }
+
+    /// The init line is what makes it the old block; the other two never
+    /// appear without it.
+    fn present(self) -> bool {
+        self.init
+    }
+}
+
+/// Where the old block is, if it is anywhere we can see.
+///
+/// Wider than the single candidate `activated` uses, and deliberately so. The
+/// released installers said "e.g., ~/.bashrc, ~/.zshrc", and the case that
+/// needs it is bash on macOS: the login shell reads `~/.bash_profile`, so a
+/// block pasted into `~/.bashrc` and sourced from there is active and
+/// invisible to a one-file check.
+///
+/// Only this scan is widened. `activated` stays on the one candidate, where a
+/// miss costs a duplicated line and a false positive would cost a silent
+/// non-install - the asymmetry that put it there in the first place.
+fn find_legacy_block(home: &Path, login: &Path) -> Option<(PathBuf, LegacyBlock)> {
+    let mut seen: Vec<PathBuf> = Vec::new();
+    let candidates = std::iter::once(login.to_path_buf())
+        .chain([".zshrc", ".bashrc", ".bash_profile", ".profile"].map(|name| home.join(name)));
+    for candidate in candidates {
+        if seen.contains(&candidate) {
+            continue;
+        }
+        seen.push(candidate.clone());
+        let Ok(body) = fs::read_to_string(&candidate) else {
+            continue;
+        };
+        let legacy = LegacyBlock::found_in(&body);
+        if legacy.present() {
+            return Some((candidate, legacy));
+        }
+    }
+    None
+}
+
+/// Name the old block, and print the lines that replace it. Nothing is
+/// written: the installer only ever reads the profile, and a block a user
+/// pasted is theirs to remove.
+fn legacy_notice(layout: &Layout, profile: &Path, home: Option<&Path>, legacy: LegacyBlock) {
+    eprintln!();
+    // "contains", not "loads": the scan reaches past the login profile, and a
+    // block in a file this shell never reads is still worth replacing.
+    ui::warning!(
+        "{} contains the pre-0.4.0 J'Lo block.",
+        tilde(profile, home)
+    );
+    eprintln!(
+        "\nIt keeps working - this install writes a compatibility shim for it - but the\n\
+         shim is removed in v1.0.0. Replace that block with:\n"
+    );
+    let mut lines = vec!["jlo.sh"];
+    if legacy.autoload {
+        lines.push("autoload.sh");
+    }
+    if legacy.completions {
+        lines.push("completions.sh");
+    }
+    for name in lines {
+        eprintln!("    {}", source_line(&snippet(layout, home, name)));
+    }
+    eprintln!("\nThese lines never change: upgrades regenerate the files they point at.");
 }
 
 // ---------------------------------------------------------------------------

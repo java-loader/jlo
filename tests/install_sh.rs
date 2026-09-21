@@ -455,7 +455,13 @@ fn a_jlo_home_with_shell_metacharacters_still_generates_valid_files() {
     let home = dir.path().join("home");
     let custom = home.join("o'brien $x `id` a\\nb");
 
-    for name in ["jlo.sh", "autoload.sh", "completions.sh"] {
+    for name in [
+        "jlo.sh",
+        "autoload.sh",
+        "completions.sh",
+        "bin/jlo-init.sh",
+        "bin/jlo-autoload.sh",
+    ] {
         let script = custom.join(name);
         assert!(script.is_file(), "install.sh did not generate {script:?}");
         for sh in INTERPRETERS.iter().chain(["/bin/sh"].iter()) {
@@ -819,11 +825,21 @@ fn the_binary_writes_the_whole_layout() {
     ] {
         assert!(jlo.join(rel).is_file(), "install did not write {rel}");
     }
-    // The shell scripts used to travel in the tarball beside the binary.
-    assert!(
-        !jlo.join("bin").join("jlo-init.sh").exists(),
-        "the shipped dual-parse wrapper is still being installed"
-    );
+    // These two used to travel in the tarball as dual-parse wrappers, and are
+    // generated shims now: the paths every released profile block sources,
+    // redirecting to the dialect files beside them. Deleting them was the bug
+    // - leaving them shipped was the older one.
+    for rel in ["bin/jlo-init.sh", "bin/jlo-autoload.sh"] {
+        let body = std::fs::read_to_string(jlo.join(rel)).unwrap();
+        assert!(
+            body.contains("Compatibility shim"),
+            "{rel} is not the generated shim: {body}"
+        );
+        assert!(
+            !body.contains("jlo() {"),
+            "the shipped dual-parse wrapper is still being installed as {rel}"
+        );
+    }
 }
 
 /// The symlink target name is load-bearing: `jlo` on PATH is only ever
@@ -1502,4 +1518,286 @@ fn the_reload_line_re_sources_only_what_this_shell_had_enabled() {
             "{sh}: a successful reload reported failure: {stdout:?}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// The 0.2.0/0.3.0 compatibility shims
+// ---------------------------------------------------------------------------
+
+/// The migration path from every version that was ever released.
+///
+/// 0.2.0 and 0.3.0 are the only tags there are, and both print a profile block
+/// that sources `bin/jlo-init.sh` and `bin/jlo-autoload.sh` directly - the
+/// generated entry files landed after 0.3.0 was tagged, so no released
+/// installer knows `jlo.sh` exists. Writing the dialect files beside those two
+/// and leaving them alone left every existing user loading the *old* wrapper
+/// permanently, `curl | bash` selfupdate and all, with nothing looking broken.
+///
+/// So the install verb generates them too. The foreign contents below stand in
+/// for the 0.3.0 originals: the test is that none of it survives, in both
+/// shells, with `JLO_HOME` deliberately unexported - the shim bakes the path,
+/// which is what makes it right for an install that is not `$HOME/.jlo`.
+#[test]
+fn the_old_profile_paths_load_the_new_wrapper() {
+    let (dir, _) = install(None);
+    let home = dir.path().join("home");
+    let bin = home.join(".jlo").join("bin");
+
+    std::fs::write(
+        bin.join("jlo-init.sh"),
+        "jlo() { echo 'the 0.3.0 wrapper'; }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        bin.join("jlo-autoload.sh"),
+        "jlo_after_cd() { echo 'the 0.3.0 hook'; }\n",
+    )
+    .unwrap();
+
+    let out = reinstall_over(&home);
+    assert!(
+        out.status.success(),
+        "the upgrade failed: {}",
+        printed(&out)
+    );
+
+    for sh in INTERPRETERS {
+        if skip_missing("the_old_profile_paths_load_the_new_wrapper", sh) {
+            continue;
+        }
+        // The old block's own two lines, verbatim.
+        let out = Command::new(sh)
+            .arg("-c")
+            .arg(format!(
+                "[ -s {init} ] && . {init}\n\
+                 [ -s {auto} ] && . {auto}\n\
+                 typeset -f jlo\n\
+                 typeset -f jlo_after_cd\n\
+                 echo \"marker=[${{_JLO_AUTOLOAD-}}]\"\n\
+                 /bin/sh -c 'echo \"home=[$JLO_HOME]\"'",
+                init = squote(&bin.join("jlo-init.sh")),
+                auto = squote(&bin.join("jlo-autoload.sh")),
+            ))
+            .env("HOME", &home)
+            .env_remove("JLO_HOME")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            !stdout.contains("0.3.0 wrapper"),
+            "{sh}: the old wrapper is still what the old path loads: {stdout:?}"
+        );
+        assert!(
+            stdout.contains("jlo-bin"),
+            "{sh}: the old path did not load the generated wrapper: {stdout:?} \
+             stderr={:?}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            !stdout.contains("0.3.0 hook"),
+            "{sh}: the old cd hook is still resident: {stdout:?}"
+        );
+        assert!(
+            stdout.contains("--offline"),
+            "{sh}: the old path did not load the generated cd hook: {stdout:?}"
+        );
+        // The shim marks the hook the way autoload.sh does, so a later
+        // 'jlo selfupdate' re-sources for this shell exactly what it had.
+        assert!(
+            stdout.contains("marker=[1]"),
+            "{sh}: the autoload shim left no marker for the reload line: {stdout:?}"
+        );
+        // Read back from a *child*: the wrapper and the hook both read
+        // JLO_HOME out of the environment.
+        assert!(
+            stdout.contains(&format!("home=[{}]", home.join(".jlo").display())),
+            "{sh}: the shim did not export the baked JLO_HOME: {stdout:?}"
+        );
+    }
+}
+
+/// The shims make the old block keep working, which is exactly why the user
+/// has to be told about it once: it is the only moment J'Lo can name the form
+/// that replaces it while both still work.
+///
+/// Nothing is written. The installer only ever reads the profile - a block the
+/// user pasted is theirs to remove.
+#[test]
+fn a_profile_with_the_old_block_is_told_what_replaces_it() {
+    let (dir, _) = install(None);
+    let home = dir.path().join("home");
+    let profile = home.join(".zshrc");
+    // The v0.2.0 block, verbatim. v0.3.0 prints the same three lines and adds
+    // a completions block of its own.
+    let block = "export JLO_HOME=\"$HOME/.jlo\"\n\
+                 [[ -s \"$JLO_HOME/bin/jlo-init.sh\" ]] && source \"$JLO_HOME/bin/jlo-init.sh\"\n\
+                 [[ -s \"$JLO_HOME/bin/jlo-autoload.sh\" ]] && source \"$JLO_HOME/bin/jlo-autoload.sh\"\n";
+    std::fs::write(&profile, block).unwrap();
+
+    let printed = printed(&reinstall_over(&home));
+    assert!(
+        printed.contains("pre-0.4.0 J'Lo block"),
+        "the installer never mentioned the old block: {printed}"
+    );
+    for name in ["jlo.sh", "autoload.sh"] {
+        assert!(
+            printed.contains(&format!("\"$HOME/.jlo/{name}\"")),
+            "the installer did not print the line replacing {name}: {printed}"
+        );
+    }
+    // v0.2.0's block has no completions line, so offering one back would be
+    // handing the user something they never had.
+    assert!(
+        !printed.contains("completions.sh"),
+        "the installer offered back a line the old block never had: {printed}"
+    );
+    // This profile does load J'Lo, so the "you never added the line" warning
+    // would be simply untrue here.
+    assert!(
+        !printed.contains("never added"),
+        "a profile that loads J'Lo was told it does not: {printed}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&profile).unwrap(),
+        block,
+        "the installer wrote to the user's profile"
+    );
+}
+
+/// v0.3.0's block sources the completion scripts out of `completions/` under
+/// its own `$BASH_VERSION`/`$ZSH_VERSION` test, so that user gets the line
+/// that replaces it too - and only that user.
+#[test]
+fn the_0_3_0_block_is_also_offered_the_completions_line() {
+    let (dir, _) = install(None);
+    let home = dir.path().join("home");
+    std::fs::write(
+        home.join(".zshrc"),
+        "export JLO_HOME=\"$HOME/.jlo\"\n\
+         [[ -s \"$JLO_HOME/bin/jlo-init.sh\" ]] && source \"$JLO_HOME/bin/jlo-init.sh\"\n\
+         [[ -s \"$JLO_HOME/bin/jlo-autoload.sh\" ]] && source \"$JLO_HOME/bin/jlo-autoload.sh\"\n\
+         if [ -n \"$ZSH_VERSION\" ]; then\n\
+         \x20 [[ -s \"$JLO_HOME/completions/_jlo\" ]] && source \"$JLO_HOME/completions/_jlo\"\n\
+         fi\n",
+    )
+    .unwrap();
+
+    let printed = printed(&reinstall_over(&home));
+    assert!(
+        printed.contains("\"$HOME/.jlo/completions.sh\""),
+        "the 0.3.0 block was not offered the completions line: {printed}"
+    );
+}
+
+/// The lock file is the one thing under `$JLO_HOME` with no purpose once the
+/// run that took it is over.
+#[test]
+fn an_install_leaves_no_lock_file_behind() {
+    let (dir, _) = install(None);
+    let jlo = dir.path().join("home").join(".jlo");
+    let lock = jlo.join(".selfupdate.lock");
+    assert!(!lock.exists(), "the installer left {lock:?} behind");
+    reinstall_over(jlo.parent().unwrap());
+    assert!(!lock.exists(), "the upgrade left {lock:?} behind");
+}
+
+/// A directory name may contain a newline, and the two shims are the only
+/// generated files that put a path in a **comment** rather than inside single
+/// quotes. One leading `#` would end at the first newline and leave the rest
+/// of the path standing as shell code with an unmatched quote: a file that
+/// does not parse, sourced from the user's profile on every shell start.
+///
+/// The install verb is run directly here rather than through `install.sh`,
+/// which is not the code under test and has its own quoting to answer for.
+#[test]
+fn a_jlo_home_containing_a_newline_still_generates_files_that_parse() {
+    let (dir, _) = install(None);
+    let home = dir.path().join("home");
+    let odd = home.join("two\nlines");
+    std::fs::create_dir_all(odd.join("bin")).unwrap();
+    std::fs::copy(
+        home.join(".jlo").join("bin").join("jlo-bin"),
+        odd.join("bin").join("jlo-bin"),
+    )
+    .unwrap();
+
+    let out = Command::new(odd.join("bin").join("jlo-bin"))
+        .arg("__install")
+        .env("HOME", &home)
+        .env("JLO_HOME", &odd)
+        .env("SHELL", "/bin/zsh")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "the install verb failed: {}",
+        printed(&out)
+    );
+
+    for name in [
+        "jlo.sh",
+        "autoload.sh",
+        "completions.sh",
+        "bin/jlo-init.sh",
+        "bin/jlo-autoload.sh",
+    ] {
+        let script = odd.join(name);
+        assert!(
+            script.is_file(),
+            "the install verb did not write {script:?}"
+        );
+        for sh in INTERPRETERS.iter().chain(["/bin/sh"].iter()) {
+            if skip_missing(
+                "a_jlo_home_containing_a_newline_still_generates_files_that_parse",
+                sh,
+            ) {
+                continue;
+            }
+            let parsed = Command::new(sh).arg("-n").arg(&script).output().unwrap();
+            assert!(
+                parsed.status.success(),
+                "{name} does not parse under {sh}: {}",
+                String::from_utf8_lossy(&parsed.stderr)
+            );
+        }
+    }
+}
+
+/// The old block is not always in the file the login shell reads. The
+/// released installers said "e.g., ~/.bashrc, ~/.zshrc", and bash on macOS is
+/// the motivating case: the login shell reads `~/.bash_profile`, so a block
+/// pasted into `~/.bashrc` and sourced from there is active and invisible to a
+/// one-file check. Spelled here with zsh as the login shell, which puts the
+/// block outside the candidate on every platform - on Linux, bash's own
+/// candidate *is* `~/.bashrc`.
+///
+/// Both halves matter. The scan has to find it, and finding it must not
+/// replace the activation instructions: this profile may load nothing at all,
+/// and sending the user away with no install and an edit to make in a file
+/// their shell never opens is the one failure this check exists to prevent.
+#[test]
+fn the_old_block_outside_the_login_profile_is_named_but_replaces_nothing() {
+    let (dir, _) = install(None);
+    let home = dir.path().join("home");
+    std::fs::write(
+        home.join(".bashrc"),
+        "[[ -s \"$JLO_HOME/bin/jlo-init.sh\" ]] && source \"$JLO_HOME/bin/jlo-init.sh\"\n",
+    )
+    .unwrap();
+
+    // SHELL is zsh, so the login profile is ~/.zshrc - which is not there.
+    let printed = printed(&reinstall_over(&home));
+    assert!(
+        printed.contains("pre-0.4.0 J'Lo block"),
+        "the block outside the login profile went unnoticed: {printed}"
+    );
+    assert!(
+        printed.contains(".bashrc"),
+        "the notice did not name the file the block is in: {printed}"
+    );
+    assert!(
+        printed.contains("To activate"),
+        "a block in a file the login shell does not read suppressed the \
+         instructions: {printed}"
+    );
 }

@@ -482,10 +482,29 @@ The lines you pasted never change; an upgrade regenerates the files they point a
   shells keep their resident wrapper until they are restarted, the same as with any version manager. The reload
   replaces the `jlo` function; a zsh completion that has already been loaded in that shell stays as it was until the
   next shell.
-- **If your profile still contains the old multi-line J’Lo block** rather than the single
-  `[ -s "$HOME/.jlo/jlo.sh" ] && . "$HOME/.jlo/jlo.sh"` line, replace it by hand. This one is not self-healing: the old
-  block exported `JLO_HOME` itself, so a re-install looks successful while leaving `JLO_HOME` empty and every `source`
-  line below it a silent no-op. Only installs predating 0.4.0 are affected.
+- **If your profile still contains the old multi-line J’Lo block** — the one every 0.2.x and 0.3.0 installer printed:
+
+  ```shell
+  export JLO_HOME="$HOME/.jlo"
+  [[ -s "$JLO_HOME/bin/jlo-init.sh" ]] && source "$JLO_HOME/bin/jlo-init.sh"
+  [[ -s "$JLO_HOME/bin/jlo-autoload.sh" ]] && source "$JLO_HOME/bin/jlo-autoload.sh"
+  ```
+
+  it keeps working. 0.4.0 generates `bin/jlo-init.sh` and `bin/jlo-autoload.sh` as compatibility shims that load the
+  same wrapper the single line does, so the upgrade needs nothing from you. The installer says so when it sees the
+  block, and prints the lines below.
+
+  Replace the block anyway, at your convenience — **the shims are removed in v1.0.0**:
+
+  ```shell
+  [ -s "$HOME/.jlo/jlo.sh" ] && . "$HOME/.jlo/jlo.sh"
+  [ -s "$HOME/.jlo/autoload.sh" ] && . "$HOME/.jlo/autoload.sh"       # optional: switch JDK on cd
+  [ -s "$HOME/.jlo/completions.sh" ] && . "$HOME/.jlo/completions.sh" # optional: tab completion
+  ```
+
+  Keep only the optional lines you actually had. If your block also sources `completions/_jlo` or `completions/jlo.bash`
+  directly (0.3.0 printed that), `completions.sh` is what replaces it. These three lines never change again: an upgrade
+  regenerates the files they point at.
 
 ## Getting Help
 
