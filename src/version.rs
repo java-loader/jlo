@@ -6,12 +6,22 @@
 //! is the point: a name that is not semver is an error here, which is how
 //! `temurin-21` and friends get filtered out of the store.
 //!
-//! Build metadata (`+10.0.LTS`) is ignored when ordering, so two Adoptium
-//! builds of the same patch compare `Equal`. That is what the semver spec says
-//! precedence means, and it is what jlo has always done. Note that it is *not*
-//! what `Ord for Version` does - that derive includes the `build` field and
-//! gives it a total order - so every comparison here goes through
-//! `cmp_precedence` instead.
+//! Build metadata (`+10.0.LTS`) participates in the ordering, which the semver
+//! spec does not ask for: it says precedence ignores build metadata, so
+//! `21.0.11+10.0.LTS` and `21.0.11+9.0.LTS` are equally new.
+//!
+//! jlo needs more than precedence. Adoptium's build metadata carries the JDK
+//! build number, two builds of one patch are two directories in the store, and
+//! `jlo prune` has to say which of them it keeps. Left equal they sorted
+//! arbitrarily and `prune` deleted whichever `read_dir` yielded second, which
+//! took the newer build about half the time. `Ord for Version` orders the
+//! `build` field after the rest, so `+10.0.LTS` is newer than `+9.0.LTS` and
+//! the answer is both stable and right.
+//!
+//! This is an ordering over Adoptium's naming, not over semver in general.
+//! Within one major Adoptium keeps a single shape - `+101.0.LTS` for an LTS
+//! line, `+12` for the rest - so the identifiers being compared are always
+//! alike, and the first of them is the build number.
 
 use anyhow::{Context, Result};
 use semver::Version;
@@ -32,10 +42,10 @@ pub(crate) fn parse(name: &str) -> Result<Version> {
         .with_context(|| format!("{name:?} is not a semver version"))
 }
 
-/// Order `a` against `b` by semver precedence, failing if either side is not
-/// semver. Build metadata does not participate - see the module comment.
+/// Order `a` against `b`, failing if either side is not semver. Build metadata
+/// breaks a tie rather than being ignored - see the module comment.
 pub(crate) fn compare(a: &str, b: &str) -> Result<Ordering> {
-    Ok(parse(a)?.cmp_precedence(&parse(b)?))
+    Ok(parse(a)?.cmp(&parse(b)?))
 }
 
 #[cfg(test)]
@@ -106,19 +116,48 @@ mod tests {
         assert!(parse("21.0. 11+9").is_err());
     }
 
-    /// Build metadata is not part of the precedence order, so the two builds
-    /// of a patch are interchangeable as far as every caller is concerned.
-    /// `jlo prune` and the `superseded` status both depend on this: neither
-    /// may claim one build supersedes the other.
+    /// The build number breaks a tie between two builds of one patch. `jlo
+    /// prune` deletes on this answer, so it has to be the higher build that
+    /// wins and it has to be numeric: `+10` is newer than `+9`, not older the
+    /// way a string comparison would have it.
     #[test]
-    fn build_metadata_does_not_order() {
+    fn the_build_number_breaks_a_tie() {
         assert_eq!(
             compare("17.0.11+10", "17.0.11+9").expect("compare"),
-            Ordering::Equal
+            Ordering::Greater
         );
         assert_eq!(
             compare("21.0.11+10.0.LTS", "21.0.11+9.0.LTS").expect("compare"),
+            Ordering::Greater
+        );
+        assert_eq!(
+            compare("21.0.11+9.0.LTS", "21.0.11+10.0.LTS").expect("compare"),
+            Ordering::Less
+        );
+    }
+
+    /// A tie is still reachable, because two names can spell one version.
+    /// Callers that delete have to treat that as "nothing to choose between
+    /// these" rather than as an order.
+    #[test]
+    fn two_names_for_one_version_stay_equal() {
+        assert_eq!(
+            compare("v21.0.11+9", "21.0.11+9").expect("compare"),
             Ordering::Equal
+        );
+        assert_eq!(
+            compare(" 21.0.11+9 ", "21.0.11+9").expect("compare"),
+            Ordering::Equal
+        );
+    }
+
+    /// The patch still outranks the build number, or a rebuild of an old patch
+    /// would look newer than the patch that superseded it.
+    #[test]
+    fn the_patch_outranks_the_build_number() {
+        assert_eq!(
+            compare("21.0.12+1", "21.0.11+99").expect("compare"),
+            Ordering::Greater
         );
     }
 

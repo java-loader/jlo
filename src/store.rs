@@ -3,6 +3,7 @@ use crate::ui::InstallUi;
 use crate::version::compare;
 use anyhow::{Context, bail};
 use std::cmp::Ordering;
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::path::{Path, PathBuf};
@@ -268,14 +269,23 @@ impl JdkStore {
     /// at `jlo prune` after superseding a minor without deleting anything
     /// itself.
     pub(crate) fn superseded_count(&self) -> anyhow::Result<usize> {
-        let mut newest_seen: HashSet<i64> = HashSet::new();
+        let mut newest: HashMap<i64, String> = HashMap::new();
         let mut superseded = 0;
 
         // `list` yields newest first, so the first managed JDK of a major is
-        // the one `prune` keeps and every later one is superseded.
+        // the one `prune` keeps. What follows it is counted only when it is
+        // *older* - "not the newest" would over-count, because two names can
+        // spell one version and [`Self::prune`] leaves both of those alone.
         for jdk in self.list()?.into_iter().filter(|jdk| jdk.managed) {
-            if !newest_seen.insert(jdk.major) {
-                superseded += 1;
+            match newest.entry(jdk.major) {
+                Entry::Vacant(slot) => {
+                    slot.insert(jdk.version);
+                }
+                Entry::Occupied(newest) => {
+                    if is_older_than(&jdk.version, newest.get()) {
+                        superseded += 1;
+                    }
+                }
             }
         }
 
@@ -318,14 +328,22 @@ impl JdkStore {
             };
             sort_by_semver_desc(candidates);
 
-            if candidates.len() <= 1 {
+            // Sorted newest first, so the head is the build to keep - but "not
+            // the head" is not the same as "older". Two names can spell one
+            // version (`21.0.11+9` and `v21.0.11+9`), and between those there
+            // is nothing to choose, so deleting by position would be the same
+            // coin toss the sort used to be. Only a strictly older build goes.
+            let Some(newest) = candidates.first().and_then(|c| c.name.clone()) else {
                 continue;
-            }
+            };
 
             // Record what was *actually* deleted. Announcing the removals up front
             // meant a failure below turned the line above it into a false claim.
             let mut removed = Vec::new();
-            for old_jdk in &candidates[1..] {
+            for old_jdk in candidates
+                .iter()
+                .filter(|c| c.name.as_deref().is_some_and(|n| is_older_than(n, &newest)))
+            {
                 let name = old_jdk.name.as_deref().unwrap_or("unknown").to_string();
                 let path = &old_jdk.path;
                 match std::fs::remove_dir_all(path) {
@@ -545,6 +563,17 @@ fn base_dir_for(os: &str, home: &Path) -> PathBuf {
         "macos" => home.join("Library/Java/JavaVirtualMachines"),
         _ => home.join(".jdks"),
     }
+}
+
+/// Whether `version` is superseded by `newest`, the build of its major that
+/// [`JdkStore::prune`] keeps. The single definition behind both `prune` and
+/// [`JdkStore::superseded_count`], so the hint that offers the deletion and
+/// the deletion itself can never disagree about how many there are.
+///
+/// A name that does not parse never reaches here: both callers filter on the
+/// parsed major first.
+fn is_older_than(version: &str, newest: &str) -> bool {
+    compare(version, newest).is_ok_and(Ordering::is_lt)
 }
 
 fn sort_by_semver_desc(candidates: &mut [Candidate]) {
@@ -946,6 +975,65 @@ mod tests {
         // Unmanaged dir should not be touched
         assert!(dir.path().join("21.0.1+12").exists());
         assert!(dir.path().join("21.0.3+9").exists());
+    }
+
+    /// Two builds of one patch differ only in build metadata, which semver
+    /// leaves out of precedence. `prune` used to sort them Equal and delete
+    /// whichever `read_dir` happened to yield second - a coin toss over a JDK,
+    /// and one that took the *newer* build about half the time.
+    #[test]
+    fn prune_keeps_the_higher_build_of_one_patch() {
+        for order in [
+            ["21.0.11+9.0.LTS", "21.0.11+10.0.LTS"],
+            ["21.0.11+10.0.LTS", "21.0.11+9.0.LTS"],
+        ] {
+            let dir = tempdir().unwrap();
+            for version in order {
+                create_jdk_dir(dir.path(), version, true);
+            }
+
+            let report = JdkStore::at(dir.path()).prune().unwrap();
+
+            assert_eq!(
+                report.removed,
+                vec![(21, vec!["21.0.11+9.0.LTS".to_string()])]
+            );
+            assert!(dir.path().join("21.0.11+10.0.LTS").exists());
+            assert!(!dir.path().join("21.0.11+9.0.LTS").exists());
+        }
+    }
+
+    /// The leniency in `version::parse` means two directory names can spell
+    /// one version. Nothing distinguishes them, so `prune` has no basis for
+    /// picking one, and picking by `read_dir` order would be the same coin
+    /// toss. It leaves both alone, which is what `jlo list` already shows.
+    #[test]
+    fn prune_keeps_both_when_two_names_spell_one_version() {
+        let dir = tempdir().unwrap();
+        create_jdk_dir(dir.path(), "21.0.11+9", true);
+        create_jdk_dir(dir.path(), "v21.0.11+9", true);
+
+        let report = JdkStore::at(dir.path()).prune().unwrap();
+
+        assert_eq!(report.removed_count(), 0);
+        assert!(dir.path().join("21.0.11+9").exists());
+        assert!(dir.path().join("v21.0.11+9").exists());
+    }
+
+    /// The count behind the `jlo prune` hint has to be the number `prune`
+    /// would actually remove, or the hint offers work that will not happen.
+    #[test]
+    fn superseded_count_agrees_with_prune_on_one_patch() {
+        let dir = tempdir().unwrap();
+        create_jdk_dir(dir.path(), "21.0.11+9.0.LTS", true);
+        create_jdk_dir(dir.path(), "21.0.11+10.0.LTS", true);
+        create_jdk_dir(dir.path(), "17.0.11+9", true);
+        create_jdk_dir(dir.path(), "v17.0.11+9", true);
+
+        let store = JdkStore::at(dir.path());
+        let before = store.superseded_count().unwrap();
+        assert_eq!(before, 1);
+        assert_eq!(store.prune().unwrap().removed_count(), before);
     }
 
     /// A `HashMap` yields its keys in an arbitrary order, so the majors used to

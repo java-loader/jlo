@@ -1156,22 +1156,40 @@ mod tests {
         );
     }
 
-    /// Build metadata is not part of semver precedence, so two Adoptium
-    /// builds of the same patch are equal and neither supersedes the other.
-    /// `prune` reads the same ordering, so marking one `Superseded` here
-    /// would promise a deletion that picks an arbitrary winner.
+    /// Two builds of one patch differ only in the build number, and the
+    /// higher one wins. `prune` reads the same ordering and deletes on it, so
+    /// the row that says `superseded` has to be the row `prune` would remove.
     #[test]
-    fn build_rows_leaves_two_builds_of_one_patch_both_installed() {
+    fn build_rows_marks_the_lower_build_of_one_patch_superseded() {
         let rows = build_rows(
             &[remote("21.0.11+10.0.LTS", 21)],
-            &[local("21.0.11+10.0.LTS", 21), local("21.0.11+9.0.LTS", 21)],
+            &[local("21.0.11+9.0.LTS", 21), local("21.0.11+10.0.LTS", 21)],
             None,
         );
         assert_eq!(
             rows,
             vec![
                 row(21, "21.0.11+10.0.LTS", Status::Installed),
-                row(21, "21.0.11+9.0.LTS", Status::Installed),
+                row(21, "21.0.11+9.0.LTS", Status::Superseded),
+            ]
+        );
+    }
+
+    /// Two names for one version are genuinely equal, so neither can be
+    /// `superseded`: `prune` will not delete either, and a row promising the
+    /// deletion would name an action that never happens.
+    #[test]
+    fn build_rows_leaves_two_names_for_one_version_both_installed() {
+        let rows = build_rows(
+            &[],
+            &[local("v21.0.11+9", 21), local("21.0.11+9", 21)],
+            None,
+        );
+        assert_eq!(
+            rows,
+            vec![
+                row(21, "v21.0.11+9", Status::Installed),
+                row(21, "21.0.11+9", Status::Installed),
             ]
         );
     }
