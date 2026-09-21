@@ -318,11 +318,16 @@ pub(crate) fn cmd_selfupdate() -> Result<(), CommandError> {
     if !is_newer(latest, VERSION)? {
         // Nothing on stdout: the wrapper evals whatever it captures, and an
         // empty string is the no-op that says "there was nothing to reload".
-        ui::created!("J'Lo {VERSION} is already the latest version.");
+        ui::created!("{} is already the latest version.", ui::jlo_mark(VERSION));
         return Ok(());
     }
 
-    eprintln!("Updating J'Lo {VERSION} → {latest}");
+    eprintln!(
+        "Updating {} {} {}",
+        ui::jlo_mark(VERSION),
+        ui::punctuation_arrow(),
+        ui::jlo_mark_bare(latest)
+    );
     let staged = stage(&client, &layout, &tag, latest, &package)?;
 
     // Re-read under the lock, immediately before publishing. A slower updater
@@ -480,7 +485,7 @@ fn stage(
         dir,
     };
 
-    let ui = InstallUi::labelled("J'Lo", latest);
+    let ui = InstallUi::labelled(crate::ui::JLO_LABEL, latest);
     let result = fetch_and_unpack(client, &staged, tag, package, &ui);
     if result.is_err() {
         ui.abandon();

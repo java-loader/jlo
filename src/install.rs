@@ -854,7 +854,8 @@ fn report(layout: &Layout, had_receipt: bool, symlink: Option<&Path>) {
         .and_then(|(home, login)| find_legacy_block(home, login));
 
     ui::created!(
-        "J'Lo {VERSION} installed to {}.",
+        "{} installed to {}.",
+        ui::jlo_mark(VERSION),
         tilde(&layout.home, home_dir.as_deref())
     );
 
@@ -899,16 +900,32 @@ fn report(layout: &Layout, had_receipt: bool, symlink: Option<&Path>) {
         );
     }
 
+    // Column 0, not indented. These lines exist to be copied, and every
+    // terminal's double-click and shift-select take a leading indent with
+    // them - the block a user meets on first contact was the least
+    // copy-pasteable output the program produced. Structure is carried by the
+    // blank line and the heading above each group instead.
     let main = snippet(layout, home_dir.as_deref(), "jlo.sh");
-    eprintln!("\nTo activate — run both lines:\n");
-    eprintln!("    {}", append_command(&main, &target));
-    eprintln!("    . {main}");
-    eprintln!("\nOptional — switch JDK on cd, and tab completion:\n");
-    for name in ["autoload.sh", "completions.sh"] {
-        let path = snippet(layout, home_dir.as_deref(), name);
-        eprintln!("    {}", append_command(&path, &target));
+    eprintln!(
+        "\n{}\n",
+        ui::heading("To activate — run this, then the line below it:")
+    );
+    for line in heredoc(layout, home_dir.as_deref(), &target) {
+        eprintln!("{}", ui::command(&line));
     }
-    eprintln!("\nThese lines never change: upgrades regenerate the files they point at.");
+    eprintln!(
+        "\n{}",
+        ui::footnote(
+            "The last two lines are optional: switch JDK on cd, and tab completion.\n\
+             Delete them before pasting if you do not want them."
+        )
+    );
+    eprintln!("\n{}\n", ui::heading("Then load it into this shell:"));
+    eprintln!("{}", ui::command(&format!(". {main}")));
+    eprintln!(
+        "\n{}",
+        ui::footnote("These lines never change: upgrades regenerate the files they point at.")
+    );
     path_nudge(symlink);
 }
 
@@ -923,12 +940,19 @@ fn path_nudge(symlink: Option<&Path>) {
     if on_path {
         return;
     }
+    // The prose is dim like the heading under it: in this block everything
+    // except the command is scaffolding, and a paragraph louder than its own
+    // heading reads as the point when it is not.
     eprintln!(
-        "\nAlso add {} to your PATH so 'jlo' works in non-interactive shells\n\
-         (CI, scripts, AI agents) and for 'jlo home':\n\n    \
-         export PATH=\"$HOME/.local/bin:$PATH\"",
-        tilde(dir, std::env::home_dir().as_deref())
+        "\n{}\n",
+        ui::footnote(&format!(
+            "'jlo' also wants {} on PATH - for non-interactive shells\n\
+             (CI, scripts, AI agents) and for 'jlo home'.",
+            tilde(dir, std::env::home_dir().as_deref())
+        ))
     );
+    eprintln!("{}\n", ui::heading("Add it to your PATH:"));
+    eprintln!("{}", ui::command("export PATH=\"$HOME/.local/bin:$PATH\""));
 }
 
 /// The profile the *login* shell reads.
@@ -1067,8 +1091,9 @@ fn legacy_notice(layout: &Layout, profile: &Path, home: Option<&Path>, legacy: L
     );
     eprintln!(
         "\nIt keeps working - this install writes a compatibility shim for it - but the\n\
-         shim is removed in v1.0.0. Replace that block with:\n"
+         shim is removed in v1.0.0.\n"
     );
+    eprintln!("{}\n", ui::heading("Replace that block with:"));
     let mut lines = vec!["jlo.sh"];
     if legacy.autoload {
         lines.push("autoload.sh");
@@ -1077,9 +1102,15 @@ fn legacy_notice(layout: &Layout, profile: &Path, home: Option<&Path>, legacy: L
         lines.push("completions.sh");
     }
     for name in lines {
-        eprintln!("    {}", source_line(&snippet(layout, home, name)));
+        eprintln!(
+            "{}",
+            ui::command(&source_line(&snippet(layout, home, name)))
+        );
     }
-    eprintln!("\nThese lines never change: upgrades regenerate the files they point at.");
+    eprintln!(
+        "\n{}",
+        ui::footnote("These lines never change: upgrades regenerate the files they point at.")
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1102,17 +1133,60 @@ fn source_line(path: &str) -> String {
     format!("[ -s {path} ] && . {path}")
 }
 
-/// The command that appends one line to the user's profile.
+/// The one command that puts J'Lo in the user's profile, as a heredoc.
 ///
-/// `printf '%s\n'` rather than `echo`, which is the one place the Homebrew
-/// output this is modelled on would go wrong for us: `echo` expands backslash
-/// escapes in zsh, in dash, and in any bash built with `xpg_echo`. Homebrew's
-/// payload is a fixed string; ours carries a path the user chose, so a
-/// backslash in a custom `JLO_HOME` would be rewritten - `\n` splitting the
-/// profile line in half - on its way into the file. `printf` with a literal
-/// format string has no such reading.
-fn append_command(snippet: &str, target: &str) -> String {
-    format!("printf '%s\\n' {} >> {target}", sq(&source_line(snippet)))
+/// Three `printf '%s\n' '...' >> ~/.zshrc` lines came before this, and the
+/// quoting was most of what the reader saw. A heredoc shows the *content*
+/// instead: what the user copies is what ends up in their file, and one paste
+/// replaces three.
+///
+/// **The delimiter is quoted** - `<<'EOF'`, not `<<EOF`. An unquoted delimiter
+/// expands `$HOME` while the heredoc is being written, which would bake this
+/// machine's absolute path into a profile that is meant to stay portable. It
+/// also ends the `echo`-versus-`printf` problem the old form existed to dodge:
+/// a quoted heredoc is literal, so a backslash in a custom `JLO_HOME` arrives
+/// as a backslash under every shell.
+///
+/// The **blank first line** is not decoration either. `>>` appends at the
+/// exact end of the file, and a profile whose last line has no trailing
+/// newline would otherwise have jlo's first line welded onto it.
+///
+/// The **terminator is chosen against the body**, not hard-coded. A directory
+/// name may contain a newline (the shims already have to survive that), so a
+/// `JLO_HOME` of `/tmp/jlo\nEOF\nx` would put a bare `EOF` on a line of its
+/// own inside the block and end the heredoc in the middle of a path. Quoting
+/// cannot help: inside a heredoc body the quotes are data. The user would be
+/// left with half a statement appended to their profile and the rest handed to
+/// the shell as input.
+fn heredoc(layout: &Layout, home: Option<&Path>, target: &str) -> Vec<String> {
+    let body: Vec<String> = ["jlo.sh", "autoload.sh", "completions.sh"]
+        .into_iter()
+        .map(|name| source_line(&snippet(layout, home, name)))
+        .collect();
+    let delimiter = terminator(&body);
+
+    let mut lines = vec![format!("cat >> {target} <<'{delimiter}'"), String::new()];
+    lines.extend(body);
+    lines.push(delimiter);
+    lines
+}
+
+/// The shortest `EOF`-ish word that appears on no line of the body.
+///
+/// `<<` (rather than `<<-`) ignores no leading whitespace, so only a line that
+/// is *exactly* the delimiter ends the block - but a body line can contain
+/// newlines of its own, so the comparison is against physical lines, not
+/// against the strings this function was handed.
+fn terminator(body: &[String]) -> String {
+    let mut delimiter = String::from("EOF");
+    while body
+        .iter()
+        .flat_map(|entry| entry.lines())
+        .any(|line| line == delimiter)
+    {
+        delimiter.push('_');
+    }
+    delimiter
 }
 
 /// The `>>` target. `~` is left unquoted so the shell expands it; a `$HOME`

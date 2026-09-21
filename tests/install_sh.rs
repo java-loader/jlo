@@ -341,11 +341,11 @@ fn generated_entries_parse_under_every_supported_shell() {
     }
 }
 
-/// The printed instructions are the whole manual step, and they are *commands*
-/// now rather than prose to act on. Keep them to the three `echo` lines - if
-/// this count grows, the regression is user-visible.
+/// The printed instructions are the whole manual step: one heredoc the user
+/// pastes, and one line that loads jlo into the shell they are sitting in. If
+/// that shape grows, the regression is user-visible.
 #[test]
-fn the_printed_snippet_is_three_runnable_append_lines() {
+fn the_printed_snippet_is_one_heredoc_and_one_source_line() {
     let (dir, out) = install(None);
     let home = dir.path().join("home");
     let printed = printed(&out);
@@ -362,14 +362,138 @@ fn the_printed_snippet_is_three_runnable_append_lines() {
         !printed.contains(&format!("{}/jlo.sh", home.join(".jlo").display())),
         "installer hardcoded the expanded home path: {printed}"
     );
-    let appends = printed
-        .lines()
-        .filter(|l| l.trim_start().starts_with("printf ") && l.contains(">>"))
-        .count();
-    assert_eq!(
-        appends, 3,
-        "expected exactly three append lines:\n{printed}"
+    let block = heredoc_block(&printed).expect("installer printed no heredoc");
+    // The delimiter must be quoted, or `$HOME` is expanded into the profile
+    // and the portable form above is defeated at the moment it is written.
+    assert!(
+        block[0].contains("<<'EOF'"),
+        "the heredoc delimiter is not quoted: {:?}",
+        block[0]
     );
+    assert_eq!(
+        block.last().map(String::as_str),
+        Some("EOF"),
+        "an ordinary install should still use the plain EOF terminator: {block:#?}"
+    );
+    // A blank line first: `>>` appends at the exact end of the file, and a
+    // profile whose last line has no newline would otherwise get jlo's first
+    // line welded onto it.
+    assert_eq!(
+        block[1], "",
+        "the heredoc does not open with a blank line: {block:#?}"
+    );
+    let body: Vec<&String> = block[2..block.len() - 1].iter().collect();
+    assert_eq!(body.len(), 3, "expected three profile lines: {block:#?}");
+    assert_eq!(
+        printed
+            .lines()
+            .filter(|l| l.trim_start().starts_with("cat >>"))
+            .count(),
+        1,
+        "expected exactly one heredoc:\n{printed}"
+    );
+    // The second half of the manual step, and the only other command: the
+    // installer runs in a subshell and cannot load jlo into the parent itself.
+    assert_eq!(
+        printed
+            .lines()
+            .map(visible)
+            .filter(|l| l.starts_with(". \"") || l.starts_with(". '"))
+            .count(),
+        1,
+        "expected exactly one line that loads jlo into this shell:\n{printed}"
+    );
+}
+
+/// A directory name may contain a newline, so a `JLO_HOME` can put a bare
+/// `EOF` on a line of its own *inside* the block. Quoting does not help
+/// there, because in a heredoc body the quotes are data, so the heredoc would
+/// end in the middle of a path, append half a statement to the profile and
+/// hand the rest to the shell. The terminator is picked against the body for
+/// exactly this.
+#[test]
+fn a_jlo_home_that_spells_the_terminator_does_not_end_the_heredoc() {
+    let (dir, _) = install(None);
+    let home = dir.path().join("home");
+    let hostile = home.join("jlo\nEOF\nx");
+    std::fs::create_dir_all(hostile.join("bin")).unwrap();
+    std::fs::copy(
+        home.join(".jlo").join("bin").join("jlo-bin"),
+        hostile.join("bin").join("jlo-bin"),
+    )
+    .unwrap();
+
+    let out = Command::new(hostile.join("bin").join("jlo-bin"))
+        .arg("__install")
+        .env("HOME", &home)
+        .env("JLO_HOME", &hostile)
+        .env("SHELL", "/bin/zsh")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let printed = printed(&out);
+    let opener = printed
+        .lines()
+        .map(visible)
+        .find(|l| l.starts_with("cat >>"))
+        .expect("installer printed no heredoc");
+    assert!(
+        !opener.contains("<<'EOF'"),
+        "the terminator collides with a line of the body: {opener:?}"
+    );
+
+    // The real check: the block the user would paste has to parse, and it has
+    // to write the profile lines rather than spill into the shell.
+    let block = heredoc_block(&printed).expect("installer printed no heredoc");
+    for (i, sh) in INTERPRETERS.iter().enumerate() {
+        if skip_missing(
+            "a_jlo_home_that_spells_the_terminator_does_not_end_the_heredoc",
+            sh,
+        ) {
+            continue;
+        }
+        let profile = home.join(format!(".eof-profile{i}"));
+        let script =
+            block
+                .join("\n")
+                .replacen(">> ~/.zshrc", &format!(">> {}", squote(&profile)), 1);
+        let ran = Command::new(sh)
+            .arg("-c")
+            .arg(&script)
+            .env("HOME", &home)
+            .output()
+            .unwrap();
+        assert!(
+            ran.status.success(),
+            "{sh}: the printed block did not run: {} script={script:?}",
+            String::from_utf8_lossy(&ran.stderr)
+        );
+        let written = std::fs::read_to_string(&profile).unwrap();
+        assert!(
+            written.contains("/jlo.sh"),
+            "{sh}: the heredoc ended early - the profile holds {written:?}"
+        );
+    }
+}
+
+/// The heredoc as the user would select it: from `cat >>` to the terminator,
+/// with the escape bytes stripped so the lines are the ones that reach the
+/// profile.
+fn heredoc_block(printed: &str) -> Option<Vec<String>> {
+    let lines: Vec<String> = printed.lines().map(visible).collect();
+    let start = lines.iter().position(|l| l.starts_with("cat >>"))?;
+    // Read the delimiter off the opener rather than assuming `EOF`: it is
+    // chosen against the body, so a hostile JLO_HOME moves it. Assuming it
+    // here would cut the block at the very line the choice exists to survive.
+    let quoted = lines[start].rsplit_once("<<'")?.1;
+    let delimiter = quoted.strip_suffix('\'')?.to_string();
+    let end = start + 1 + lines[start + 1..].iter().position(|l| *l == delimiter)?;
+    Some(lines[start..=end].to_vec())
 }
 
 /// The half of the output that makes the difference between "installed" and
@@ -381,12 +505,115 @@ fn the_installer_prints_a_line_that_activates_the_current_shell() {
     let (_dir, out) = install(None);
     let printed = printed(&out);
     assert!(
-        printed.contains("    . \"$HOME/.jlo/jlo.sh\""),
+        printed.contains("\n. \"$HOME/.jlo/jlo.sh\""),
         "installer printed no line to source jlo right now: {printed}"
     );
     assert!(
         !printed.to_lowercase().contains("restart your terminal"),
         "installer still tells the user to restart their terminal: {printed}"
+    );
+}
+
+/// Every line the installer offers for copying starts at column 0.
+///
+/// Indentation is invisible in review and fatal in use: double-click and
+/// shift-select take the leading spaces with them, so an indented command is
+/// one that gets pasted broken. The block was indented four spaces for four
+/// releases and nobody noticed.
+///
+/// Colour is forced on for half of this, because that is the shape the check
+/// is easiest to get wrong in: with escape bytes in front of it, a command
+/// line no longer *starts* with the command, and a naive predicate stops
+/// matching exactly the lines it is meant to police. The legacy branch is
+/// exercised too - it prints a second block of commands that a fresh install
+/// never reaches.
+#[test]
+fn no_copyable_line_is_indented() {
+    let (dir, out) = install(None);
+    let home = dir.path().join("home");
+    assert_no_indented_commands(&printed(&out), 4, "fresh install");
+
+    let coloured = Command::new(home.join(".jlo").join("bin").join("jlo-bin"))
+        .arg("__install")
+        .env("HOME", &home)
+        .env("JLO_HOME", home.join(".jlo"))
+        .env("SHELL", "/bin/zsh")
+        .env("CLICOLOR_FORCE", "1")
+        .output()
+        .unwrap();
+    let painted = printed(&coloured);
+    assert!(
+        painted.contains('\u{1b}'),
+        "CLICOLOR_FORCE produced no escapes, so this run proves nothing: {painted}"
+    );
+    assert_no_indented_commands(&painted, 4, "coloured re-install");
+
+    // The v0.2.0 block, which sends the installer down the legacy notice
+    // instead of the activation block.
+    std::fs::write(
+        home.join(".zshrc"),
+        "export JLO_HOME=\"$HOME/.jlo\"\n\
+         [[ -s \"$JLO_HOME/bin/jlo-init.sh\" ]] && source \"$JLO_HOME/bin/jlo-init.sh\"\n",
+    )
+    .unwrap();
+    assert_no_indented_commands(&printed(&reinstall_over(&home)), 1, "legacy notice");
+}
+
+/// Strip SGR escapes so the check sees the line the *user* sees. `trim_start`
+/// is not enough: `\x1b[38;5;12mprintf ...` is an indented command as far as a
+/// terminal is concerned only if the spaces come first, and it is not a
+/// command as far as `starts_with` is concerned at all.
+fn visible(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        if c != '\u{1b}' {
+            out.push(c);
+            continue;
+        }
+        if chars.next() != Some('[') {
+            continue;
+        }
+        for c in chars.by_ref() {
+            if c.is_ascii_alphabetic() {
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// `expected` guards against the vacuous pass: a predicate that matches
+/// nothing satisfies "no indented commands" perfectly.
+fn assert_no_indented_commands(printed: &str, expected: usize, what: &str) {
+    let runnable = |l: &str| {
+        let t = l.trim_start();
+        t.starts_with("cat >> ")
+            || t.starts_with(". \"")
+            || t.starts_with(". '")
+            || t.starts_with("export ")
+            || t.starts_with("[ -s ")
+            || t.starts_with("ln -s ")
+            || t.trim_end() == "EOF"
+    };
+    let commands: Vec<String> = printed
+        .lines()
+        .map(visible)
+        .filter(|l| runnable(l))
+        .collect();
+    assert!(
+        commands.len() >= expected,
+        "{what}: found {} command lines, expected at least {expected}. \
+         The predicate has drifted from the output:\n{printed}",
+        commands.len()
+    );
+    let indented: Vec<&String> = commands
+        .iter()
+        .filter(|l| l.starts_with(char::is_whitespace))
+        .collect();
+    assert!(
+        indented.is_empty(),
+        "{what}: these copyable lines are indented: {indented:#?}\n\nfull output:\n{printed}"
     );
 }
 
@@ -529,18 +756,16 @@ fn a_jlo_home_with_shell_metacharacters_still_generates_valid_files() {
         );
     }
 
-    // The printed lines are now *commands the user runs*, which puts the
-    // quoting under two layers: the path inside the profile line, and the
-    // whole line inside the `printf` argument. Rather than inspect either, run
-    // the command the installer printed and then source what it produced.
+    // What the installer prints is a command the *user* runs, so the path is
+    // quoted twice over: once inside the profile line, and once by the shell
+    // reading the heredoc. Rather than inspect either, run the block the
+    // installer printed and then source what it produced.
     let printed = printed(&out);
-    let append = printed
-        .lines()
-        .map(str::trim_start)
-        .find(|l| l.starts_with("printf ") && l.contains("jlo.sh") && l.contains(">>"))
-        .expect("installer printed no append line for jlo.sh");
-    // Under both shells: the command is run by whichever shell the user is
-    // sitting in, and they disagree about what `echo` does to a backslash.
+    let block = heredoc_block(&printed).expect("installer printed no heredoc");
+    let append = block.join("\n");
+    // Under both shells. A quoted heredoc is literal everywhere, which is the
+    // property being asserted: the backslash in this JLO_HOME must arrive in
+    // the profile unchanged.
     for (i, sh) in INTERPRETERS.iter().enumerate() {
         if skip_missing(
             "a_jlo_home_with_shell_metacharacters_still_generates_valid_files",
@@ -553,6 +778,8 @@ fn a_jlo_home_with_shell_metacharacters_still_generates_valid_files() {
         let profile = home.join(format!(".profile{i}"));
         let appended = append.replacen(">> ~/.zshrc", &format!(">> {}", squote(&profile)), 1);
         assert_ne!(appended, append, "could not redirect the printed command");
+        // The heredoc body ends up in the profile verbatim, blank line
+        // included; only the entry line has to load the wrapper.
         let ran = Command::new(sh)
             .arg("-c")
             .arg(format!("{appended}\n. {}\ntype jlo", squote(&profile)))
@@ -567,10 +794,11 @@ fn a_jlo_home_with_shell_metacharacters_still_generates_valid_files() {
              the wrapper: {stdout:?} line={appended:?} stderr={:?}",
             String::from_utf8_lossy(&ran.stderr)
         );
+        let written = std::fs::read_to_string(&profile).unwrap();
         assert_eq!(
-            std::fs::read_to_string(&profile).unwrap().lines().count(),
-            1,
-            "{sh}: the append command wrote more than one line into the profile"
+            written.lines().filter(|l| !l.trim().is_empty()).count(),
+            3,
+            "{sh}: the heredoc wrote {written:?} into the profile"
         );
     }
 }

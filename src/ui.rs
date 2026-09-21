@@ -53,8 +53,8 @@ impl InstallUi {
             // redraw. "connecting" is literally true here - the caller has the
             // metadata but has not yet opened the download response.
             ProgressBar::new(0)
-                .with_style(spinner_style())
-                .with_prefix(version.to_string())
+                .with_style(spinner_style(&progress_label(label)))
+                .with_prefix(progress_prefix(label, version))
                 .with_message("connecting")
         } else {
             // Without a terminal there is nothing to redraw over; the plain
@@ -88,7 +88,8 @@ impl InstallUi {
             // bar, so switching to the bar style before the length is known
             // would flash a completed download on the first frame.
             self.bar.set_length(total_size);
-            self.bar.set_style(download_style());
+            self.bar
+                .set_style(download_style(&progress_label(self.label)));
         } else {
             eprintln!(
                 "Downloading {} {} ({})",
@@ -116,7 +117,8 @@ impl InstallUi {
 
     fn phase(&self, name: &str) {
         if self.tty {
-            self.bar.set_style(spinner_style());
+            self.bar
+                .set_style(spinner_style(&progress_label(self.label)));
             self.bar.set_message(name.to_string());
         }
     }
@@ -201,6 +203,102 @@ pub(crate) fn print_hint(args: std::fmt::Arguments) {
 
 pub(crate) fn print_created(args: std::fmt::Arguments) {
     eprintln!("{} {args}", style("✓").green().for_stderr());
+}
+
+/// The installer's voice. These return styled strings rather than printing,
+/// because the caller owns the blank lines between them - but the *choice* of
+/// colour stays here, which is the whole point: a `style()` call outside this
+/// module is how the vocabulary gets lost.
+///
+/// A heading names the block of commands under it. Dim, and never coloured:
+/// weight carries structure, colour carries meaning, and a heading is
+/// scaffolding for the lines below it - dimming it is what lets the commands
+/// carry less colour and still win the eye.
+pub(crate) fn heading(text: &str) -> String {
+    style(text).dim().for_stderr().to_string()
+}
+
+/// A command offered for copying.
+///
+/// Bright green, and yes: green also marks the `✓` that says the run
+/// succeeded. The two readings are told apart by shape rather than by hue -
+/// the marker is a single character at the head of a line of prose, this is a
+/// whole line of shell standing alone under a heading. Blue was tried first
+/// and is the correct choice on paper; ANSI 34 is illegible on a dark
+/// background and the bright slot was not much better in practice, which is
+/// worth more than the tidier rule.
+///
+/// The colour is only half of it. The caller must print this at column 0 -
+/// double-click and shift-select take a leading indent with them, so an
+/// indented command is one a user cannot copy cleanly, which is exactly what
+/// these blocks exist for. A command merely *named* in a sentence is not this;
+/// it keeps that line's weight and stays out of blue.
+pub(crate) fn command(line: &str) -> String {
+    style(line).green().bright().for_stderr().to_string()
+}
+
+/// The label `selfupdate` builds its progress region with. Named, because
+/// three places have to agree on it to keep the identity colour in one piece.
+pub(crate) const JLO_LABEL: &str = "J'Lo";
+
+/// The `J'Lo <version>` mark: the one place the program names itself rather
+/// than a JDK. Magenta belongs to it and to nothing else, and never appears in
+/// an `Error:`/`Warning:` line - a failure is what the reader needs first.
+pub(crate) fn jlo_mark(version: &str) -> String {
+    style(format!("J'Lo {version}"))
+        .magenta()
+        .for_stderr()
+        .to_string()
+}
+
+/// The target half of `J'Lo 0.4.0 → 0.5.0`. One mark spans the arrow there,
+/// so the second version is magenta without repeating the name.
+pub(crate) fn jlo_mark_bare(version: &str) -> String {
+    style(version).magenta().for_stderr().to_string()
+}
+
+/// The `→` that is punctuation rather than the active marker.
+///
+/// Dim is what tells the two apart, and position backs it up when colour is
+/// off: the marker is a line's first character, this one always sits between
+/// two operands.
+pub(crate) fn punctuation_arrow() -> String {
+    style("→").dim().for_stderr().to_string()
+}
+
+/// `<label> <version>` as the install lines say it: the magenta mark when the
+/// subject is J'Lo itself, plain when it is a JDK. Name and version together -
+/// half a mark in colour would read as an accident.
+fn install_mark(label: &str, version: &str) -> String {
+    if label == JLO_LABEL {
+        jlo_mark(version)
+    } else {
+        format!("{label} {version}")
+    }
+}
+
+/// The label inside a progress template, and the prefix beside it. Both are
+/// styled so the mark stays whole across the two template slots it occupies.
+fn progress_label(label: &str) -> String {
+    if label == JLO_LABEL {
+        style(label).magenta().for_stderr().to_string()
+    } else {
+        label.to_string()
+    }
+}
+
+fn progress_prefix(label: &str, version: &str) -> String {
+    if label == JLO_LABEL {
+        style(version).magenta().for_stderr().to_string()
+    } else {
+        version.to_string()
+    }
+}
+
+/// A closing note under a block of commands: dim, because it is secondary to
+/// the commands it follows.
+pub(crate) fn footnote(text: &str) -> String {
+    style(text).dim().for_stderr().to_string()
 }
 
 macro_rules! error {
@@ -675,7 +773,7 @@ fn render_rows(rows: &[Row]) -> Vec<String> {
             };
             let lts = match (any_lts, row.lts) {
                 (false, _) => String::new(),
-                (true, true) => format!("{}  ", style("LTS").cyan()),
+                (true, true) => format!("{}  ", style("LTS").bold()),
                 (true, false) => "     ".to_string(),
             };
             format!(
@@ -734,7 +832,7 @@ fn tip_line(rows: &[Row]) -> Option<String> {
 
     Some(format!(
         "{} {}",
-        style("TIP:").cyan().bold().for_stderr(),
+        style("TIP:").bold().for_stderr(),
         offers.join(" \u{b7} ")
     ))
 }
@@ -766,18 +864,28 @@ const TICK: Duration = Duration::from_millis(100);
 /// No phase word here: the bar and the byte counts already say "downloading".
 /// The transfer rate is dropped for the same reason - the spinner answers "is
 /// it stuck?", and the ETA answers the question the rate was standing in for.
-fn download_style() -> ProgressStyle {
+/// The live region carries no colour that means anything elsewhere. It is
+/// erased when the install succeeds, and a colour that disappears teaches the
+/// reader that it never meant much - a cyan spinner beside the cyan "this one
+/// is active" gutter costs that gutter its meaning. Dim is what is left: the
+/// bar is secondary to the line it leaves behind.
+///
+/// `label` is interpolated rather than hard-coded. Both templates said `JDK`
+/// whatever they were downloading, including the one `selfupdate` builds by
+/// calling `InstallUi::labelled("J'Lo", ..)` - the label existed and the live
+/// region ignored it.
+fn download_style(label: &str) -> ProgressStyle {
     ProgressStyle::default_bar()
-        .template(
-            "{spinner:.cyan} JDK {prefix}  [{bar:20.cyan/blue}]  {bytes}/{total_bytes}  {eta}",
-        )
+        .template(&format!(
+            "{{spinner:.dim}} {label} {{prefix}}  [{{bar:20.dim}}]  {{bytes}}/{{total_bytes}}  {{eta}}"
+        ))
         .expect("progress bar template is a valid literal")
         .progress_chars("#>-")
 }
 
-fn spinner_style() -> ProgressStyle {
+fn spinner_style(label: &str) -> ProgressStyle {
     ProgressStyle::default_spinner()
-        .template("{spinner:.cyan} JDK {prefix}  {msg}")
+        .template(&format!("{{spinner:.dim}} {label} {{prefix}}  {{msg}}"))
         .expect("spinner template is a valid literal")
 }
 
@@ -790,10 +898,10 @@ fn spinner_style() -> ProgressStyle {
 /// the default targeting silently strips every colour from this line.
 fn format_summary(label: &str, version: &str, dest: &str, elapsed: Duration) -> String {
     format!(
-        "{} {label} {} {} {}  {}",
+        "{} {} {} {}  {}",
         style("✓").green().for_stderr(),
-        version,
-        style("→").dim().for_stderr(),
+        install_mark(label, version),
+        punctuation_arrow(),
         dest,
         style(format!("({})", format_elapsed(elapsed)))
             .dim()
