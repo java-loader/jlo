@@ -6,6 +6,7 @@ use std::cmp::Ordering;
 use std::env;
 use std::fs::File;
 use std::io::{Read, Write};
+use std::path::{Component, Path};
 use ureq::Agent;
 use ureq::tls::{RootCerts, TlsConfig, TlsProvider};
 
@@ -67,7 +68,29 @@ impl TryFrom<Asset> for JdkMetadata {
         {
             bail!("incomplete metadata received from the Adoptium API");
         }
+        // Three of these name a file or a directory jlo creates. Checked here,
+        // at the edge, so no caller has to remember which fields are safe to
+        // join onto a path.
+        plain_name(&metadata.semver, "version.semver")?;
+        plain_name(&metadata.release_name, "release_name")?;
+        plain_name(&metadata.package_name, "package name")?;
         Ok(metadata)
+    }
+}
+
+/// Require a field to be a single ordinary path component.
+///
+/// `Path::join` neither resolves `..` nor resists a leading `/` - an absolute
+/// value discards the base it is joined onto entirely. These strings arrive
+/// over the wire, and the checksum cannot vouch for them: it is fetched from
+/// the same response, and the temp file is created and written before the
+/// digest is compared. So the shape is checked instead, once, before any of
+/// them reaches a path.
+fn plain_name(value: &str, field: &str) -> anyhow::Result<()> {
+    let mut components = Path::new(value).components();
+    match (components.next(), components.next()) {
+        (Some(Component::Normal(_)), None) => Ok(()),
+        _ => bail!("Adoptium API returned an unusable {field}: {value:?}"),
     }
 }
 
@@ -337,6 +360,65 @@ fn jdk_arch() -> anyhow::Result<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- metadata validation --
+
+    fn asset(semver: &str, release_name: &str, package_name: &str) -> Asset {
+        Asset {
+            version: AssetVersion {
+                semver: semver.to_string(),
+            },
+            release_name: release_name.to_string(),
+            binary: AssetBinary {
+                package: AssetPackage {
+                    name: package_name.to_string(),
+                    link: "https://example.invalid/jdk.tar.gz".to_string(),
+                    checksum: "0".repeat(64),
+                },
+            },
+        }
+    }
+
+    #[test]
+    fn ordinary_metadata_is_accepted() {
+        let metadata: JdkMetadata = asset("21.0.5+11", "jdk-21.0.5+11", "OpenJDK21U.tar.gz")
+            .try_into()
+            .expect("a normal Adoptium response must pass");
+        assert_eq!(metadata.semver, "21.0.5+11");
+    }
+
+    /// Each of these is joined onto a path: `package name` names the temp file
+    /// the download is written to, `version.semver` the install directory, and
+    /// `release_name` the extracted directory that gets moved into it. A value
+    /// that walks out of the directory it is joined onto has to be refused
+    /// before the join, not noticed after it. A leading `./` goes with them:
+    /// `Path::components` keeps it, Adoptium never sends it, and a check that
+    /// refuses it is the one that is easy to read.
+    #[test]
+    fn metadata_that_escapes_its_directory_is_refused() {
+        for escape in [
+            "../../../../.zshrc",
+            "..",
+            "/etc/passwd",
+            "sub/dir",
+            "a/../../b",
+            ".",
+            "./jdk.tar.gz",
+        ] {
+            for (semver, release_name, package_name) in [
+                (escape, "jdk-21", "jdk.tar.gz"),
+                ("21.0.5+11", escape, "jdk.tar.gz"),
+                ("21.0.5+11", "jdk-21", escape),
+            ] {
+                let err = JdkMetadata::try_from(asset(semver, release_name, package_name))
+                    .expect_err("an escaping field must be refused");
+                assert!(
+                    format!("{err:#}").contains("unusable"),
+                    "{escape:?} was refused for the wrong reason: {err:#}"
+                );
+            }
+        }
+    }
 
     // -- jdk_os / jdk_arch smoke tests --
 
