@@ -13,6 +13,7 @@ use clap::Parser;
 use std::collections::HashSet;
 use std::env;
 use std::fs::File;
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::exit;
 use tempfile::tempdir;
@@ -167,7 +168,33 @@ fn resolve_java_version_from(explicit: Option<String>) -> anyhow::Result<String>
 fn cmd_env(client: &AdoptiumClient, version: Option<String>) -> Result<(), CommandError> {
     let java_version = resolve_java_version_from(version)?;
     setup(client, &java_version)?;
+
+    // The exports on stdout are the whole effect of this command. If stdout is
+    // a terminal nothing captured them, so the exit code says success while
+    // nothing happened - the failure shape that sends a CI step, a Makefile
+    // recipe or an agent looking for the problem somewhere else entirely.
+    if std::io::stdout().is_terminal() {
+        ui::hint!("{}", unsourced_env_hint(&java_version));
+    }
+
     Ok(())
+}
+
+/// The line `jlo env` ends on when its exports went nowhere.
+///
+/// Keyed on stdout being a terminal, which is a reliable enough negative: the
+/// `jlo` shell function sources the exports out of a process substitution
+/// (`. <(jlo-bin env ...)`), and the autoload hook calls that same function, so
+/// on the sourced path stdout is a pipe and this never fires - not even on the
+/// `cd` hook that runs on every directory change.
+/// `jlo-bin env 21 > file` stays silent too - an accepted gap, since the case
+/// that actually misleads is the interactive/agent one.
+fn unsourced_env_hint(java_version: &str) -> String {
+    format!(
+        "jlo env prints exports for a shell to source; it did not change anything. \
+         Use 'jlo exec {java_version} -- <command>' or \
+         'export JAVA_HOME=\"$(jlo home {java_version})\"'."
+    )
 }
 
 fn cmd_home(client: &AdoptiumClient, version: Option<String>) -> Result<(), CommandError> {
@@ -768,6 +795,22 @@ mod tests {
         assert_eq!(
             err.hint.as_deref(),
             Some("Usage: jlo exec [VERSION] -- <COMMAND> [ARGS]...")
+        );
+    }
+
+    // -- unsourced_env_hint --
+
+    /// The hint exists to hand the caller a command that does work without a
+    /// sourcing shell, so it has to name both alternatives and carry the
+    /// version the user actually asked for.
+    #[test]
+    fn unsourced_env_hint_names_both_alternatives() {
+        let hint = unsourced_env_hint("21");
+        assert!(hint.contains("did not change anything"), "{hint}");
+        assert!(hint.contains("jlo exec 21 -- <command>"), "{hint}");
+        assert!(
+            hint.contains("export JAVA_HOME=\"$(jlo home 21)\""),
+            "{hint}"
         );
     }
 
