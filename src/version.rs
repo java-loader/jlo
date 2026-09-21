@@ -12,7 +12,7 @@
 //!
 //! jlo needs more than precedence. Adoptium's build metadata carries the JDK
 //! build number, two builds of one patch are two directories in the store, and
-//! `jlo prune` has to say which of them it keeps. Left equal they sorted
+//! `jlo remove --superseded` has to say which of them it keeps. Left equal they sorted
 //! arbitrarily and `prune` deleted whichever `read_dir` yielded second, which
 //! took the newer build about half the time. `Ord for Version` orders the
 //! `build` field after the rest, so `+10.0.LTS` is newer than `+9.0.LTS` and
@@ -117,7 +117,7 @@ mod tests {
     }
 
     /// The build number breaks a tie between two builds of one patch. `jlo
-    /// prune` deletes on this answer, so it has to be the higher build that
+    /// remove --superseded` deletes on this answer, so it has to be the higher build that
     /// wins and it has to be numeric: `+10` is newer than `+9`, not older the
     /// way a string comparison would have it.
     #[test]

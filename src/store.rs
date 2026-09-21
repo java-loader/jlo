@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 const MARKER_FILE: &str = ".jlo-managed";
 
-/// What a `jlo prune` run did, so the caller owns the presentation and
+/// What a `jlo remove --superseded` run did, so the caller owns the presentation and
 /// [`JdkStore::prune`] owns only the filesystem work.
 #[derive(Debug, Default)]
 pub(crate) struct PruneReport {
@@ -133,7 +133,7 @@ pub(crate) struct InstalledJdk {
     pub version: String,
     pub major: i64,
     /// Whether the JDK carries the `.jlo-managed` marker, i.e. whether
-    /// `jlo prune` and `jlo remove` are allowed to delete it.
+    /// `jlo remove` is allowed to delete it, by either of its selectors.
     pub managed: bool,
 }
 
@@ -276,11 +276,11 @@ impl JdkStore {
         Ok(major_versions_vec)
     }
 
-    /// How many installs `jlo prune` would remove: every managed JDK that is
+    /// How many installs `jlo remove --superseded` would remove: every managed JDK that is
     /// not the newest of its major.
     ///
     /// The read-only counterpart to [`Self::prune`], so `jlo update` can point
-    /// at `jlo prune` after superseding a minor without deleting anything
+    /// at `jlo remove --superseded` after superseding a minor without deleting anything
     /// itself.
     pub(crate) fn superseded_count(&self) -> anyhow::Result<usize> {
         let mut newest: HashMap<i64, String> = HashMap::new();
@@ -949,7 +949,7 @@ mod tests {
         create_jdk_dir(dir.path(), "21.0.3+9", true);
 
         // `prune` never touches an unmanaged install, so counting one would
-        // point at a `jlo prune` that then removes nothing.
+        // point at a `jlo remove --superseded` that then removes nothing.
         assert_eq!(JdkStore::at(dir.path()).superseded_count().unwrap(), 0);
     }
 
@@ -1034,7 +1034,7 @@ mod tests {
         assert!(dir.path().join("v21.0.11+9").exists());
     }
 
-    /// The count behind the `jlo prune` hint has to be the number `prune`
+    /// The count behind the superseded hint has to be the number `prune`
     /// would actually remove, or the hint offers work that will not happen.
     #[test]
     fn superseded_count_agrees_with_prune_on_one_patch() {
@@ -1098,7 +1098,7 @@ mod tests {
         assert!(dir.path().join("21.0.3+9").exists());
     }
 
-    /// `jlo prune` says so when the install directory cannot be read, rather
+    /// `jlo remove --superseded` says so when the install directory cannot be read, rather
     /// than reporting an empty run.
     #[test]
     fn prune_missing_base_dir_is_an_error() {

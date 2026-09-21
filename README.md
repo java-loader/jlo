@@ -87,13 +87,12 @@ This allows automatic discovery of installed JDKs by IDEs like IntelliJ IDEA.
 8. [Updating Java Versions](#updating-java-versions)
 9. [Listing Versions](#listing-versions)
 10. [Removing Versions](#removing-versions)
-11. [Pruning Superseded Versions](#pruning-superseded-versions)
-12. [Using a JDK J'Lo Did Not Install](#using-a-jdk-jlo-did-not-install)
-13. [Managing J’Lo Itself](#managing-jlo-itself)
-14. [Getting Help](#getting-help)
-15. [Supported Shells](#supported-shells)
-16. [Shell Completions](#shell-completions)
-17. [Environment Variables](#environment-variables)
+11. [Using a JDK J'Lo Did Not Install](#using-a-jdk-jlo-did-not-install)
+12. [Managing J’Lo Itself](#managing-jlo-itself)
+13. [Getting Help](#getting-help)
+14. [Supported Shells](#supported-shells)
+15. [Shell Completions](#shell-completions)
+16. [Environment Variables](#environment-variables)
 
 ## Version Resolution
 
@@ -317,7 +316,7 @@ come before that — warming a CI cache, preparing for offline work, or seeding 
   *every* major version is not a thing to ask for. To bring what is already installed up to date, that is
   [`jlo update --all`](#updating-java-versions).
 - Like `jlo update`, a superseded minor release stays on disk and the command ends with a reminder to run
-  [`jlo prune`](#pruning-superseded-versions).
+  [`jlo remove --superseded`](#removing-versions).
 
 **Usage examples:**
 ```shell
@@ -355,7 +354,7 @@ one build per major.
   `.jlorc` at or above the current directory, then `~/.jlo/default.jlorc`, then the newest JDK already installed,
   then the latest release.
 - The superseded minor release stays on disk — an open shell or IDE may still point at it. When an update leaves one
-  behind, `jlo update` ends with a reminder to run [`jlo prune`](#pruning-superseded-versions).
+  behind, `jlo update` ends with a reminder to run [`jlo remove --superseded`](#removing-versions).
 
 **Usage examples:**
 ```shell
@@ -409,11 +408,11 @@ Each row ends in at most one status word, and each one names exactly one command
 | *(blank)* | Adoptium offers it; you do not have it | `jlo env <major>` |
 | `update` | Adoptium offers it, and it is newer than every build of that major you have | `jlo update <major>` |
 | `installed` | Installed, and the newest build of its major that is | — |
-| `superseded` | Installed, but a newer build of the same major is installed too | `jlo prune` |
+| `superseded` | Installed, but a newer build of the same major is installed too | `jlo remove --superseded` |
 | `unmanaged` | Installed without J'Lo's marker, so J'Lo will not delete it | remove it by hand |
 
-They are single words on purpose: `jlo list | grep superseded` is a usable way to ask which installs `jlo prune`
-would take.
+They are single words on purpose: `jlo list | grep superseded` is a usable way to ask which installs
+`jlo remove --superseded` would take.
 
 `update` and `superseded` are deliberately different rows. Being behind Adoptium is a fact about a **major**, and
 it lands on the row for the build you do not have yet. Being superseded is a fact about one **build** sitting next
@@ -423,7 +422,7 @@ version `jlo remove` takes.
 When either applies, `jlo list` ends on a single line of advice:
 
 ```
-TIP: `jlo update --all` (2 outdated) · `jlo prune` (2 superseded)
+TIP: `jlo update --all` (2 outdated) · `jlo remove --superseded` (2 superseded)
 ```
 
 One line, whatever applies — this prints on every `jlo list`, and a stack of suggestions under every listing reads
@@ -445,9 +444,8 @@ expected.
 
 ## Removing Versions
 
-The command `jlo remove` deletes the installed JDKs you name. Its counterpart,
-[`jlo prune`](#pruning-superseded-versions), deletes by rule instead — `remove` is the versions you chose, `prune` is
-whatever "keep the newest minor of each major" leaves over.
+The command `jlo remove` deletes installed JDKs. It is the only command that deletes one, and it takes the target
+either way round: by version, or by rule.
 
 ```bash
 jlo remove 17
@@ -484,23 +482,26 @@ jlo remove 11 17
 
 # remove one exact build, leaving its siblings in the same major alone
 jlo remove 17.0.11+10
+
+# remove every superseded minor release, keeping the newest of each major
+jlo remove --superseded
 ```
 
-## Pruning Superseded Versions
+### Removing by rule
 
-The command `jlo prune` removes older minor versions of installed Java versions, keeping only the latest minor
-release for each major version.
+`--superseded` selects by the rule instead of by name: keep the newest minor release of every installed major, delete
+the rest. It takes no version — the rule is the selector — and cannot be combined with one.
 
 ```bash
-jlo prune
+jlo remove --superseded
 ```
 
-J'Lo only removes installations at `~/.jdks/` (or `~/Library/Java/JavaVirtualMachines/` on macOS) that were installed
-by J'Lo itself.
+It differs from a named removal in one way, and it follows from what was asked for. You named nothing, so an install
+J'Lo did not make is not something you asked to delete: it is skipped, counted in the summary, and is not an error.
+Name that same install explicitly and J'Lo refuses instead.
 
-> This command was called `jlo clean` before 1.0. The old name was removed rather than kept as an alias: `clean`
-> suggested build output (`cargo clean`, `gradle clean`) — cheap, regenerable, safe — while this command deletes real
-> JDKs, and leaving both names alive would have kept that reading available.
+> Before 1.0 this was its own verb, `jlo clean` and then `jlo prune`. It is a flag now so that "what will J'Lo
+> delete?" has one place to look.
 
 ## Using a JDK J'Lo Did Not Install
 
@@ -523,7 +524,7 @@ The directory name is the whole registration: it has to parse as a semantic vers
 Such a JDK is **unmanaged**: it carries no `.jlo-managed` marker, so
 
 - `jlo list --offline` shows it, annotated `(unmanaged)`;
-- `jlo prune` and `jlo remove` will not delete it — remove it by hand when you are done with it;
+- `jlo remove` will not delete it, under either selector — remove it by hand when you are done with it;
 - `jlo update` cannot update it. Adoptium does not list it, so there is no newer minor to resolve. If you also install
   that major from Adoptium, both remain, and `jlo env` picks the highest version of the two.
 

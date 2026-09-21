@@ -136,8 +136,10 @@ fn run() -> Result<(), CommandError> {
         cli::Command::List { offline } => cmd_list(&client, offline),
         cli::Command::Install { versions } => cmd_install(&client, versions),
         cli::Command::Update { versions, all } => cmd_update(&client, versions, all),
-        cli::Command::Prune => cmd_prune(),
-        cli::Command::Remove { versions } => cmd_remove(&versions),
+        cli::Command::Remove {
+            versions,
+            superseded,
+        } => cmd_remove(&versions, superseded),
         cli::Command::Init {
             version,
             global,
@@ -753,17 +755,21 @@ fn is_inside(base: &Path, path: &Path) -> bool {
             .is_ok_and(|canonical| path.starts_with(canonical))
 }
 
-fn cmd_prune() -> Result<(), CommandError> {
+/// Delete installed JDKs, selected either by name or by the superseded rule.
+///
+/// One verb, two selectors: clap guarantees exactly one of them arrives, so
+/// the split here is the whole difference between them. They keep separate
+/// reports because they answer differently for an install jlo did not make -
+/// the rule skips it, a name refuses.
+fn cmd_remove(versions: &[String], superseded: bool) -> Result<(), CommandError> {
     let store = JdkStore::discover()?;
-    let report = store.prune().context("could not prune JDKs")?;
-    ui::prune_report(&report);
-    Ok(())
-}
-
-fn cmd_remove(versions: &[String]) -> Result<(), CommandError> {
-    let store = JdkStore::discover()?;
-    let report = store.remove(versions, active_java_home().as_deref())?;
-    ui::remove_report(&report);
+    if superseded {
+        let report = store.prune().context("could not remove superseded JDKs")?;
+        ui::prune_report(&report);
+    } else {
+        let report = store.remove(versions, active_java_home().as_deref())?;
+        ui::remove_report(&report);
+    }
     Ok(())
 }
 
@@ -914,8 +920,8 @@ fn install_each(
 
     // A download leaves the superseded minor on disk on purpose - a command
     // that downloads should not also delete, and the old JDK may still be
-    // wired into an open shell or an IDE. Point at `jlo prune` instead of
-    // doing it here.
+    // wired into an open shell or an IDE. Point at `jlo remove --superseded`
+    // instead of doing it here.
     if let Some(hint) = superseded_hint(installed_any, count_superseded(store)) {
         ui::hint!("{hint}");
     }
@@ -923,9 +929,9 @@ fn install_each(
     Ok(())
 }
 
-/// How many installs `jlo prune` would remove, or 0 if that cannot be
-/// determined. A hint is not worth failing an otherwise successful run, so an
-/// unreadable JDK directory just means no hint.
+/// How many installs `jlo remove --superseded` would remove, or 0 if that
+/// cannot be determined. A hint is not worth failing an otherwise successful
+/// run, so an unreadable JDK directory just means no hint.
 fn count_superseded(store: &JdkStore) -> usize {
     store.superseded_count().unwrap_or(0)
 }
@@ -943,7 +949,7 @@ fn superseded_hint(installed_any: bool, superseded: usize) -> Option<String> {
 
     let plural = if superseded == 1 { "" } else { "s" };
     Some(format!(
-        "{superseded} superseded JDK{plural} still installed - run 'jlo prune' to remove {}.",
+        "{superseded} superseded JDK{plural} still installed - run 'jlo remove --superseded' to remove {}.",
         if superseded == 1 { "it" } else { "them" }
     ))
 }
@@ -1554,7 +1560,7 @@ mod tests {
         let hint = superseded_hint(true, 2).expect("an install plus leftovers earns a hint");
         assert!(hint.contains('2'), "hint should say how many: {hint}");
         assert!(
-            hint.contains("jlo prune"),
+            hint.contains("jlo remove --superseded"),
             "hint should name the command: {hint}"
         );
     }
@@ -1565,7 +1571,7 @@ mod tests {
         assert!(hint.contains("1 superseded JDK "), "{hint}");
     }
 
-    /// Nothing was superseded, so pointing at `jlo prune` would send the user
+    /// Nothing was superseded, so pointing at the command would send the user
     /// to a command that removes nothing.
     #[test]
     fn superseded_hint_silent_when_nothing_is_superseded() {

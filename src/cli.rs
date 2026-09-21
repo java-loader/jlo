@@ -30,6 +30,7 @@ Examples:
   jlo install 25                   Download Java 25 without switching to it
   jlo update --all                 Bring every installed JDK up to date
   jlo remove 11 17                 Remove every installed Java 11 and 17
+  jlo remove --superseded          Remove every superseded minor release
 
 Environment:
   JLO_HOME   J'Lo's own directory (default ~/.jlo): the shell scripts,
@@ -295,13 +296,6 @@ is downloaded. Only major versions are accepted: 21, not 21.0.5."
         all: bool,
     },
 
-    /// Remove superseded minor versions
-    ///
-    /// Keeps the newest minor release of every installed major version and
-    /// deletes the rest. Only JDKs J'Lo installed are touched. To remove a
-    /// version outright rather than by rule, see jlo remove.
-    Prune,
-
     // Attribute strings rather than a doc comment, for the reason given at
     // the top of this enum: JAVA_HOME below would have to be backtick-quoted
     // in rustdoc, and clap would then print the backticks.
@@ -309,6 +303,8 @@ is downloaded. Only major versions are accepted: 21, not 21.0.5."
         about = "Remove installed JDKs",
         long_about = "\
 Remove installed JDKs
+
+Name what goes, either way round: by version, or by rule.
 
 Each VERSION is either a major version - jlo remove 17 removes every
 installed 17.x - or the exact version of one install, e.g. 17.0.11+10.
@@ -321,12 +317,22 @@ still go. There are three such cases: nothing installed matches the
 version, J'Lo did not install it, or JAVA_HOME points at it. Each is an
 error only when it leaves nothing to remove at all.
 
-Use jlo prune to remove superseded minor versions by rule instead."
+--superseded names them by rule instead: keep the newest minor release
+of every installed major, delete the rest. It takes no VERSION - the
+rule is the selector - and, being nobody's explicit request, it leaves
+an install J'Lo did not make alone without calling it an error."
     )]
     Remove {
         /// Major versions, or exact versions of single installs
-        #[arg(required = true)]
         versions: Vec<String>,
+
+        /// Remove every superseded minor release instead of a named version
+        #[arg(
+            long,
+            conflicts_with = "versions",
+            required_unless_present = "versions"
+        )]
+        superseded: bool,
     },
 
     /// Write .jlorc pinning this project's Java version

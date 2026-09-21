@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 /// is erased once the install succeeds, leaving exactly one summary line behind.
 ///
 /// The rule the whole module follows: output persists in proportion to how
-/// durable the side effect is. A JDK on disk survives until `jlo prune`, so it
+/// durable the side effect is. A JDK on disk survives until it is removed, so
 /// earns a line. Exporting `JAVA_HOME` lasts until the shell exits and is fully
 /// implied by the command the user typed, so it prints nothing at all - which
 /// matters because the autoload hook runs on every `cd`.
@@ -319,10 +319,10 @@ macro_rules! created {
 
 pub(crate) use {created, error, hint, warning};
 
-/// Report a `jlo prune` run.
+/// Report a `jlo remove --superseded` run.
 ///
-/// `prune` is the one command that destroys things, so unlike `jlo env` it
-/// always says what it did - including when the answer is "nothing".
+/// Deletion is the one thing jlo does that cannot be undone, so unlike `jlo
+/// env` it always says what it did - including when the answer is "nothing".
 pub(crate) fn prune_report(report: &crate::store::PruneReport) {
     // Styling adds invisible escape bytes, so pad the plain number first and
     // style the padded string - the same rule the `jlo list` columns follow.
@@ -349,7 +349,7 @@ pub(crate) fn prune_report(report: &crate::store::PruneReport) {
     let count = report.removed_count();
     if count == 0 {
         eprintln!(
-            "{} Nothing to prune {}",
+            "{} Nothing to remove {}",
             style("✓").green().for_stderr(),
             style("(only the newest of each major is installed)")
                 .dim()
@@ -622,7 +622,7 @@ pub(crate) fn print_lines(lines: impl IntoIterator<Item = String>) {
 /// Exactly one token per row: the statuses are ordered by how much they
 /// constrain what the user can do with the install, so a build that is both
 /// unmanaged and superseded reports `unmanaged` - the fact that decides
-/// whether `jlo prune` will touch it at all.
+/// whether `jlo remove --superseded` will touch it at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Status {
     /// Adoptium offers it and it is not installed - either nothing of this
@@ -723,13 +723,14 @@ fn supersedes_every_install(jdk: &RemoteJdk, installed: &[InstalledJdk]) -> bool
 /// The status of a row backed by an install.
 ///
 /// `Superseded` is a property of the *build* - a newer build of the same major
-/// is installed alongside it - which is what `jlo prune` acts on. Being older
+/// is installed alongside it - which is what `jlo remove --superseded` acts
+/// on. Being older
 /// than something Adoptium offers is a different fact, and it lands on the
 /// remote row as `Update`, where `jlo update <major>` is the command that
 /// answers it.
 ///
 /// `Unmanaged` comes first because it decides whether jlo will act on the
-/// install at all: `prune` and `remove` both leave a marker-less directory
+/// install at all: both of `remove`'s selectors leave a marker-less directory
 /// alone, so `superseded` there would name an action that cannot happen.
 fn local_status(jdk: &InstalledJdk, installed: &[InstalledJdk]) -> Status {
     if !jdk.managed {
@@ -790,7 +791,7 @@ fn render_rows(rows: &[Row]) -> Vec<String> {
 
 /// The one word a row ends on. Each is a single token - no spaces, no
 /// parentheses - so `jlo list | grep superseded` stays a usable way to ask
-/// which installs `jlo prune` would take.
+/// which installs `jlo remove --superseded` would take.
 fn render_status(status: Status) -> String {
     match status {
         Status::Available => String::new(),
@@ -823,7 +824,7 @@ fn tip_line(rows: &[Row]) -> Option<String> {
     if superseded > 0 {
         offers.push(format!(
             "{} ({superseded} superseded)",
-            style("`jlo prune`").bold().for_stderr()
+            style("`jlo remove --superseded`").bold().for_stderr()
         ));
     }
     if offers.is_empty() {
@@ -1157,8 +1158,8 @@ mod tests {
     }
 
     /// Two builds of one patch differ only in the build number, and the
-    /// higher one wins. `prune` reads the same ordering and deletes on it, so
-    /// the row that says `superseded` has to be the row `prune` would remove.
+    /// higher one wins. The deletion rule reads the same ordering, so the row
+    /// that says `superseded` has to be the row `remove --superseded` deletes.
     #[test]
     fn build_rows_marks_the_lower_build_of_one_patch_superseded() {
         let rows = build_rows(
@@ -1176,7 +1177,7 @@ mod tests {
     }
 
     /// Two names for one version are genuinely equal, so neither can be
-    /// `superseded`: `prune` will not delete either, and a row promising the
+    /// `superseded`: neither will be deleted, and a row promising the
     /// deletion would name an action that never happens.
     #[test]
     fn build_rows_leaves_two_names_for_one_version_both_installed() {
@@ -1204,7 +1205,7 @@ mod tests {
 
     #[test]
     fn build_rows_reports_unmanaged_ahead_of_superseded() {
-        // `jlo prune` will not touch it whatever else is true of it, so
+        // `jlo remove --superseded` will not touch it whatever else is true, so
         // `superseded` would name an action that cannot happen.
         let rows = build_rows(
             &[],
@@ -1312,7 +1313,9 @@ mod tests {
         ];
         assert_eq!(
             tip_line(&rows).as_deref(),
-            Some("TIP: `jlo update --all` (2 outdated) \u{b7} `jlo prune` (2 superseded)")
+            Some(
+                "TIP: `jlo update --all` (2 outdated) \u{b7} `jlo remove --superseded` (2 superseded)"
+            )
         );
     }
 
@@ -1321,13 +1324,13 @@ mod tests {
         let rows = vec![row(21, "21.0.9+10.0.LTS", Status::Superseded)];
         assert_eq!(
             tip_line(&rows).as_deref(),
-            Some("TIP: `jlo prune` (1 superseded)")
+            Some("TIP: `jlo remove --superseded` (1 superseded)")
         );
     }
 
     #[test]
-    fn tip_line_does_not_offer_to_prune_an_unmanaged_install() {
-        // `jlo prune` leaves it alone, so counting it would promise a
+    fn tip_line_does_not_offer_to_remove_an_unmanaged_install() {
+        // `jlo remove --superseded` leaves it alone, so counting it would promise a
         // removal that will not happen.
         let rows = vec![row(21, "21.0.9+10.0.LTS", Status::Unmanaged)];
         assert_eq!(tip_line(&rows), None);

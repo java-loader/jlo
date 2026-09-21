@@ -19,7 +19,6 @@ fn bare_invocation_prints_help() {
         .stdout(predicate::str::contains("current"))
         .stdout(predicate::str::contains("list"))
         .stdout(predicate::str::contains("update"))
-        .stdout(predicate::str::contains("prune"))
         .stdout(predicate::str::contains("remove"))
         .stdout(predicate::str::contains("init"))
         .stdout(predicate::str::contains("selfupdate"))
@@ -43,25 +42,30 @@ fn help_flags_print_help() {
 }
 
 #[test]
-fn clean_is_gone_entirely() {
-    // `clean` was renamed to `prune`, with no alias left behind: one name
-    // for one command, everywhere. Typing the old one is an ordinary usage
-    // error - not a hidden path that still works.
-    let mut old_name = Command::cargo_bin("jlo-bin").unwrap();
-    old_name
-        .arg("clean")
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("unrecognized subcommand 'clean'"));
+fn the_rule_based_deletion_verbs_are_gone_entirely() {
+    // `clean` became `prune`, and `prune` became `jlo remove --superseded`.
+    // Neither old name was kept as an alias: one name for one command,
+    // everywhere. Typing either is an ordinary usage error - not a hidden
+    // path that still works.
+    for old_name in ["clean", "prune"] {
+        let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
+        cmd.arg(old_name)
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(format!(
+                "unrecognized subcommand '{old_name}'"
+            )));
+    }
 
-    // And it appears nowhere in the overview - not in the Commands: list,
-    // and not in any line of prose still pointing at the old name.
+    // And neither appears anywhere in the overview - not in the Commands:
+    // list, and not in any line of prose still pointing at an old name.
     let mut help = Command::cargo_bin("jlo-bin").unwrap();
     help.arg("--help")
         .assert()
         .success()
-        .stdout(predicate::str::contains("prune"))
-        .stdout(predicate::str::contains("clean").not());
+        .stdout(predicate::str::contains("remove"))
+        .stdout(predicate::str::contains("clean").not())
+        .stdout(predicate::str::contains("prune").not());
 }
 
 #[test]
@@ -174,6 +178,53 @@ fn remove_requires_at_least_one_version() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("Usage: jlo remove"));
+}
+
+/// The rule-based half of `remove` had no command-level test at all while it
+/// was `jlo prune`: every one of its 12 tests called `JdkStore::prune`
+/// directly, so the wiring and the report were unproven. This covers all
+/// three things the report says in one run - what went, what stayed, and the
+/// unmanaged install it left alone.
+#[test]
+fn remove_superseded_deletes_only_the_older_managed_builds() {
+    let home = tempfile::tempdir().unwrap();
+    install_fake_jdk(home.path(), "21.0.11+10");
+    install_fake_jdk(home.path(), "21.0.9+10");
+    // No `.jlo-managed` marker: the rule skips it rather than refusing, since
+    // nobody named it.
+    let unmanaged = jdk_store_in(home.path()).join("17.0.11+10");
+    std::fs::create_dir_all(unmanaged.join("bin")).unwrap();
+
+    Command::cargo_bin("jlo-bin")
+        .unwrap()
+        .args(["remove", "--superseded"])
+        .env("HOME", home.path())
+        .env("JLO_ADOPTIUM_API_URL", "http://127.0.0.1:1")
+        .env_remove("JAVA_HOME")
+        .assert()
+        .success()
+        // ADR-0001: deletion is not the environment channel.
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("21.0.9+10"))
+        .stderr(predicate::str::contains("Removed 1 JDK"))
+        .stderr(predicate::str::contains("left 1 install alone"));
+
+    let store = jdk_store_in(home.path());
+    assert!(store.join("21.0.11+10").exists(), "the newest minor stays");
+    assert!(!store.join("21.0.9+10").exists(), "the older minor goes");
+    assert!(unmanaged.exists(), "an unmanaged install is never deleted");
+}
+
+/// The rule takes no version, and clap has to say so rather than silently
+/// ignoring one: `jlo remove --superseded 21` reads as "only the superseded
+/// 21s", which is not what it would do.
+#[test]
+fn remove_superseded_refuses_a_version_alongside_it() {
+    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
+    cmd.args(["remove", "--superseded", "21"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot be used with"));
 }
 
 #[test]
@@ -428,7 +479,6 @@ fn every_subcommand_has_help() {
         "list",
         "install",
         "update",
-        "prune",
         "remove",
         "init",
         "selfupdate",
@@ -744,7 +794,9 @@ fn list_remote_gives_a_superseded_build_its_own_row() {
             "    21  21.0.11+10.0.LTS  LTS  installed\n \u{2192}  21  21.0.9+10.0.LTS   LTS  superseded\n",
         )
         // The advice belongs on stderr, so a pipe sees only the rows.
-        .stderr(predicate::str::contains("`jlo prune` (1 superseded)"));
+        .stderr(predicate::str::contains(
+            "`jlo remove --superseded` (1 superseded)",
+        ));
 }
 
 #[test]
