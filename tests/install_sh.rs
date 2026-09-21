@@ -1,19 +1,19 @@
-//! Tests for the profile snippet `install.sh` generates.
+//! Tests for the layout an install produces, and for what it prints.
 //!
-//! The installer's user-facing contract is the block it tells people to paste
-//! into a profile. That block used to be twelve lines that restated every
-//! internal path, so an installer change meant every existing user had a stale
-//! profile - and a re-install could emit a block with no `JLO_HOME` export at
-//! all, leaving every `source` line below it a silent no-op.
+//! `install.sh` is a bootstrap now: it downloads one file, verifies it,
+//! unpacks it and hands over to the binary, which owns everything under
+//! `$JLO_HOME` - the three entry stubs, the two wrapper dialects, the
+//! completions, the symlink and the receipt. These tests run the real
+//! `install.sh` against a temporary `HOME` with `curl` stubbed out, then
+//! source the generated files from real shells.
 //!
-//! Now the installer generates three entry files under `$JLO_HOME` and the
-//! profile only sources them. These tests run the real `install.sh` against a
-//! temporary `HOME`, with `curl` stubbed out so nothing is downloaded, and then
-//! source the generated files from a real shell.
+//! The Rust compiler never checks the generated shell code, so sourcing it
+//! here is the only thing that does.
 
 // Test code: an `unwrap` failure here is a test failure, which is the point.
 #![allow(clippy::unwrap_used)]
 
+use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -33,7 +33,9 @@ fn skip_missing(test: &str, sh: &str) -> bool {
 }
 
 /// A release tarball with the same shape as the real one: the binary under
-/// test plus the two shell scripts, all at the archive root.
+/// test, and nothing else. The shell code travels *inside* it now, so there is
+/// one file to download, verify and swap instead of three that can fall out of
+/// step with each other.
 fn release_tarball(dir: &Path) -> PathBuf {
     let stage = dir.join("stage");
     std::fs::create_dir_all(&stage).unwrap();
@@ -42,16 +44,13 @@ fn release_tarball(dir: &Path) -> PathBuf {
         stage.join("jlo-bin"),
     )
     .unwrap();
-    for script in ["jlo-init.sh", "jlo-autoload.sh"] {
-        std::fs::copy(manifest().join(script), stage.join(script)).unwrap();
-    }
     let tarball = dir.join("jlo.tar.gz");
     let ok = Command::new("tar")
         .arg("-czf")
         .arg(&tarball)
         .arg("-C")
         .arg(&stage)
-        .args(["jlo-bin", "jlo-init.sh", "jlo-autoload.sh"])
+        .arg("jlo-bin")
         .status()
         .unwrap()
         .success();
@@ -59,23 +58,48 @@ fn release_tarball(dir: &Path) -> PathBuf {
     tarball
 }
 
+/// What the stubbed `curl` serves when the installer asks for the `.sha256`
+/// published beside the tarball.
+#[derive(Clone, Copy)]
+enum Checksum {
+    /// Computed at run time by the same tool `install.sh` uses, so the happy
+    /// path cannot pass by both sides being wrong in the same way.
+    Correct,
+    Wrong,
+    /// A release that predates published checksums: `curl -f` fails.
+    Missing,
+}
+
 /// A `curl` that serves the stub tarball instead of reaching GitHub. Placed
 /// first on `PATH` so `install.sh` itself needs no test-only branch.
-fn stub_curl(dir: &Path, tarball: &Path) -> PathBuf {
+fn stub_curl(dir: &Path, tarball: &Path, checksum: Checksum) -> PathBuf {
     let bin = dir.join("stubbin");
     std::fs::create_dir_all(&bin).unwrap();
     let curl = bin.join("curl");
+    let serve_sum = match checksum {
+        Checksum::Correct => format!(
+            "shasum -a 256 '{}' | cut -d ' ' -f 1 > \"$out\"",
+            tarball.display()
+        ),
+        Checksum::Wrong => format!("echo '{}' > \"$out\"", "0".repeat(64)),
+        Checksum::Missing => "exit 22".to_string(),
+    };
     std::fs::write(
         &curl,
         format!(
             "#!/bin/sh\n\
              # Ignores every flag but -o, which is all install.sh passes.\n\
+             out=\n\
              while [ $# -gt 0 ]; do\n\
-             \x20 case \"$1\" in -o) shift; cp '{}' \"$1\" ; exit 0 ;; esac\n\
+             \x20 case \"$1\" in -o) shift; out=\"$1\" ;; esac\n\
              \x20 shift\n\
              done\n\
-             exit 1\n",
-            tarball.display()
+             [ -n \"$out\" ] || exit 1\n\
+             case \"$out\" in\n\
+             \x20 *.sha256) {serve_sum} ;;\n\
+             \x20 *) cp '{tar}' \"$out\" ;;\n\
+             esac\n",
+            tar = tarball.display()
         ),
     )
     .unwrap();
@@ -85,12 +109,17 @@ fn stub_curl(dir: &Path, tarball: &Path) -> PathBuf {
     bin
 }
 
-/// Runs the real installer against a throwaway `HOME`. `jlo_home` overrides
-/// the install directory the way a user exporting `JLO_HOME` would.
-fn install(jlo_home: Option<&str>) -> (tempfile::TempDir, Output) {
+/// Runs the real installer against a throwaway `HOME`, without judging the
+/// outcome. `jlo_home` overrides the install directory the way a user
+/// exporting `JLO_HOME` would.
+///
+/// `SHELL` is pinned so the profile the installer names is deterministic - it
+/// reads the *login* shell from there, which is the right signal for a file
+/// the user will edit, and the wrong one for the dialect dispatch.
+fn run_installer(jlo_home: Option<&str>, checksum: Checksum) -> (tempfile::TempDir, Output) {
     let dir = tempfile::tempdir().unwrap();
     let tarball = release_tarball(dir.path());
-    let stubbin = stub_curl(dir.path(), &tarball);
+    let stubbin = stub_curl(dir.path(), &tarball, checksum);
     let home = dir.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
 
@@ -103,17 +132,30 @@ fn install(jlo_home: Option<&str>) -> (tempfile::TempDir, Output) {
     cmd.arg(manifest().join("install.sh"))
         .env("HOME", &home)
         .env("PATH", path)
+        .env("SHELL", "/bin/zsh")
         .env_remove("JLO_HOME");
     if let Some(h) = jlo_home {
         cmd.env("JLO_HOME", h.replace("$HOME", &home.display().to_string()));
     }
     let out = cmd.output().unwrap();
+    (dir, out)
+}
+
+fn install(jlo_home: Option<&str>) -> (tempfile::TempDir, Output) {
+    let (dir, out) = run_installer(jlo_home, Checksum::Correct);
     assert!(
         out.status.success(),
         "install.sh failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
     (dir, out)
+}
+
+/// The installer's human output is on stderr: stdout is the environment
+/// channel (ADR-0001), and from 0.4.0 `selfupdate` prints a `. jlo.sh` line
+/// there for the shell wrapper to eval.
+fn printed(out: &Output) -> String {
+    String::from_utf8_lossy(&out.stderr).into_owned()
 }
 
 /// POSIX single-quoting, so a path containing an apostrophe can be embedded in
@@ -185,7 +227,7 @@ fn a_reinstall_with_jlo_home_already_exported_still_exports_it() {
         body.contains("export JLO_HOME="),
         "generated jlo.sh has no JLO_HOME export: {body}"
     );
-    let printed = String::from_utf8_lossy(&out.stdout);
+    let printed = printed(&out);
     assert!(
         !printed.contains("keep your existing export"),
         "installer still tells the user to keep an export it did not print: {printed}"
@@ -212,7 +254,7 @@ fn a_custom_jlo_home_is_baked_into_the_generated_files() {
         );
         assert!(stdout.contains("function"), "no jlo function: {stdout:?}");
     }
-    let printed = String::from_utf8_lossy(&out.stdout);
+    let printed = printed(&out);
     assert!(
         printed.contains(&format!("{}/jlo.sh", custom.display())),
         "installer did not print the custom path to source: {printed}"
@@ -270,13 +312,14 @@ fn generated_entries_parse_under_every_supported_shell() {
     }
 }
 
-/// The printed instructions are the whole manual step. Keep them to the three
-/// source lines - if this count grows, the regression is user-visible.
+/// The printed instructions are the whole manual step, and they are *commands*
+/// now rather than prose to act on. Keep them to the three `echo` lines - if
+/// this count grows, the regression is user-visible.
 #[test]
-fn the_printed_snippet_is_three_source_lines() {
+fn the_printed_snippet_is_three_runnable_append_lines() {
     let (dir, out) = install(None);
     let home = dir.path().join("home");
-    let printed = String::from_utf8_lossy(&out.stdout);
+    let printed = printed(&out);
     assert!(home.join(".jlo").is_dir());
     // A default install prints the unexpanded "$HOME/.jlo" so the same profile
     // line works on another machine; only a custom JLO_HOME is spelled out.
@@ -290,14 +333,110 @@ fn the_printed_snippet_is_three_source_lines() {
         !printed.contains(&format!("{}/jlo.sh", home.join(".jlo").display())),
         "installer hardcoded the expanded home path: {printed}"
     );
-    let sourcing = printed
+    let appends = printed
         .lines()
-        .filter(|l| l.trim_start().starts_with("[ -s "))
+        .filter(|l| l.trim_start().starts_with("printf ") && l.contains(">>"))
         .count();
     assert_eq!(
-        sourcing, 3,
-        "expected exactly three source lines:\n{printed}"
+        appends, 3,
+        "expected exactly three append lines:\n{printed}"
     );
+}
+
+/// The half of the output that makes the difference between "installed" and
+/// "usable": one line makes jlo permanent, the next makes it effective in the
+/// shell the user is already sitting in. The installer cannot do that second
+/// part itself - it runs in a subshell under `curl | bash`.
+#[test]
+fn the_installer_prints_a_line_that_activates_the_current_shell() {
+    let (_dir, out) = install(None);
+    let printed = printed(&out);
+    assert!(
+        printed.contains("    . \"$HOME/.jlo/jlo.sh\""),
+        "installer printed no line to source jlo right now: {printed}"
+    );
+    assert!(
+        !printed.to_lowercase().contains("restart your terminal"),
+        "installer still tells the user to restart their terminal: {printed}"
+    );
+}
+
+/// The profile file is chosen from `$SHELL` - the login shell, which is what
+/// the user will actually edit - and stays *visible* in the printed command,
+/// so a wrong guess is a one-word fix rather than a line written silently into
+/// the wrong file.
+#[test]
+fn the_profile_path_follows_the_login_shell() {
+    let (dir, out) = run_installer(None, Checksum::Correct);
+    assert!(out.status.success());
+    drop(dir);
+    assert!(
+        printed(&out).contains(">> ~/.zshrc"),
+        "installer did not name the zsh profile: {}",
+        printed(&out)
+    );
+}
+
+/// The three re-install cases, in the order a user meets them.
+///
+/// The receipt alone cannot decide: someone who abandoned the first install
+/// halfway has a receipt and no profile line, and would otherwise be told
+/// nothing at all on the upgrade that was supposed to fix it.
+#[test]
+fn a_reinstall_says_nothing_when_the_profile_already_sources_jlo() {
+    let (dir, first) = install(None);
+    let home = dir.path().join("home");
+    assert!(
+        printed(&first).contains("To activate"),
+        "the first install withheld the instructions"
+    );
+
+    // The user runs the line the installer printed.
+    std::fs::write(
+        home.join(".zshrc"),
+        "[ -s \"$HOME/.jlo/jlo.sh\" ] && . \"$HOME/.jlo/jlo.sh\"\n",
+    )
+    .unwrap();
+
+    let second = reinstall_over(&home);
+    let printed = printed(&second);
+    assert!(
+        printed.contains("installed to ~/.jlo"),
+        "the upgrade said nothing at all: {printed}"
+    );
+    assert!(
+        !printed.contains("To activate"),
+        "the upgrade repeated first-install instructions: {printed}"
+    );
+}
+
+#[test]
+fn a_reinstall_repeats_the_instructions_when_the_profile_line_is_missing() {
+    let (dir, _) = install(None);
+    let home = dir.path().join("home");
+    // A receipt is there, but the user never added the line.
+    let second = reinstall_over(&home);
+    let printed = printed(&second);
+    assert!(
+        printed.contains("To activate"),
+        "a half-finished install got no instructions on the retry: {printed}"
+    );
+    assert!(
+        printed.contains("never added"),
+        "the installer did not point out the missing profile line: {printed}"
+    );
+}
+
+/// Runs the install verb again over an existing `$JLO_HOME`, the way a second
+/// `install.sh` run would once the tarball is unpacked.
+fn reinstall_over(home: &Path) -> Output {
+    Command::new(home.join(".jlo").join("bin").join("jlo-bin"))
+        .arg("__install")
+        .env("HOME", home)
+        .env("JLO_HOME", home.join(".jlo"))
+        .env("SHELL", "/bin/zsh")
+        .output()
+        .unwrap()
 }
 
 /// Paths are pasted into the generated files as shell literals, so a character
@@ -305,11 +444,16 @@ fn the_printed_snippet_is_three_source_lines() {
 /// which the user discovers only when their profile breaks. An apostrophe is the
 /// one that actually closes the quote; `$` and a backtick must survive as data
 /// rather than being expanded when the file is sourced.
+///
+/// The backslash is in here for the *printed* half rather than the generated
+/// one: `echo` expands `\n` in zsh, in dash and in any bash built with
+/// `xpg_echo`, so the append command the user is told to run would have written
+/// a line break into their profile and split the line in two.
 #[test]
 fn a_jlo_home_with_shell_metacharacters_still_generates_valid_files() {
-    let (dir, out) = install(Some("$HOME/o'brien $x `id`"));
+    let (dir, out) = install(Some("$HOME/o'brien $x `id` a\\nb"));
     let home = dir.path().join("home");
-    let custom = home.join("o'brien $x `id`");
+    let custom = home.join("o'brien $x `id` a\\nb");
 
     for name in ["jlo.sh", "autoload.sh", "completions.sh"] {
         let script = custom.join(name);
@@ -339,7 +483,9 @@ fn a_jlo_home_with_shell_metacharacters_still_generates_valid_files() {
             sh,
             &home,
             &custom.join("jlo.sh"),
-            "/bin/sh -c 'echo \"home=[$JLO_HOME]\"'",
+            // printf, not echo: the value under test contains a backslash,
+            // and echo would expand it here in the test harness itself.
+            "/bin/sh -c 'printf \"home=[%s]\\n\" \"$JLO_HOME\"'",
         );
         let stdout = String::from_utf8_lossy(&ran.stdout);
         assert!(
@@ -348,22 +494,33 @@ fn a_jlo_home_with_shell_metacharacters_still_generates_valid_files() {
         );
     }
 
-    // The printed lines are pasted into a profile, so they need the same
-    // treatment. Rather than inspect the quoting, run the required line the way
-    // a profile would and check it actually loaded the wrapper.
-    let printed = String::from_utf8_lossy(&out.stdout);
-    let required = printed
+    // The printed lines are now *commands the user runs*, which puts the
+    // quoting under two layers: the path inside the profile line, and the
+    // whole line inside the `printf` argument. Rather than inspect either, run
+    // the command the installer printed and then source what it produced.
+    let printed = printed(&out);
+    let append = printed
         .lines()
-        .find(|l| l.trim_start().starts_with("[ -s ") && l.contains("jlo.sh"))
-        .expect("installer printed no line for jlo.sh");
-    let sh = "/bin/bash";
-    if !skip_missing(
-        "a_jlo_home_with_shell_metacharacters_still_generates_valid_files",
-        sh,
-    ) {
+        .map(str::trim_start)
+        .find(|l| l.starts_with("printf ") && l.contains("jlo.sh") && l.contains(">>"))
+        .expect("installer printed no append line for jlo.sh");
+    // Under both shells: the command is run by whichever shell the user is
+    // sitting in, and they disagree about what `echo` does to a backslash.
+    for (i, sh) in INTERPRETERS.iter().enumerate() {
+        if skip_missing(
+            "a_jlo_home_with_shell_metacharacters_still_generates_valid_files",
+            sh,
+        ) {
+            continue;
+        }
+        // A profile of its own per shell, so the second run appends to an
+        // empty file rather than to the first run's line.
+        let profile = home.join(format!(".profile{i}"));
+        let appended = append.replacen(">> ~/.zshrc", &format!(">> {}", squote(&profile)), 1);
+        assert_ne!(appended, append, "could not redirect the printed command");
         let ran = Command::new(sh)
             .arg("-c")
-            .arg(format!("{required}\ntype jlo"))
+            .arg(format!("{appended}\n. {}\ntype jlo", squote(&profile)))
             .env("HOME", &home)
             .env_remove("JLO_HOME")
             .output()
@@ -371,9 +528,14 @@ fn a_jlo_home_with_shell_metacharacters_still_generates_valid_files() {
         let stdout = String::from_utf8_lossy(&ran.stdout);
         assert!(
             stdout.contains("function"),
-            "the printed profile line did not load the wrapper: {stdout:?} \
-             line={required:?} stderr={:?}",
+            "{sh}: the printed command did not produce a profile line that loads \
+             the wrapper: {stdout:?} line={appended:?} stderr={:?}",
             String::from_utf8_lossy(&ran.stderr)
+        );
+        assert_eq!(
+            std::fs::read_to_string(&profile).unwrap().lines().count(),
+            1,
+            "{sh}: the append command wrote more than one line into the profile"
         );
     }
 }
@@ -385,7 +547,7 @@ fn a_jlo_home_with_shell_metacharacters_still_generates_valid_files() {
 fn a_failure_to_write_the_required_entry_fails_the_install() {
     let dir = tempfile::tempdir().unwrap();
     let tarball = release_tarball(dir.path());
-    let stubbin = stub_curl(dir.path(), &tarball);
+    let stubbin = stub_curl(dir.path(), &tarball, Checksum::Correct);
     let home = dir.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
 
@@ -430,7 +592,7 @@ fn a_failure_to_write_the_required_entry_fails_the_install() {
     std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
     std::fs::set_permissions(&jlo_home, perms).unwrap();
 
-    let stdout = std::fs::read_to_string(home.join("out.txt")).unwrap_or_default();
+    let said = std::fs::read_to_string(home.join("err.txt")).unwrap_or_default();
     if jlo_home.join("jlo.sh").is_file() {
         eprintln!(
             "SKIP a_failure_to_write_the_required_entry_fails_the_install: could not make the write fail here."
@@ -439,11 +601,15 @@ fn a_failure_to_write_the_required_entry_fails_the_install() {
     }
     assert!(
         !out.status.success(),
-        "install.sh reported success without writing jlo.sh: {stdout}"
+        "install.sh reported success without writing jlo.sh: {said}"
     );
     assert!(
-        !stdout.contains("Successfully installed"),
-        "install.sh announced success without writing jlo.sh: {stdout}"
+        !said.contains("To activate"),
+        "install.sh printed activation instructions for a layout it never wrote: {said}"
+    );
+    assert!(
+        !jlo_home.join("install-receipt.json").is_file(),
+        "the receipt was committed although the install never finished"
     );
 }
 
@@ -570,11 +736,19 @@ fn a_truncated_installer_does_nothing() {
         .iter()
         .position(|l| *l == "main() {")
         .expect("install.sh no longer wraps its body in main()");
+    // The line that closes `main`. A copy cut before it leaves an unterminated
+    // function, which is a parse error; one cut after it is a complete
+    // function nobody calls.
+    let main_end = main_start
+        + lines[main_start..]
+            .iter()
+            .position(|l| *l == "}")
+            .expect("install.sh's main() is never closed");
 
     for fraction in [3, 10, 25, 50, 75, 90, 99] {
         let dir = tempfile::tempdir().unwrap();
         let tarball = release_tarball(dir.path());
-        let stubbin = stub_curl(dir.path(), &tarball);
+        let stubbin = stub_curl(dir.path(), &tarball, Checksum::Correct);
         let home = dir.path().join("home");
         std::fs::create_dir_all(&home).unwrap();
 
@@ -597,23 +771,643 @@ fn a_truncated_installer_does_nothing() {
             .output()
             .unwrap();
 
-        let stdout = String::from_utf8_lossy(&out.stdout);
+        let said = printed(&out);
         assert!(
             !home.join(".jlo").exists(),
             "a {fraction}% copy of install.sh installed something anyway"
         );
         assert!(
-            !stdout.contains("Successfully installed"),
-            "a {fraction}% copy of install.sh announced an install: {stdout}"
+            !said.contains("installed to"),
+            "a {fraction}% copy of install.sh announced an install: {said}"
         );
         // Cut inside main, the function never closes: that is a parse error,
         // and the caller sees it. Cut above main there is nothing but comments
-        // and `set -eu`, which legitimately succeeds at doing nothing.
-        if cut > main_start {
+        // and `set -eu`; cut past its closing brace there is a function and no
+        // call. Both of those legitimately succeed at doing nothing.
+        if cut > main_start && cut <= main_end {
             assert!(
                 !out.status.success(),
-                "a {fraction}% copy of install.sh reported success: {stdout}"
+                "a {fraction}% copy of install.sh reported success: {said}"
             );
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// The layout the binary owns
+// ---------------------------------------------------------------------------
+
+/// The tarball carries one file. Everything else under `$JLO_HOME` is written
+/// by the binary, from sources compiled into it - which is what makes the
+/// files on disk match the binary that wrote them by construction.
+#[test]
+fn the_binary_writes_the_whole_layout() {
+    let (dir, _) = install(None);
+    let jlo = dir.path().join("home").join(".jlo");
+    for rel in [
+        "jlo.sh",
+        "autoload.sh",
+        "completions.sh",
+        "install-receipt.json",
+        "bin/jlo-bin",
+        "bin/jlo-init.zsh",
+        "bin/jlo-init.bash",
+        "bin/jlo-autoload.zsh",
+        "bin/jlo-autoload.bash",
+        "completions/jlo.bash",
+        "completions/_jlo",
+    ] {
+        assert!(jlo.join(rel).is_file(), "install did not write {rel}");
+    }
+    // The shell scripts used to travel in the tarball beside the binary.
+    assert!(
+        !jlo.join("bin").join("jlo-init.sh").exists(),
+        "the shipped dual-parse wrapper is still being installed"
+    );
+}
+
+/// The symlink target name is load-bearing: `jlo` on PATH is only ever
+/// refreshed when it already points at exactly this path, so renaming the
+/// binary would leave every existing user's symlink dangling.
+#[test]
+fn the_symlink_points_at_jlo_bin_in_the_install_directory() {
+    let (dir, _) = install(None);
+    let home = dir.path().join("home");
+    let link = home.join(".local").join("bin").join("jlo");
+    assert!(link.symlink_metadata().is_ok(), "no symlink at {link:?}");
+    assert_eq!(
+        std::fs::read_link(&link).unwrap(),
+        home.join(".jlo").join("bin").join("jlo-bin")
+    );
+}
+
+/// An unrelated `jlo` on PATH is somebody else's file. The installer warns and
+/// leaves it alone rather than replacing it.
+#[test]
+fn an_unmanaged_jlo_on_path_is_left_untouched() {
+    let dir = tempfile::tempdir().unwrap();
+    let tarball = release_tarball(dir.path());
+    let stubbin = stub_curl(dir.path(), &tarball, Checksum::Correct);
+    let home = dir.path().join("home");
+    let local_bin = home.join(".local").join("bin");
+    std::fs::create_dir_all(&local_bin).unwrap();
+    std::fs::write(local_bin.join("jlo"), "#!/bin/sh\necho not ours\n").unwrap();
+
+    let out = Command::new("/bin/sh")
+        .arg(manifest().join("install.sh"))
+        .env("HOME", &home)
+        .env("SHELL", "/bin/zsh")
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                stubbin.display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        )
+        .env_remove("JLO_HOME")
+        .output()
+        .unwrap();
+
+    assert!(out.status.success(), "{}", printed(&out));
+    assert_eq!(
+        std::fs::read_to_string(local_bin.join("jlo")).unwrap(),
+        "#!/bin/sh\necho not ours\n",
+        "the installer overwrote a file it does not own"
+    );
+    assert!(
+        printed(&out).contains("not managed by J'Lo"),
+        "the installer replaced nothing but also said nothing: {}",
+        printed(&out)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The dialect dispatch in the generated jlo.sh
+// ---------------------------------------------------------------------------
+
+/// Sources `jlo.sh` under `sh` and reports which wrapper file it loaded, or
+/// `NONE` when it loaded none.
+fn dispatched_dialect(sh: &str, home: &Path, prologue: &str) -> String {
+    let entry = squote(&home.join(".jlo").join("jlo.sh"));
+    let out = Command::new(sh)
+        .arg("-c")
+        .arg(format!(
+            "{prologue}\n. {entry}\n\
+             if typeset -f jlo >/dev/null 2>&1; then\n\
+             \x20 case \"$JLO_PROBE\" in *) :;; esac\n\
+             fi\n\
+             echo \"dialect=[${{_JLO_TEST_DIALECT-NONE}}]\"\n"
+        ))
+        .env("HOME", home)
+        .env_remove("JLO_HOME")
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// Only the shell knows which shell it is, so `jlo.sh` decides at source time.
+/// The builtin test is the whole point: `ZSH_VERSION` is not exported *by
+/// default*, but nothing stops a user from exporting it, and a bash child then
+/// inherits it and sets `BASH_VERSION` itself. A plain concatenation of the two
+/// names a file that does not exist, and jlo silently fails to initialise.
+#[test]
+fn the_dialect_dispatch_picks_the_running_shell_and_resists_a_spoof() {
+    let (dir, _) = install(None);
+    let home = dir.path().join("home");
+    let bin = home.join(".jlo").join("bin");
+
+    // Mark each wrapper so the sourcing shell can say which one it read.
+    for dialect in ["zsh", "bash"] {
+        let file = bin.join(format!("jlo-init.{dialect}"));
+        let body = std::fs::read_to_string(&file).unwrap();
+        std::fs::write(&file, format!("{body}_JLO_TEST_DIALECT={dialect}\n")).unwrap();
+    }
+
+    for (sh, expected, prologue) in [
+        ("zsh", "zsh", ""),
+        ("/bin/bash", "bash", ""),
+        // The measured attack on the naive form.
+        ("/bin/bash", "bash", "export ZSH_VERSION=5.9"),
+    ] {
+        if skip_missing("the_dialect_dispatch_picks_the_running_shell", sh) {
+            continue;
+        }
+        let stdout = dispatched_dialect(sh, &home, prologue);
+        assert!(
+            stdout.contains(&format!("dialect=[{expected}]")),
+            "{sh} (prologue {prologue:?}) loaded the wrong wrapper: {stdout:?}"
+        );
+    }
+}
+
+/// A shell that is neither must load nothing at all - quietly, and without
+/// aborting the profile it is being sourced from.
+#[test]
+fn the_dialect_dispatch_is_a_clean_no_op_under_a_non_bash_sh() {
+    let (dir, _) = install(None);
+    let home = dir.path().join("home");
+    let sh = "/bin/dash";
+    if Command::new(sh).arg("-c").arg("exit 0").output().is_err() {
+        eprintln!("SKIP the_dialect_dispatch_is_a_clean_no_op_under_a_non_bash_sh: no {sh}.");
+        return;
+    }
+    let out = Command::new(sh)
+        .arg("-c")
+        .arg(format!(
+            "set -eu\n. {}\necho \"rc=$?\"\n",
+            squote(&home.join(".jlo").join("jlo.sh"))
+        ))
+        .env("HOME", &home)
+        .env_remove("JLO_HOME")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{sh} aborted on jlo.sh: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "rc=0");
+}
+
+// ---------------------------------------------------------------------------
+// Checksum verification
+// ---------------------------------------------------------------------------
+
+/// A checksum that is present and wrong is fatal, and nothing is installed.
+#[test]
+fn a_checksum_mismatch_aborts_the_install() {
+    let (dir, out) = run_installer(None, Checksum::Wrong);
+    let home = dir.path().join("home");
+    assert!(
+        !out.status.success(),
+        "a corrupt download installed anyway: {}",
+        printed(&out)
+    );
+    assert!(
+        printed(&out).contains("Checksum mismatch"),
+        "the installer did not say why it stopped: {}",
+        printed(&out)
+    );
+    assert!(
+        !home.join(".jlo").join("jlo.sh").exists(),
+        "the installer wrote the layout despite a bad checksum"
+    );
+}
+
+/// A *missing* checksum is a release that predates them, not an attack: it
+/// shares an origin with the tarball either way, so failing closed here would
+/// strand users on a download TLS already protected.
+#[test]
+fn a_missing_checksum_warns_but_installs() {
+    let (dir, out) = run_installer(None, Checksum::Missing);
+    assert!(
+        out.status.success(),
+        "a release without a published checksum could not be installed: {}",
+        printed(&out)
+    );
+    assert!(
+        printed(&out).contains("no published checksum"),
+        "the installer skipped verification silently: {}",
+        printed(&out)
+    );
+    assert!(
+        dir.path()
+            .join("home")
+            .join(".jlo")
+            .join("jlo.sh")
+            .is_file()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The install verb is hidden
+// ---------------------------------------------------------------------------
+
+/// `hide = true` would only drop it from `--help`: `clap_complete` still emits
+/// hidden subcommands into generated completion scripts, and clap's "did you
+/// mean" engine still offers them for typos. Intercepting the raw token before
+/// `Cli::parse()` keeps it out of all three.
+#[test]
+fn the_install_verb_appears_in_no_generated_surface() {
+    let (dir, _) = install(None);
+    let jlo = dir.path().join("home").join(".jlo");
+    let binary = jlo.join("bin").join("jlo-bin");
+
+    for name in ["completions/jlo.bash", "completions/_jlo"] {
+        let body = std::fs::read_to_string(jlo.join(name)).unwrap();
+        assert!(
+            !body.contains("__install"),
+            "{name} offers the hidden install verb"
+        );
+    }
+
+    let help = Command::new(&binary).arg("--help").output().unwrap();
+    assert!(
+        !String::from_utf8_lossy(&help.stdout).contains("__install"),
+        "--help lists the hidden install verb"
+    );
+
+    let typo = Command::new(&binary).arg("__instal").output().unwrap();
+    let said = String::from_utf8_lossy(&typo.stderr);
+    assert!(
+        !said.contains("__install"),
+        "clap suggested the hidden install verb for a typo: {said}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The receipt, and what a mismatched one heals
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_receipt_records_the_version_and_the_paths() {
+    let (dir, _) = install(None);
+    let home = dir.path().join("home");
+    let receipt = std::fs::read_to_string(home.join(".jlo").join("install-receipt.json")).unwrap();
+    for expected in [
+        "\"version\"",
+        "\"method\": \"installer\"",
+        &format!(
+            "\"binary\": \"{}\"",
+            home.join(".jlo/bin/jlo-bin").display()
+        ),
+        &format!("\"symlink\": \"{}\"", home.join(".local/bin/jlo").display()),
+    ] {
+        assert!(
+            receipt.contains(expected),
+            "receipt is missing {expected}:\n{receipt}"
+        );
+    }
+}
+
+/// A receipt whose version does not match the binary is the known-incomplete
+/// state - the binary landed, the generated files did not. There is
+/// deliberately no `--repair` verb and no version guard in the wrapper: any
+/// invocation regenerates the files, with no network and nothing for the user
+/// to learn.
+#[test]
+fn a_stale_receipt_makes_the_next_invocation_rewrite_the_files() {
+    let (dir, _) = install(None);
+    let home = dir.path().join("home");
+    let jlo = home.join(".jlo");
+    let receipt = jlo.join("install-receipt.json");
+
+    // An interrupted publish: the receipt is from an older version and the
+    // generated files never landed.
+    let body = std::fs::read_to_string(&receipt).unwrap();
+    let stale = body.replacen(
+        &format!("\"version\": \"{}\"", env!("CARGO_PKG_VERSION")),
+        "\"version\": \"0.0.1-stale\"",
+        1,
+    );
+    assert_ne!(stale, body, "could not make the receipt stale");
+    std::fs::write(&receipt, stale).unwrap();
+    std::fs::remove_file(jlo.join("jlo.sh")).unwrap();
+    std::fs::remove_file(jlo.join("bin").join("jlo-init.zsh")).unwrap();
+
+    // Any command at all, and one that needs no network.
+    let out = Command::new(jlo.join("bin").join("jlo-bin"))
+        .arg("--version")
+        .env("HOME", &home)
+        .env("JLO_HOME", &jlo)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    assert!(jlo.join("jlo.sh").is_file(), "jlo.sh was not regenerated");
+    assert!(
+        jlo.join("bin").join("jlo-init.zsh").is_file(),
+        "the zsh wrapper was not regenerated"
+    );
+    assert!(
+        std::fs::read_to_string(&receipt)
+            .unwrap()
+            .contains(&format!("\"version\": \"{}\"", env!("CARGO_PKG_VERSION"))),
+        "the receipt still disagrees with the binary"
+    );
+}
+
+/// The guard that keeps the self-heal from reaching into an install this
+/// binary is not. Without it every `cargo test` run - and every developer
+/// build executed from `target/` - would rewrite the real `~/.jlo`.
+#[test]
+fn a_receipt_naming_a_different_binary_is_left_alone() {
+    let (dir, _) = install(None);
+    let home = dir.path().join("home");
+    let jlo = home.join(".jlo");
+    let receipt = jlo.join("install-receipt.json");
+
+    let body = std::fs::read_to_string(&receipt).unwrap();
+    let foreign = body
+        .replacen(
+            &format!("\"version\": \"{}\"", env!("CARGO_PKG_VERSION")),
+            "\"version\": \"0.0.1-stale\"",
+            1,
+        )
+        .replacen(
+            &format!("\"binary\": \"{}\"", jlo.join("bin/jlo-bin").display()),
+            "\"binary\": \"/somewhere/else/jlo-bin\"",
+            1,
+        );
+    std::fs::write(&receipt, &foreign).unwrap();
+    std::fs::remove_file(jlo.join("jlo.sh")).unwrap();
+
+    let out = Command::new(jlo.join("bin").join("jlo-bin"))
+        .arg("--version")
+        .env("HOME", &home)
+        .env("JLO_HOME", &jlo)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert!(
+        !jlo.join("jlo.sh").exists(),
+        "the binary rewrote an install the receipt says belongs to another path"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&receipt).unwrap(),
+        foreign,
+        "the receipt of a foreign install was overwritten"
+    );
+}
+
+/// The detection reads the profile, and a commented-out line is not an active
+/// one. It is also exactly how a user turns J'Lo off, so counting it would be
+/// the one way this check can fail *closed*: withholding the instructions from
+/// someone whose shell does not in fact load jlo.
+#[test]
+fn a_commented_out_profile_line_does_not_count_as_activated() {
+    let (dir, _) = install(None);
+    let home = dir.path().join("home");
+    for disabled in [
+        // The line the installer printed, switched off.
+        "# [ -s \"$HOME/.jlo/jlo.sh\" ] && . \"$HOME/.jlo/jlo.sh\"\n",
+        // Indented, as a profile with a conditional block would have it.
+        "    #[ -s \"$HOME/.jlo/jlo.sh\" ] && . \"$HOME/.jlo/jlo.sh\"\n",
+        // Trailing on a line that does run, but does not source anything.
+        ": # . \"$HOME/.jlo/jlo.sh\"\n",
+    ] {
+        std::fs::write(home.join(".zshrc"), disabled).unwrap();
+        let out = reinstall_over(&home);
+        assert!(
+            printed(&out).contains("To activate"),
+            "{disabled:?} passed for an active install: {}",
+            printed(&out)
+        );
+    }
+
+    // And the live line still counts, so the stripping did not simply break
+    // the check in the other direction.
+    std::fs::write(
+        home.join(".zshrc"),
+        "[ -s \"$HOME/.jlo/jlo.sh\" ] && . \"$HOME/.jlo/jlo.sh\"  # jlo\n",
+    )
+    .unwrap();
+    let out = reinstall_over(&home);
+    assert!(
+        !printed(&out).contains("To activate"),
+        "a live profile line was not recognised: {}",
+        printed(&out)
+    );
+}
+
+/// An optional stub that cannot be written is a warning, not a failure, and
+/// the receipt is still written afterwards.
+///
+/// That is the one thing the receipt deliberately does not promise.
+/// Suppressing it here would overload the state that already means something
+/// else (a missing receipt is an install from before receipts existed, not a
+/// broken one), and would put every later invocation, including the one the cd
+/// hook makes, into a rewrite for as long as the underlying write kept
+/// failing. What the user gets instead is the warning, by name, and the
+/// repair.
+#[test]
+fn an_optional_stub_that_cannot_be_written_warns_and_names_the_repair() {
+    let (dir, _) = install(None);
+    let home = dir.path().join("home");
+    let jlo = home.join(".jlo");
+    let receipt = jlo.join("install-receipt.json");
+    // Start from a receipt that does *not* match the binary, so the assertion
+    // below is that the receipt advanced - not merely that one still exists.
+    let before = std::fs::read_to_string(&receipt).unwrap();
+    std::fs::write(
+        &receipt,
+        before.replacen(
+            &format!("\"version\": \"{}\"", env!("CARGO_PKG_VERSION")),
+            "\"version\": \"0.0.1-stale\"",
+            1,
+        ),
+    )
+    .unwrap();
+    // A directory where a file belongs: the rename onto it cannot succeed.
+    std::fs::remove_file(jlo.join("autoload.sh")).unwrap();
+    std::fs::create_dir(jlo.join("autoload.sh")).unwrap();
+
+    let out = reinstall_over(&home);
+    assert!(
+        out.status.success(),
+        "an optional stub took the whole install down: {}",
+        printed(&out)
+    );
+    assert!(
+        printed(&out).contains("cd autoloading is unavailable"),
+        "the failure was swallowed silently: {}",
+        printed(&out)
+    );
+    assert!(
+        printed(&out).contains("Re-run the installer"),
+        "the warning did not say how to recover: {}",
+        printed(&out)
+    );
+    assert!(
+        std::fs::read_to_string(&receipt)
+            .unwrap()
+            .contains(&format!("\"version\": \"{}\"", env!("CARGO_PKG_VERSION"))),
+        "a required file landed but the receipt still names the old version"
+    );
+}
+
+/// A checksum file that is the right length but not hex is a file we could not
+/// read, not a digest. It must not reach the "no verification tool here"
+/// branch, which exists for a missing `shasum` and would let it through.
+#[test]
+fn a_malformed_checksum_file_aborts_the_install() {
+    // Two shapes, and the second is the one the obvious validation misses: 64
+    // characters counting the newline, and hex either side of it, so a
+    // length-plus-alphabet check that never looks at line structure waves it
+    // through - and with no shasum on the box it would install unverified.
+    for malformed in [
+        "z".repeat(64),
+        format!("{}\n{}", "a".repeat(32), "a".repeat(31)),
+    ] {
+        a_malformed_checksum_file_aborts_the_install_with(&malformed);
+    }
+}
+
+fn a_malformed_checksum_file_aborts_the_install_with(malformed: &str) {
+    let dir = tempfile::tempdir().unwrap();
+    let tarball = release_tarball(dir.path());
+    let stubbin = dir.path().join("stubbin");
+    std::fs::create_dir_all(&stubbin).unwrap();
+    let curl = stubbin.join("curl");
+    std::fs::write(
+        &curl,
+        format!(
+            "#!/bin/sh\n\
+             out=\n\
+             while [ $# -gt 0 ]; do\n\
+             \x20 case \"$1\" in -o) shift; out=\"$1\" ;; esac\n\
+             \x20 shift\n\
+             done\n\
+             [ -n \"$out\" ] || exit 1\n\
+             case \"$out\" in\n\
+             \x20 *.sha256) printf '%s' '{}' > \"$out\" ;;\n\
+             \x20 *) cp '{}' \"$out\" ;;\n\
+             esac\n",
+            malformed,
+            tarball.display()
+        ),
+    )
+    .unwrap();
+    let mut perms = std::fs::metadata(&curl).unwrap().permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+    std::fs::set_permissions(&curl, perms).unwrap();
+
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let out = Command::new("/bin/sh")
+        .arg(manifest().join("install.sh"))
+        .env("HOME", &home)
+        .env("SHELL", "/bin/zsh")
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                stubbin.display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        )
+        .env_remove("JLO_HOME")
+        .output()
+        .unwrap();
+
+    assert!(
+        !out.status.success(),
+        "the checksum file {malformed:?} was accepted: {}",
+        printed(&out)
+    );
+    assert!(
+        printed(&out).contains("not a SHA256"),
+        "the installer did not say what was wrong: {}",
+        printed(&out)
+    );
+    assert!(
+        !home.join(".jlo").join("jlo.sh").exists(),
+        "the layout was written despite an unusable checksum"
+    );
+}
+
+/// A symlink that is already correct is left exactly as it is - not removed
+/// and recreated. Between those two syscalls `jlo` is missing from PATH, and
+/// something else can take the name.
+#[test]
+fn an_already_correct_symlink_is_not_recreated() {
+    let (dir, _) = install(None);
+    let home = dir.path().join("home");
+    let link = home.join(".local").join("bin").join("jlo");
+    let before = std::fs::symlink_metadata(&link).unwrap();
+
+    let out = reinstall_over(&home);
+    assert!(out.status.success(), "{}", printed(&out));
+
+    let after = std::fs::symlink_metadata(&link).unwrap();
+    assert_eq!(
+        (before.ino(), before.dev()),
+        (after.ino(), after.dev()),
+        "the installer replaced a symlink that was already right"
+    );
+}
+
+/// The other half of the ownership check. The binary path can line up while
+/// the receipt describes a different `$JLO_HOME` - a copied install, or one
+/// reached through a `JLO_HOME` pointing elsewhere - and rewriting the
+/// original's scripts from there is exactly the clobber the guard exists for.
+#[test]
+fn a_receipt_naming_a_different_jlo_home_is_left_alone() {
+    let (dir, _) = install(None);
+    let home = dir.path().join("home");
+    let jlo = home.join(".jlo");
+    let receipt = jlo.join("install-receipt.json");
+
+    let body = std::fs::read_to_string(&receipt).unwrap();
+    let foreign = body
+        .replacen(
+            &format!("\"version\": \"{}\"", env!("CARGO_PKG_VERSION")),
+            "\"version\": \"0.0.1-stale\"",
+            1,
+        )
+        .replacen(
+            &format!("\"jlo_home\": \"{}\"", jlo.display()),
+            "\"jlo_home\": \"/somewhere/else\"",
+            1,
+        );
+    assert!(foreign.contains("/somewhere/else"), "receipt shape changed");
+    std::fs::write(&receipt, &foreign).unwrap();
+    std::fs::remove_file(jlo.join("jlo.sh")).unwrap();
+
+    let out = Command::new(jlo.join("bin").join("jlo-bin"))
+        .arg("--version")
+        .env("HOME", &home)
+        .env("JLO_HOME", &jlo)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert!(
+        !jlo.join("jlo.sh").exists(),
+        "the binary rewrote a layout whose receipt describes another JLO_HOME"
+    );
 }

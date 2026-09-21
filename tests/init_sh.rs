@@ -1,4 +1,9 @@
-//! Tests for the shell wrapper in `jlo-init.sh`.
+//! Tests for the shell wrapper in `shell/jlo-init.{bash,zsh}`.
+//!
+//! The wrapper ships as one file per dialect: the binary writes both into
+//! `$JLO_HOME/bin/` and the generated `jlo.sh` picks one at source time. Each
+//! test therefore sources the file belonging to the interpreter it runs, which
+//! is exactly what a real shell does.
 //!
 //! The script is sourced by the user's interactive shell and its `env` branch
 //! evaluates the binary's stdout. Anything printed there is executed, so help
@@ -31,6 +36,15 @@ fn bash_bin() -> String {
     std::env::var("JLO_TEST_BASH").unwrap_or_else(|_| "bash".to_string())
 }
 
+/// Which wrapper file this interpreter would be handed by `jlo.sh`.
+fn dialect(sh: &str) -> &'static str {
+    if Path::new(sh).file_name().is_some_and(|n| n == "zsh") {
+        "zsh"
+    } else {
+        "bash"
+    }
+}
+
 /// Returns true when the caller should skip this interpreter. Prints loudly: a
 /// silently skipped shell is indistinguishable from a passing one.
 #[must_use]
@@ -42,8 +56,8 @@ fn skip_missing(test: &str, sh: &str) -> bool {
     true
 }
 
-/// A `JLO_HOME` whose `bin/` holds `jlo-init.sh` and a `jlo-bin` symlink to the
-/// binary under test, which is what the wrapper expects to find.
+/// A `JLO_HOME` whose `bin/` holds both wrapper dialects and a `jlo-bin`
+/// symlink to the binary under test, which is what the wrapper expects to find.
 fn jlo_home() -> tempfile::TempDir {
     let home = init_sh_home();
     let target = assert_cmd::cargo::cargo_bin("jlo-bin");
@@ -68,20 +82,32 @@ fn init_sh_home() -> tempfile::TempDir {
     let home = tempfile::tempdir().unwrap();
     let bin = home.path().join("bin");
     std::fs::create_dir_all(&bin).unwrap();
-    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    std::fs::copy(manifest.join("jlo-init.sh"), bin.join("jlo-init.sh")).unwrap();
+    for name in WRAPPERS {
+        std::fs::copy(shell_source(name), bin.join(name)).unwrap();
+    }
     home
 }
 
-/// Source `jlo-init.sh` from `home` under `sh`, then run `body`.
+/// The two wrapper dialects, named as they are both in the repo and under
+/// `$JLO_HOME/bin/`.
+const WRAPPERS: &[&str] = &["jlo-init.bash", "jlo-init.zsh"];
+
+fn shell_source(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("shell")
+        .join(name)
+}
+
+/// Source the wrapper dialect belonging to `sh` from `home`, then run `body`.
 fn run_in(sh: &str, home: &Path, body: &str) -> Output {
     let script = format!(
         r#"
         export JLO_HOME="{}"
-        . "$JLO_HOME/bin/jlo-init.sh"
+        . "$JLO_HOME/bin/jlo-init.{}"
         {body}
         "#,
-        home.display()
+        home.display(),
+        dialect(sh),
     );
 
     Command::new(sh)
@@ -92,7 +118,7 @@ fn run_in(sh: &str, home: &Path, body: &str) -> Output {
         .unwrap_or_else(|e| panic!("failed to run {sh}: {e}"))
 }
 
-/// Source `jlo-init.sh` and run `jlo $args` against the real binary.
+/// Source the bash wrapper and run `jlo $args` against the real binary.
 fn run_wrapper(args: &str) -> Output {
     let home = jlo_home();
     run_in(&bash_bin(), home.path(), &format!("jlo {args}"))
@@ -308,29 +334,44 @@ fn real_binary_offline_miss_fails_through_the_wrapper() {
 // Parseability: the shipped files are sourced from profiles we do not control
 // ---------------------------------------------------------------------------
 
-/// `jlo-init.sh` is bash/zsh syntax by design, but it must at least parse
-/// wherever it is sourced from - the profile line the installer prints is not
-/// guarded by a shell test. The process substitution it used to contain was a
-/// hard syntax error under a POSIX `sh`.
+/// The whole point of splitting the wrapper per dialect: each file only has to
+/// parse under the shell it is named for. The Rust compiler never looks at
+/// these bytes, so this is the cheapest half of the net that catches a typo in
+/// one of them.
 #[test]
-fn shipped_scripts_parse_under_every_supported_shell() {
-    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    for script in ["jlo-init.sh", "jlo-autoload.sh", "install.sh"] {
-        for sh in INTERPRETERS.iter().chain(["/bin/sh"].iter()) {
-            if skip_missing("shipped_scripts_parse_under_every_supported_shell", sh) {
-                continue;
-            }
-            let out = Command::new(sh)
-                .arg("-n")
-                .arg(manifest.join(script))
-                .output()
-                .unwrap();
-            assert!(
-                out.status.success(),
-                "{script} does not parse under {sh}: {}",
-                String::from_utf8_lossy(&out.stderr)
-            );
+fn each_wrapper_dialect_parses_under_its_own_shell() {
+    for (sh, name) in [("/bin/bash", "jlo-init.bash"), ("zsh", "jlo-init.zsh")] {
+        if skip_missing("each_wrapper_dialect_parses_under_its_own_shell", sh) {
+            continue;
         }
+        let out = Command::new(sh)
+            .arg("-n")
+            .arg(shell_source(name))
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{name} does not parse under {sh}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
+
+/// `install.sh` keeps the dual-parse requirement the wrappers shed: it is
+/// fetched over the network and piped into whatever shell the user typed.
+#[test]
+fn the_installer_parses_under_every_supported_shell() {
+    let installer = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("install.sh");
+    for sh in INTERPRETERS.iter().chain(["/bin/sh"].iter()) {
+        if skip_missing("the_installer_parses_under_every_supported_shell", sh) {
+            continue;
+        }
+        let out = Command::new(sh).arg("-n").arg(&installer).output().unwrap();
+        assert!(
+            out.status.success(),
+            "install.sh does not parse under {sh}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 }
 
@@ -379,11 +420,12 @@ fn run_selfupdate(sh: &str, home: &Path, stubbin: &Path) -> Output {
     let script = format!(
         r#"
         export JLO_HOME="{}"
-        . "$JLO_HOME/bin/jlo-init.sh"
+        . "$JLO_HOME/bin/jlo-init.{}"
         jlo selfupdate
         echo "status=$?"
         "#,
-        home.display()
+        home.display(),
+        dialect(sh),
     );
     Command::new(sh)
         .arg("-c")

@@ -2,7 +2,7 @@
 //!
 //! Every command, argument and line of help text lives here, so the help
 //! output and the dispatch are the same declaration. They used to be two
-//! hand-maintained strings, which drifted: `jlo-init.sh` accepted `use` as an
+//! hand-maintained strings, which drifted: the shell wrapper accepted `use` as an
 //! alias the binary had never heard of.
 
 use clap::{Parser, Subcommand};
@@ -50,6 +50,21 @@ pub(crate) struct Cli {
     // the `None` case and exits 0.
     #[command(subcommand)]
     pub(crate) command: Option<Command>,
+}
+
+/// The completion script for `shell`, as bytes.
+///
+/// Built here rather than at each call site because there are two: `jlo
+/// completions <shell>` writes it to stdout, and the install verb writes it
+/// into `$JLO_HOME/completions`. Both must see the same clap tree, or a
+/// generated file offers flags the binary beside it no longer has.
+pub(crate) fn completion_script(shell: clap_complete::Shell) -> Vec<u8> {
+    use clap::CommandFactory;
+
+    let mut command = Cli::command();
+    let mut out = Vec::new();
+    clap_complete::generate(shell, &mut command, "jlo", &mut out);
+    out
 }
 
 /// Print the top-level help, exactly as `jlo -h` does.
@@ -297,8 +312,8 @@ Use jlo prune to remove superseded minor versions by rule instead."
 
     /// Update jlo itself
     ///
-    /// Handled by the jlo shell function from jlo-init.sh, not by this
-    /// binary.
+    /// Handled by the jlo shell function the installer generates, not by
+    /// this binary.
     Selfupdate,
 
     #[command(

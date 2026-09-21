@@ -33,8 +33,10 @@ Two more are optional — add either, both, or neither:
 [ -s "$HOME/.jlo/completions.sh" ] && . "$HOME/.jlo/completions.sh"    # tab completion
 ```
 
-The installer prints these same lines at the end, with the right paths if you use a custom
-[`JLO_HOME`](#jlo_home). They never change: an upgrade regenerates the files they point at, so you only paste once.
+The installer ends by printing these as runnable commands — one `printf … >> ~/.zshrc` per line, plus a
+`. ~/.jlo/jlo.sh` that makes J'Lo work in the shell you are already in, with no restart. It never edits your profile
+itself; you do. Custom [`JLO_HOME`](#jlo_home) paths are substituted for you. The lines never change: an upgrade
+regenerates the files they point at, so you only add them once.
 
 ## Quick Start
 
@@ -471,19 +473,20 @@ help; `--help` prints the long form (with more explanation on subcommands).
 
 ## Supported Shells
 
-The shell integration (`jlo-init.sh`, `jlo-autoload.sh`) is written for **bash and zsh**, and is verified against
-every version in the table below:
+The shell integration is written for **bash and zsh**, and is verified against every version in the table below:
 
 | Shell | Versions verified                                      | Notes                                                       |
 |-------|--------------------------------------------------------|-------------------------------------------------------------|
 | bash  | 3.2.57, 4.0, 4.1, 4.2, 4.3, 4.4, 5.0, 5.1, 5.2, 5.3    | 3.2.57 is what macOS ships as `/bin/bash`                   |
 | zsh   | 5.0.8, 5.3, 5.4.2, 5.8, 5.9                            | macOS's default login shell since Catalina                  |
 
-The installer (`install.sh`) and the autoload hook (`jlo-autoload.sh`) are POSIX `sh` clean and also parse and run
-under `dash`. `jlo-init.sh` uses `local`, so it needs bash, zsh or another shell that has it — but it parses
-everywhere, so a profile that sources it unconditionally will not fail with a syntax error.
+J'Lo writes one wrapper per dialect — `$JLO_HOME/bin/jlo-init.{bash,zsh}` and `jlo-autoload.{bash,zsh}` — and the
+three entry files you source (`jlo.sh`, `autoload.sh`, `completions.sh`) pick the right one at source time. Because
+the choice happens there, no wrapper ever has to parse under a shell it was not written for.
 
-All three files are safe to source from a profile that runs under `set -e` or `set -u`.
+The entry files themselves, and `install.sh`, are POSIX `sh` clean: they parse and run under `dash`, where the
+dispatch simply finds no dialect and does nothing. All of them are safe to source from a profile that runs under
+`set -e` or `set -u`.
 
 Fish is not supported — see the note under [Shell Completions](#shell-completions).
 
@@ -500,8 +503,8 @@ them in `$JLO_HOME/completions.sh`, which picks the right one for whichever shel
 [ -s "$HOME/.jlo/completions.sh" ] && . "$HOME/.jlo/completions.sh"
 ```
 
-Fish is not supported: the core `jlo` shell function (`jlo-init.sh`) is bash/zsh syntax and cannot be sourced from
-fish, so `jlo env`/`jlo use` don't work there regardless of completions. If you use fish anyway and still want
+Fish is not supported: the core `jlo` shell function is bash/zsh syntax and cannot be sourced from fish, so
+`jlo env`/`jlo use` don't work there regardless of completions. If you use fish anyway and still want
 completions for the subset of J'Lo that works as a plain binary, you can generate a script yourself:
 
 ```shell
@@ -547,7 +550,7 @@ generated files, and prints it in the lines it tells you to add.
 
 # CI / scripting / AI agents
 
-In interactive shells, `jlo` is a shell function (defined by `jlo-init.sh`) — this is what lets `jlo env` mutate your
+In interactive shells, `jlo` is a shell function (defined by the wrapper `jlo.sh` sources) — this is what lets `jlo env` mutate your
 current session. Non-interactive shells (CI jobs, `Makefile` recipes, scripts, AI coding agents) don't load that
 function, so J'Lo's installer also places a real `jlo` binary on your `PATH` at `~/.local/bin/jlo`. Every subcommand
 works there directly except `env`/`use` (which must mutate the current shell) and `selfupdate` (which is handled by the

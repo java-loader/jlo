@@ -9,38 +9,29 @@ set -eu
 # main, the unterminated function is a parse error and nothing runs; truncated
 # before the last line, the file parses and still does nothing. Either way the
 # half a script never executes.
+#
+# This is a bootstrap, and nothing more. It detects the platform, downloads one
+# file, verifies it, unpacks it, and hands over to the binary. The layout under
+# $JLO_HOME - the entry files, the per-dialect wrappers, the completions, the
+# symlink and the receipt - belongs to 'jlo-bin' itself, which carries the shell
+# sources compiled in. Two copies of that knowledge is what this script used to
+# be, and what made an installer change go stale in every existing profile.
 
-# Baked paths are single-quoted so the shell sourcing them treats a '$' or a
-# backtick in a path as data. An apostrophe would still close the quote early
-# and produce a file that does not parse, so jlo_squote emits the POSIX
-# escape - close the quote, an escaped apostrophe, reopen - and returns the
-# surrounding quotes with it.
-jlo_squote() {
-  printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
-}
-
-# Writes stdin to "$1" via a temp file, and *reports* failure: a caller that
-# cannot write the required entry file must not let the install claim success.
-jlo_write() {
-  jlo_dest="$1"
-  if cat > "$jlo_dest.tmp" && mv -f "$jlo_dest.tmp" "$jlo_dest"; then
-    return 0
-  fi
-  rm -f "$jlo_dest.tmp"
-  return 1
-}
-
-# A default install prints "$HOME/.jlo" rather than the expanded path, so the
-# profile line stays portable across machines and users - the generated files
-# it points at hold the real paths. "$HOME" is the one thing here meant to be
-# expanded by the reader's shell; a custom JLO_HOME is quoted like any other
-# baked path, so a '$' in it stays a '$'.
-jlo_snippet_path() {
-  if [ "$JLO_HOME" = "$HOME/.jlo" ]; then
-    # shellcheck disable=SC2016 # literal on purpose: the user's shell expands it.
-    printf '"$HOME/.jlo/%s"' "$1"
+# Prints the SHA256 of "$1" as bare hex, or fails when neither tool is here.
+# macOS ships shasum, GNU userlands ship sha256sum, and a stripped container
+# may have neither.
+#
+# Read from stdin rather than passing the path: both tools escape a file name
+# containing a backslash or a newline, and announce it by prefixing the *digest
+# line* with a backslash. A JLO_HOME with a backslash in it would otherwise
+# yield "\<hex>" here and fail every comparison.
+jlo_sha256() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 < "$1" | cut -d ' ' -f 1
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum < "$1" | cut -d ' ' -f 1
   else
-    jlo_squote "$JLO_HOME/$1"
+    return 1
   fi
 }
 
@@ -52,32 +43,88 @@ main() {
   if [ -z "${JLO_HOME-}" ]; then
     JLO_HOME="$HOME/.jlo"
   fi
+  # Exported, not merely set: the binary below reads it out of the environment
+  # to decide where to write the layout.
+  export JLO_HOME
   JLO_BIN_DIR="$JLO_HOME/bin"
-  LOCAL_BIN_DIR="$HOME/.local/bin"
   JLO_BASE_URL="https://github.com/java-loader/jlo/releases/latest/download"
 
   OS="$(uname | tr '[:upper:]' '[:lower:]')"
   ARCH="$(uname -m)"
 
   if [ "$OS" = "linux" ]; then
-    JLO_URL="$JLO_BASE_URL/jlo-linux-$ARCH.tar.gz"
+    JLO_PACKAGE="jlo-linux-$ARCH.tar.gz"
   elif [ "$OS" = "darwin" ]; then
-    JLO_URL="$JLO_BASE_URL/jlo-macos-$ARCH.tar.gz"
+    JLO_PACKAGE="jlo-macos-$ARCH.tar.gz"
   else
     echo "Unsupported OS: $OS" >&2
     exit 1
   fi
+  JLO_URL="$JLO_BASE_URL/$JLO_PACKAGE"
 
   mkdir -p "$JLO_BIN_DIR"
 
-  JLO_BUNDLE="jlo.tar.gz"
-  FQ_JLO_BUNDLE="$JLO_BIN_DIR/$JLO_BUNDLE"
+  FQ_JLO_BUNDLE="$JLO_BIN_DIR/jlo.tar.gz"
+  FQ_JLO_SUM="$FQ_JLO_BUNDLE.sha256"
   if ! curl -fsSL "$JLO_URL" -o "$FQ_JLO_BUNDLE"; then
     echo "Failed to download jlo binary from $JLO_URL" >&2
     rm -f "$FQ_JLO_BUNDLE"
     exit 1
   fi
 
+  # The checksum is published beside the tarball, so it shares an origin with
+  # it: it catches a corrupt or truncated download, not a compromised release.
+  # That is also why a *missing* one is a warning rather than a refusal - it is
+  # absent only on releases that predate it, and failing closed there would
+  # strand users on a download TLS already protected. A checksum that is
+  # present and does not match is a different thing entirely, and fatal.
+  if curl -fsSL "$JLO_URL.sha256" -o "$FQ_JLO_SUM" 2>/dev/null; then
+    # The first line only. Without it a multi-line file yields a multi-line
+    # JLO_EXPECTED, and the checks below both slip: the glob counts a newline
+    # as one of its 64 characters, and the command substitution strips the
+    # newline tr leaves behind, so "32 hex chars, newline, 31 hex chars" reads
+    # as a well-formed digest.
+    JLO_EXPECTED="$(head -n 1 "$FQ_JLO_SUM" | cut -d ' ' -f 1)"
+    rm -f "$FQ_JLO_SUM"
+    # An empty or malformed expectation must never pass for a match, and it
+    # must not reach the "no tool here" branch either - that branch is for a
+    # missing shasum, not for a checksum file we could not read. Two tests,
+    # because neither alone is enough: the glob fixes the length (POSIX case
+    # patterns cannot count repetitions) and the tr fixes the alphabet.
+    JLO_NOT_HEX="$(printf '%s' "$JLO_EXPECTED" | tr -d '0-9a-fA-F')"
+    case "$JLO_EXPECTED" in
+      ????????????????????????????????????????????????????????????????)
+        JLO_WELL_FORMED=1 ;;
+      *)
+        JLO_WELL_FORMED=0 ;;
+    esac
+    if [ "$JLO_WELL_FORMED" = 0 ] || [ -n "$JLO_NOT_HEX" ]; then
+      echo "Checksum file for $JLO_PACKAGE is not a SHA256; refusing to install." >&2
+      rm -f "$FQ_JLO_BUNDLE"
+      exit 1
+    fi
+    if JLO_ACTUAL="$(jlo_sha256 "$FQ_JLO_BUNDLE")"; then
+      # Case-insensitive: the tool that wrote the file and the tool reading it
+      # need not agree on the case of the hex.
+      JLO_EXPECTED="$(printf '%s' "$JLO_EXPECTED" | tr 'A-F' 'a-f')"
+      JLO_ACTUAL="$(printf '%s' "$JLO_ACTUAL" | tr 'A-F' 'a-f')"
+      if [ "$JLO_ACTUAL" != "$JLO_EXPECTED" ]; then
+        echo "Checksum mismatch for $JLO_PACKAGE" >&2
+        echo "  expected $JLO_EXPECTED" >&2
+        echo "  got      $JLO_ACTUAL" >&2
+        rm -f "$FQ_JLO_BUNDLE"
+        exit 1
+      fi
+    else
+      echo "Warning: neither shasum nor sha256sum is available; skipping checksum verification." >&2
+    fi
+  else
+    rm -f "$FQ_JLO_SUM"
+    echo "Warning: no published checksum for $JLO_PACKAGE; skipping verification." >&2
+  fi
+
+  # The tarball carries exactly one file, 'jlo-bin'. The shell code used to
+  # travel beside it and could fall out of step with it; it is compiled in now.
   if ! tar -xzf "$FQ_JLO_BUNDLE" -C "$JLO_BIN_DIR"; then
     echo "Failed to extract jlo binary from $FQ_JLO_BUNDLE" >&2
     rm -f "$FQ_JLO_BUNDLE"
@@ -85,174 +132,16 @@ main() {
   fi
   rm -f "$FQ_JLO_BUNDLE"
 
-  # Expose a real 'jlo' on PATH for non-interactive shells (CI, scripts, agents).
-  # The interactive shell function from jlo-init.sh still shadows this symlink and
-  # keeps handling env/use, which must mutate the current shell.
-  #
-  # This is an optional convenience, so any failure here is a warning, not a fatal
-  # error. We only ever create or refresh a symlink that already points at our own
-  # binary; an unrelated file/dir/symlink at that path is left untouched.
   JLO_TARGET="$JLO_BIN_DIR/jlo-bin"
-  JLO_LINK="$LOCAL_BIN_DIR/jlo"
-  JLO_LINKED=0
-  if [ ! -e "$JLO_LINK" ] && [ ! -L "$JLO_LINK" ]; then
-    JLO_MAY_LINK=1
-  elif [ -L "$JLO_LINK" ] && [ "$(readlink "$JLO_LINK")" = "$JLO_TARGET" ]; then
-    JLO_MAY_LINK=1
-  else
-    JLO_MAY_LINK=0
-    echo "Warning: '$JLO_LINK' already exists and is not managed by J'Lo; leaving it untouched." >&2
-    echo "         To put 'jlo' on PATH yourself: ln -s '$JLO_TARGET' '$JLO_LINK'" >&2
-  fi
-  if [ "$JLO_MAY_LINK" = 1 ]; then
-    if mkdir -p "$LOCAL_BIN_DIR" 2>/dev/null && ln -sf "$JLO_TARGET" "$JLO_LINK" 2>/dev/null; then
-      JLO_LINKED=1
-    else
-      echo "Warning: could not create '$JLO_LINK'; 'jlo' may not be available in non-interactive shells." >&2
-    fi
-  fi
-
-  # Shell completions. Generated once at install time rather than via
-  # 'source <(jlo completions bash)' in the profile, so shell startup costs no
-  # subprocess. A failure here is a convenience lost, not a broken install.
-  JLO_COMPLETION_DIR="$JLO_HOME/completions"
-  if mkdir -p "$JLO_COMPLETION_DIR" 2>/dev/null; then
-    if "$JLO_TARGET" completions bash > "$JLO_COMPLETION_DIR/jlo.bash.tmp"; then
-      mv -f "$JLO_COMPLETION_DIR/jlo.bash.tmp" "$JLO_COMPLETION_DIR/jlo.bash"
-    else
-      rm -f "$JLO_COMPLETION_DIR/jlo.bash.tmp"
-      echo "Warning: could not generate bash completions." >&2
-    fi
-    if "$JLO_TARGET" completions zsh > "$JLO_COMPLETION_DIR/_jlo.tmp"; then
-      mv -f "$JLO_COMPLETION_DIR/_jlo.tmp" "$JLO_COMPLETION_DIR/_jlo"
-    else
-      rm -f "$JLO_COMPLETION_DIR/_jlo.tmp"
-      echo "Warning: could not generate zsh completions." >&2
-    fi
-  else
-    echo "Warning: could not create '$JLO_COMPLETION_DIR'; shell completions are unavailable." >&2
-  fi
-
-  # Everything the profile needs lives in generated entry files rather than in
-  # lines the user pastes. Two reasons. A pasted block restates internal paths, so
-  # it goes stale the moment the layout changes and every existing user has to
-  # re-paste. And on a re-install the block is usually sourced already, which used
-  # to make 'JLO_HOME is exported' look like 'the profile exports JLO_HOME' - it
-  # was the old block's own export, which the paste then replaced, leaving
-  # JLO_HOME empty and every source line below it a silent no-op.
-  #
-  # So: the paths are baked in here, once, and the profile only sources them.
-  JLO_HOME_Q="$(jlo_squote "$JLO_HOME")"
-  JLO_INIT_Q="$(jlo_squote "$JLO_BIN_DIR/jlo-init.sh")"
-  JLO_AUTOLOAD_Q="$(jlo_squote "$JLO_BIN_DIR/jlo-autoload.sh")"
-  JLO_COMP_BASH_Q="$(jlo_squote "$JLO_COMPLETION_DIR/jlo.bash")"
-  JLO_COMP_ZSH_Q="$(jlo_squote "$JLO_COMPLETION_DIR/_jlo")"
-  JLO_COMP_DIR_Q="$(jlo_squote "$JLO_COMPLETION_DIR")"
-
-  # The one file a user cannot skip: the wrapper function, and the JLO_HOME the
-  # rest of the layout hangs off.
-  jlo_write "$JLO_HOME/jlo.sh" <<EOF || {
-# Generated by J'Lo's installer - edits are lost on the next install or
-# 'jlo selfupdate'. Source this from your shell profile.
-export JLO_HOME=$JLO_HOME_Q
-if [ -s $JLO_INIT_Q ]; then
-  . $JLO_INIT_Q
-fi
-EOF
-    echo "Failed to write '$JLO_HOME/jlo.sh'; J'Lo cannot be loaded from your profile." >&2
+  if [ ! -x "$JLO_TARGET" ]; then
+    echo "The downloaded archive did not contain an executable jlo-bin." >&2
     exit 1
-  }
-
-  # Optional. Guarded on the wrapper existing rather than on JLO_HOME, because
-  # what jlo_after_cd actually calls is the 'jlo' function: sourcing this without
-  # jlo.sh has to be inert, not a stream of errors on every cd. 'typeset -f' is
-  # the test that needs no subshell; under a shell that lacks it the guard fails
-  # closed, which is the right answer there anyway.
-  jlo_write "$JLO_HOME/autoload.sh" <<EOF ||
-# Generated by J'Lo's installer - edits are lost on the next install or
-# 'jlo selfupdate'. Optional: switches JDK on cd when a .jlorc is in scope.
-# Source this after jlo.sh.
-if typeset -f jlo >/dev/null 2>&1 && [ -s $JLO_AUTOLOAD_Q ]; then
-  . $JLO_AUTOLOAD_Q
-fi
-EOF
-    echo "Warning: could not write '$JLO_HOME/autoload.sh'; cd autoloading is unavailable." >&2
-
-  # Optional. The zsh half is wrapped in 'eval' so this file still parses under a
-  # POSIX sh: '(( ... ))' and an array assignment are syntax errors there, and a
-  # profile that sources this unconditionally would die on the parse before the
-  # $ZSH_VERSION test ever ran.
-  #
-  # zsh autoloads from $fpath, so the directory goes there and '_jlo' is read on
-  # the first Tab press rather than in every shell. bash has no equivalent -
-  # 'complete -F' needs the function to exist - so its half stays eager.
-  jlo_write "$JLO_HOME/completions.sh" <<EOF ||
-# Generated by J'Lo's installer - edits are lost on the next install or
-# 'jlo selfupdate'. Optional: tab completion for the 'jlo' command.
-if [ -n "\${BASH_VERSION-}" ] && [ -s $JLO_COMP_BASH_Q ]; then
-  . $JLO_COMP_BASH_Q
-fi
-if [ -n "\${ZSH_VERSION-}" ] && [ -s $JLO_COMP_ZSH_Q ]; then
-  _jlo_comp_dir=$JLO_COMP_DIR_Q
-  eval '
-    # Must come before compinit: compinit scans \$fpath once, so a user whose
-    # framework (oh-my-zsh and friends) already ran it gets nothing from this
-    # line alone - hence the elif below.
-    fpath=("\$_jlo_comp_dir" \$fpath)
-    if (( ! \$+functions[compdef] )); then
-      autoload -Uz compinit && compinit -i
-    elif (( ! \$+functions[_jlo] )); then
-      # compinit already ran, so register after the fact. The autoload is not
-      # optional: "compdef _jlo jlo" on its own records the mapping without
-      # making _jlo loadable, and completion comes up silently empty.
-      autoload -Uz _jlo && compdef _jlo jlo
-    fi
-  '
-  unset _jlo_comp_dir
-fi
-EOF
-    echo "Warning: could not write '$JLO_HOME/completions.sh'; tab completion is unavailable." >&2
-
-  JLO_SNIPPET_MAIN="$(jlo_snippet_path jlo.sh)"
-  JLO_SNIPPET_AUTOLOAD="$(jlo_snippet_path autoload.sh)"
-  JLO_SNIPPET_COMPLETIONS="$(jlo_snippet_path completions.sh)"
-
-  cat <<EOF
-Successfully installed J'Lo to $JLO_HOME.
-
-*** IMPORTANT ***
-
-Add this to the end of your shell profile (e.g. ~/.bashrc, ~/.zshrc):
-
-[ -s $JLO_SNIPPET_MAIN ] && . $JLO_SNIPPET_MAIN
-
-Optional, add either or both:
-
-[ -s $JLO_SNIPPET_AUTOLOAD ] && . $JLO_SNIPPET_AUTOLOAD          # switch JDK on cd
-[ -s $JLO_SNIPPET_COMPLETIONS ] && . $JLO_SNIPPET_COMPLETIONS    # tab completion
-
-Then restart your terminal, or run those lines in your current shell.
-
-After that, you can use the 'jlo' command to manage your Java environments.
-These lines never change: upgrades regenerate the files they point at.
-EOF
-
-  # Only nudge about PATH when we actually created the symlink and ~/.local/bin
-  # isn't already on PATH (usually the case on macOS; most Linux setups include it).
-  if [ "$JLO_LINKED" = 1 ]; then
-    case ":${PATH-}:" in
-      *":$LOCAL_BIN_DIR:"*) ;;
-      *)
-        cat <<EOF
-
-Also add '$LOCAL_BIN_DIR' to your PATH so 'jlo' works in non-interactive
-shells (CI, scripts, AI agents) and for 'jlo home':
-
-export PATH="\$HOME/.local/bin:\$PATH"
-EOF
-        ;;
-    esac
   fi
+
+  # Hand over. 'exec' rather than a call: the binary owns the rest of the
+  # install and its exit status is the installer's, with no line of this script
+  # left to run after it and get that wrong.
+  exec "$JLO_TARGET" __install
 }
 
 main "$@"

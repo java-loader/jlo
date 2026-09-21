@@ -2,6 +2,7 @@ mod adoptium;
 mod cli;
 mod conf;
 mod extract;
+mod install;
 mod store;
 mod ui;
 
@@ -20,7 +21,7 @@ use tempfile::tempdir;
 
 /// Name of J'Lo's state directory under `$HOME`, used when `JLO_HOME` is unset.
 /// Must stay in sync with `install.sh`.
-const JLO_HOME_DIR_NAME: &str = ".jlo";
+pub(crate) const JLO_HOME_DIR_NAME: &str = ".jlo";
 
 /// A failed command: the error to report, plus the advice line that belongs
 /// *under* it, if any.
@@ -91,10 +92,24 @@ fn run() -> Result<(), CommandError> {
     // mean" suggestion engine still offers it for typos (e.g. `jlo sng`).
     // Intercepting the raw token before `Cli::parse()` keeps it out of
     // help, completions, and typo suggestions in one move.
-    if env::args().nth(1).as_deref() == Some("sing") {
+    let argv: Vec<String> = env::args().skip(1).collect();
+    if argv.first().map(String::as_str) == Some("sing") {
         eprintln!("There are no Easter Eggs in this program. Trust me. 💃");
         return Ok(());
     }
+
+    // The install verb is intercepted here for the same reason, and the reason
+    // is sharper still: it writes the shell layout, so it must not show up in
+    // the completions it generates. `install.sh`, `install-local.sh` and
+    // `selfupdate` are its only callers.
+    if argv.first().map(String::as_str) == Some(install::VERB) {
+        return Ok(install::cmd_install(&argv[1..])?);
+    }
+
+    // A receipt that disagrees with this binary is the known-incomplete state:
+    // the binary landed, the generated files did not. Any invocation clears it
+    // rather than reporting it, which is why there is no `--repair` verb.
+    install::self_heal();
 
     let cli = cli::Cli::parse();
 
@@ -126,7 +141,7 @@ fn run() -> Result<(), CommandError> {
             force,
         } => cmd_init(&client, version, global, force),
         cli::Command::Selfupdate => Err(anyhow!(
-            "self-update is handled by the jlo shell function. Source jlo-init.sh from your shell profile, or re-run the installer."
+            "self-update is handled by the jlo shell function. Source jlo.sh from your shell profile, or re-run the installer."
         )
         .into()),
         cli::Command::Completions { shell } => {
@@ -139,13 +154,16 @@ fn run() -> Result<(), CommandError> {
 /// Write a shell completion script to stdout.
 ///
 /// The completion function registers against the command word `jlo`, which
-/// resolves to the shell function from jlo-init.sh, so the wrapper is
+/// resolves to the shell function the installer generates, so the wrapper is
 /// transparent to completion.
 fn cmd_completions(shell: clap_complete::Shell) {
-    use clap::CommandFactory;
+    use std::io::Write as _;
 
-    let mut command = cli::Cli::command();
-    clap_complete::generate(shell, &mut command, "jlo", &mut std::io::stdout());
+    // The script is built once and written once, because `install.rs` needs
+    // the same bytes to write into `$JLO_HOME/completions`. A closed stdout
+    // (`jlo completions bash | head`) is not an error worth reporting - the
+    // rule `print_lines` already follows.
+    let _ = std::io::stdout().write_all(&cli::completion_script(shell));
 }
 
 /// Determine the requested major version: the explicit CLI argument if present,
@@ -940,10 +958,10 @@ fn install_jdk_inner(
 /// J'Lo's own state directory — where `default.jlorc` lives.
 ///
 /// The fallback must match what `install.sh` exports (`$HOME/.jlo`), not bare
-/// `$HOME`: interactive shells get `JLO_HOME` from `jlo-init.sh`, but scripts
+/// `$HOME`: interactive shells get `JLO_HOME` from the generated `jlo.sh`, but scripts
 /// and CI invoking `jlo-bin` directly do not, and those two must resolve the
 /// same file.
-fn jlo_home_dir() -> anyhow::Result<PathBuf> {
+pub(crate) fn jlo_home_dir() -> anyhow::Result<PathBuf> {
     let path = env::var_os("JLO_HOME")
         .map(PathBuf::from)
         .or_else(|| env::home_dir().map(|home| home.join(JLO_HOME_DIR_NAME)))

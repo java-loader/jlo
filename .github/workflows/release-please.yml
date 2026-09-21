@@ -94,7 +94,7 @@ jobs:
           RUST_BACKTRACE: full
 
       - name: Build package
-        run: tar --no-same-owner -czf ${{ matrix.package }}.tar.gz jlo-autoload.sh jlo-init.sh -C target/release jlo-bin
+        run: tar --no-same-owner -czf ${{ matrix.package }}.tar.gz -C target/release jlo-bin
 
       # The updater verifies this before it unpacks anything. It shares an
       # origin with the tarball, so it catches a corrupt or truncated download,
