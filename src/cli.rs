@@ -148,10 +148,10 @@ newer exists, so a machine holding only Java 17 resolves to 17.
 --offline stops after that step instead of downloading. Only major
 versions are accepted: 21, not 21.0.5.
 
-Pass --verbose for one line on stderr naming the JDK that is now
-active and where the version came from - including when the shell was
-already on it. The autoload hook never passes it, which is why the
-report is opt-in: it runs on every new shell and every cd."
+On success this writes export statements to stdout and nothing
+anywhere else. To see which JDK is active and where the version came
+from, run jlo current - it starts from the live JAVA_HOME, so it can
+also say when the two disagree."
     )]
     Env {
         /// Java major version. Default: .jlorc, the newest installed JDK, then the latest release
@@ -160,10 +160,6 @@ report is opt-in: it runs on every new shell and every cd."
         /// Only look at installed JDKs; never download, never touch the network
         #[arg(long)]
         offline: bool,
-
-        /// Report the active JDK and where the version came from, on stderr
-        #[arg(short, long)]
-        verbose: bool,
     },
 
     #[command(

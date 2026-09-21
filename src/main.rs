@@ -125,11 +125,7 @@ fn run() -> Result<(), CommandError> {
     let client = AdoptiumClient::new(api_url);
 
     match command {
-        cli::Command::Env {
-            version,
-            offline,
-            verbose,
-        } => cmd_env(&client, version, offline, verbose),
+        cli::Command::Env { version, offline } => cmd_env(&client, version, offline),
         cli::Command::Home { version, offline } => cmd_home(&client, version, offline),
         cli::Command::Exec { args } => cmd_exec(&client, &args),
         cli::Command::Current => cmd_current(),
@@ -172,7 +168,7 @@ fn cmd_completions(shell: clap_complete::Shell) {
 /// present, otherwise the fallback cascade below.
 ///
 /// Returns where the version came from as well as what it is, because
-/// `jlo current` and `jlo env --verbose` report it and re-deriving it there
+/// `jlo current` reports it, and re-deriving it there
 /// would be a second spelling of the same walk.
 fn resolve_java_version_from(
     explicit: Option<String>,
@@ -266,32 +262,10 @@ fn cmd_env(
     client: &AdoptiumClient,
     version: Option<String>,
     offline: bool,
-    verbose: bool,
 ) -> Result<(), CommandError> {
     let store = JdkStore::discover()?;
     let resolved = resolve_java_version_from(version, &store, client, offline)?;
-    let change = setup(client, &store, &resolved.version, offline)?;
-
-    // Opt-in, for the reason `setup` prints nothing at all: the autoload hook
-    // calls it from PROMPT_COMMAND/chpwd, and the hook never passes --verbose.
-    // Reported here rather than inside `setup` so the hook path keeps exactly
-    // one writer, and through the same formatter `jlo current` uses so the two
-    // answers cannot drift.
-    if verbose {
-        ui::env_report(&ui::Active {
-            version: change
-                .java_home
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned()),
-            major: resolved.version.parse().ok(),
-            path: change.java_home,
-            source: Some(resolved.source),
-            // `env` asked for this version, so nothing can be pinned elsewhere
-            // - the config either is the source or was overridden by hand.
-            pinned_elsewhere: None,
-            unchanged: change.unchanged,
-        });
-    }
+    setup(client, &store, &resolved.version, offline)?;
 
     // The exports on stdout are the whole effect of this command. If stdout is
     // a terminal nothing captured them, so the exit code says success while
@@ -678,7 +652,6 @@ fn cmd_current() -> Result<(), CommandError> {
             major: None,
             source: Some(conf::Source::Foreign),
             pinned_elsewhere: None,
-            unchanged: false,
         })]);
         return Ok(());
     };
@@ -705,7 +678,6 @@ fn cmd_current() -> Result<(), CommandError> {
         version: Some(version),
         source: None,
         pinned_elsewhere: None,
-        unchanged: false,
     };
 
     // The same cascade `jlo env` resolves through, stopped after stage 3:
@@ -1020,7 +992,7 @@ fn setup(
     store: &JdkStore,
     java_version: &str,
     offline: bool,
-) -> Result<EnvChange, CommandError> {
+) -> Result<(), CommandError> {
     let java_home = if offline {
         offline_java_home(store, java_version, "env")?
     } else {
@@ -1047,25 +1019,9 @@ fn setup(
         exports.push(format!("export PATH={}", shell_quote(&updated_path)));
     }
 
-    // Read before the vector is consumed: "nothing to export" is the whole of
-    // what --verbose needs to distinguish "already correct" from "did
-    // nothing", which were indistinguishable while this path was silent.
-    let unchanged = exports.is_empty();
     ui::print_lines(exports);
 
-    Ok(EnvChange {
-        java_home,
-        unchanged,
-    })
-}
-
-/// What a `setup` call did, for the caller that may have been asked to report
-/// it.
-#[derive(Debug)]
-struct EnvChange {
-    java_home: PathBuf,
-    /// No exports were needed: `$JAVA_HOME` and `PATH` were already right.
-    unchanged: bool,
+    Ok(())
 }
 
 fn install_jdk(
@@ -1260,7 +1216,7 @@ mod tests {
 
     #[test]
     fn cmd_env_rejects_an_unsupported_version() {
-        let err = cmd_env(&offline_client(), Some("nope".to_string()), false, false)
+        let err = cmd_env(&offline_client(), Some("nope".to_string()), false)
             .expect_err("'nope' is not a major version");
         assert_eq!(
             format!("{:#}", err.error),
@@ -1274,7 +1230,7 @@ mod tests {
     /// JDK matches Java nope".
     #[test]
     fn cmd_env_offline_rejects_an_unsupported_version() {
-        let err = cmd_env(&offline_client(), Some("nope".to_string()), true, false)
+        let err = cmd_env(&offline_client(), Some("nope".to_string()), true)
             .expect_err("'nope' is not a major version");
         assert_eq!(
             format!("{:#}", err.error),

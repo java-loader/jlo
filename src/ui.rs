@@ -528,19 +528,13 @@ pub(crate) struct Active {
     /// when the two disagree; that disagreement is the whole reason this
     /// command answers "and why" rather than just "what".
     pub pinned_elsewhere: Option<crate::conf::Resolved>,
-    /// The caller found the environment already correct and changed nothing.
-    /// `jlo env --verbose` sets it - saying so is the difference between
-    /// "already right" and "did nothing", which were indistinguishable
-    /// before. A command that only ever reports leaves it false: there it
-    /// would be true of every run and so say nothing.
-    pub unchanged: bool,
 }
 
 /// The one line that answers "which JDK, and why".
 ///
-/// One formatter, every caller: `jlo current` and `jlo env --verbose` are two
-/// askings of the same question, and two spellings of the answer would drift.
-/// Pure - no filesystem, no environment.
+/// `jlo current`'s whole stdout line. A formatter rather than a `println!` at
+/// the call site so it can be unit-tested against every state it
+/// distinguishes: pure - no filesystem, no environment.
 pub(crate) fn provenance_line(active: &Active) -> String {
     // A JDK jlo did not install has no version to name, so the path is the
     // answer: it says "not mine" completely, and the version is usually in it
@@ -550,7 +544,7 @@ pub(crate) fn provenance_line(active: &Active) -> String {
         None => active.path.display().to_string(),
     };
 
-    let mut note = match &active.source {
+    let note = match &active.source {
         Some(crate::conf::Source::Foreign) => "$JAVA_HOME, set outside jlo".to_string(),
         Some(source) => format!("from {}", source.label()),
         // Active, and a config pins something else. The stdout line still
@@ -559,21 +553,7 @@ pub(crate) fn provenance_line(active: &Active) -> String {
         None => "active, nothing pinned".to_string(),
     };
 
-    if active.unchanged {
-        note.push_str(", already active");
-    }
-
     format!("{subject}  ({note})")
-}
-
-/// `jlo env --verbose`: one line saying which JDK is now active and where the
-/// version came from.
-///
-/// stderr, because stdout on this path is the environment channel - the `jlo`
-/// shell function sources it, and a status line arriving there would be
-/// executed rather than read.
-pub(crate) fn env_report(active: &Active) {
-    eprintln!("{}", provenance_line(active));
 }
 
 /// The active JDK is not the one the config pins.
@@ -939,11 +919,10 @@ mod tests {
 
     // -- provenance_line --
     //
-    // The six states `jlo current` distinguishes, plus the annotation
-    // `jlo env --verbose` adds. Pure formatting: no store, no config, no
-    // environment. Cases 1 and 6 never reach a formatter - they have no
-    // answer to print - so they are covered by the integration suite's exit
-    // codes instead.
+    // The six states `jlo current` distinguishes. Pure formatting: no store,
+    // no config, no environment. Cases 1 and 6 never reach a formatter - they
+    // have no answer to print - so they are covered by the integration
+    // suite's exit codes instead.
 
     fn active(version: &str, major: i64) -> Active {
         Active {
@@ -952,7 +931,6 @@ mod tests {
             major: Some(major),
             source: None,
             pinned_elsewhere: None,
-            unchanged: false,
         }
     }
 
@@ -1002,7 +980,6 @@ mod tests {
             major: None,
             source: Some(crate::conf::Source::Foreign),
             pinned_elsewhere: None,
-            unchanged: false,
         };
         assert_eq!(
             provenance_line(&a),
@@ -1010,23 +987,7 @@ mod tests {
         );
     }
 
-    /// `jlo env --verbose` on a run that changed nothing. Without this the
-    /// line is identical to the one a real switch prints, which is the
-    /// complaint the flag exists to answer: "already correct" and "did
-    /// nothing" were indistinguishable.
-    #[test]
-    fn provenance_line_marks_a_run_that_changed_nothing() {
-        let mut a = active("25.0.4+101", 25);
-        a.source = Some(pinned("25", "./.jlorc").source);
-        a.unchanged = true;
-        assert_eq!(
-            provenance_line(&a),
-            "25.0.4+101  (from ./.jlorc, already active)"
-        );
-    }
-
-    /// A version given on the command line is a provenance too, and the one
-    /// `jlo env 21 --verbose` reports.
+    /// A version given on the command line is a provenance too.
     #[test]
     fn provenance_line_names_the_command_line_as_a_source() {
         let mut a = active("21.0.5+11", 21);

@@ -1661,83 +1661,16 @@ fn current_takes_no_flags_or_version() {
     }
 }
 
-// -- jlo env --verbose --
-//
-// `setup` prints nothing to stderr on purpose - the autoload hook calls it on
-// every new shell and every cd - so the report is opt-in. These tests pin the
-// two halves of the contract: it says where the version came from, and it says
-// so on a run that changed nothing.
+// -- jlo env's output channel --
 
-/// The version's provenance is the point, so the line names the file it came
-/// from rather than just the JDK.
+/// ADR-0001: on success `env` writes export statements to stdout and nothing
+/// anywhere else. `--verbose` used to add a stderr line here; it is gone,
+/// because `jlo current` answers the same question from the live `JAVA_HOME`
+/// and can therefore also report drift. What must not come back is a second
+/// writer on this path - the autoload hook runs it on every new shell and
+/// every cd.
 #[test]
-fn env_verbose_names_the_config_the_version_came_from() {
-    let (home, project) = current_fixture("25.0.4+101");
-    std::fs::write(project.join(".jlorc"), "25\n").unwrap();
-
-    Command::cargo_bin("jlo-bin")
-        .unwrap()
-        .args(["env", "--offline", "--verbose"])
-        .current_dir(&project)
-        .env("HOME", home.path())
-        .env("JLO_HOME", home.path().join(".jlo"))
-        .env_remove("JAVA_HOME")
-        .env("PATH", "/usr/bin")
-        .assert()
-        .success()
-        .code(0)
-        .stdout(predicate::str::contains("export JAVA_HOME="))
-        .stderr("25.0.4+101  (from ./.jlorc)\n");
-}
-
-/// The original complaint: `setup` only writes when something changed, so
-/// "already correct" and "did nothing" looked identical. The line has to
-/// print here too, and say which of the two it was.
-#[test]
-fn env_verbose_reports_a_run_that_changed_nothing() {
-    let (home, project) = current_fixture("25.0.4+101");
-    std::fs::write(project.join(".jlorc"), "25\n").unwrap();
-    let jdk = store_base(home.path()).join("25.0.4+101");
-
-    Command::cargo_bin("jlo-bin")
-        .unwrap()
-        .args(["env", "--offline", "--verbose"])
-        .current_dir(&project)
-        .env("HOME", home.path())
-        .env("JLO_HOME", home.path().join(".jlo"))
-        .env("JAVA_HOME", &jdk)
-        .env("PATH", format!("{}:/usr/bin", jdk.join("bin").display()))
-        .assert()
-        .success()
-        .code(0)
-        // Nothing to export - the shell is already on it.
-        .stdout(predicate::str::is_empty())
-        .stderr("25.0.4+101  (from ./.jlorc, already active)\n");
-}
-
-/// An explicit argument is a provenance too, and `-v` is the short form.
-#[test]
-fn env_verbose_names_the_command_line_as_a_source() {
-    let (home, project) = current_fixture("25.0.4+101");
-
-    Command::cargo_bin("jlo-bin")
-        .unwrap()
-        .args(["env", "--offline", "-v", "25"])
-        .current_dir(&project)
-        .env("HOME", home.path())
-        .env("JLO_HOME", home.path().join(".jlo"))
-        .env_remove("JAVA_HOME")
-        .env("PATH", "/usr/bin")
-        .assert()
-        .success()
-        .code(0)
-        .stderr("25.0.4+101  (from the command line)\n");
-}
-
-/// Without the flag the path stays silent, which is what keeps the autoload
-/// hook from printing a line on every new shell and every cd.
-#[test]
-fn env_without_verbose_still_says_nothing() {
+fn env_writes_exports_to_stdout_and_nothing_to_stderr() {
     let (home, project) = current_fixture("25.0.4+101");
     std::fs::write(project.join(".jlorc"), "25\n").unwrap();
 
@@ -1756,16 +1689,18 @@ fn env_without_verbose_still_says_nothing() {
         .stderr(predicate::str::is_empty());
 }
 
-/// Not added to `home`: its stdout is a bare path for `$(jlo home)`, and it
-/// has no no-op case to explain.
+/// The flag is gone from `env` as well as from `home`, and gone means a usage
+/// error rather than a silently accepted no-op.
 #[test]
-fn home_has_no_verbose_flag() {
-    Command::cargo_bin("jlo-bin")
-        .unwrap()
-        .args(["home", "--verbose", "25"])
-        .assert()
-        .failure()
-        .code(2);
+fn neither_env_nor_home_has_a_verbose_flag() {
+    for verb in ["env", "home"] {
+        Command::cargo_bin("jlo-bin")
+            .unwrap()
+            .args([verb, "--verbose", "25"])
+            .assert()
+            .failure()
+            .code(2);
+    }
 }
 
 // -- the version-resolution cascade, end to end --
@@ -1912,15 +1847,14 @@ fn a_project_config_beats_both_the_default_and_the_newest_install() {
         .stdout(installed_path(home.path(), "21.0.5+11"));
 }
 
-/// `jlo env --verbose` names the stage too, through the same formatter
-/// `jlo current` uses. The exports still go to stdout; the report is the
-/// stderr line.
+/// `env` reaches stage 3 as well - `cascade_cmd` probes with `home` - and
+/// its stdout is exactly two export lines and nothing else.
 #[test]
-fn env_verbose_names_the_newest_installed_jdk_as_the_source() {
+fn env_resolves_the_newest_installed_jdk_and_exports_only_that() {
     let (home, project) = store_fixture(&["21.0.5+11"]);
 
     let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
-    cmd.args(["env", "--offline", "--verbose"])
+    cmd.args(["env", "--offline"])
         .current_dir(&project)
         .env("HOME", home.path())
         .env("JLO_HOME", home.path().join(".jlo"))
@@ -1929,13 +1863,13 @@ fn env_verbose_names_the_newest_installed_jdk_as_the_source() {
         .assert()
         .success()
         .code(0)
-        // stdout is the environment channel: the report must not leak into
-        // the stream the jlo shell function evaluates.
+        // stdout is the environment channel: the jlo shell function evaluates
+        // this stream, so anything else arriving here would be executed.
         .stdout(
             predicate::str::is_match(
                 r"^export JAVA_HOME='[^']*21\.0\.5\+11'\nexport PATH='[^']*'\n$",
             )
             .unwrap(),
         )
-        .stderr("21.0.5+11  (from the newest installed JDK)\n");
+        .stderr(predicate::str::is_empty());
 }

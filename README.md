@@ -143,10 +143,10 @@ to point to the desired JDK installation.
 - `--offline` uses only what is already installed: it sets the environment if the version is there, and otherwise
   prints one line to standard error and exits with status 1, leaving the environment untouched. This is how the
   autoload hook calls it, so entering a project never starts a download — see the note below.
-- `jlo env` is silent on success by design — the autoload hook runs it on every new shell and every `cd`. Pass
-  `-v`/`--verbose` for one line on standard error naming the JDK that is now active and where the version came
-  from. It prints on a run that changed nothing too, saying `already active`, so "already correct" is
-  distinguishable from "did nothing". The autoload hook never passes it.
+- `jlo env` is silent on success by design — the autoload hook runs it on every new shell and every `cd`, and the
+  export statements on standard output are the whole of what it does. To see which JDK is active and where the
+  version came from, run [`jlo current`](#checking-what-is-active): it starts from the live `JAVA_HOME`, so it can
+  also tell you when the shell and the `.jlorc` disagree.
 - This command affects only the current shell session.
 - VERSION is a major version only, e.g. `25`, not `25.0.5`. This applies everywhere a command takes a VERSION
   argument.
@@ -162,8 +162,8 @@ jlo env 25
 # set it only if the JDK is already here; never download
 jlo env --offline
 
-# say which JDK was set and why - even if the shell was already on it
-jlo env --verbose
+# afterwards: say which JDK is active, and why
+jlo current
 ````
 
 ## Resolving JAVA_HOME
