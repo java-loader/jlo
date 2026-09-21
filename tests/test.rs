@@ -1504,3 +1504,110 @@ fn current_takes_no_flags_or_version() {
         cmd.args(["current", extra]).assert().failure().code(2);
     }
 }
+
+// -- jlo env --verbose --
+//
+// `setup` prints nothing to stderr on purpose - the autoload hook calls it on
+// every new shell and every cd - so the report is opt-in. These tests pin the
+// two halves of the contract: it says where the version came from, and it says
+// so on a run that changed nothing.
+
+/// The version's provenance is the point, so the line names the file it came
+/// from rather than just the JDK.
+#[test]
+fn env_verbose_names_the_config_the_version_came_from() {
+    let (home, project) = current_fixture("25.0.4+101");
+    std::fs::write(project.join(".jlorc"), "25\n").unwrap();
+
+    Command::cargo_bin("jlo-bin")
+        .unwrap()
+        .args(["env", "--offline", "--verbose"])
+        .current_dir(&project)
+        .env("HOME", home.path())
+        .env("JLO_HOME", home.path().join(".jlo"))
+        .env_remove("JAVA_HOME")
+        .env("PATH", "/usr/bin")
+        .assert()
+        .success()
+        .code(0)
+        .stdout(predicate::str::contains("export JAVA_HOME="))
+        .stderr("25.0.4+101  (from ./.jlorc)\n");
+}
+
+/// The original complaint: `setup` only writes when something changed, so
+/// "already correct" and "did nothing" looked identical. The line has to
+/// print here too, and say which of the two it was.
+#[test]
+fn env_verbose_reports_a_run_that_changed_nothing() {
+    let (home, project) = current_fixture("25.0.4+101");
+    std::fs::write(project.join(".jlorc"), "25\n").unwrap();
+    let jdk = store_base(home.path()).join("25.0.4+101");
+
+    Command::cargo_bin("jlo-bin")
+        .unwrap()
+        .args(["env", "--offline", "--verbose"])
+        .current_dir(&project)
+        .env("HOME", home.path())
+        .env("JLO_HOME", home.path().join(".jlo"))
+        .env("JAVA_HOME", &jdk)
+        .env("PATH", format!("{}:/usr/bin", jdk.join("bin").display()))
+        .assert()
+        .success()
+        .code(0)
+        // Nothing to export - the shell is already on it.
+        .stdout(predicate::str::is_empty())
+        .stderr("25.0.4+101  (from ./.jlorc, already active)\n");
+}
+
+/// An explicit argument is a provenance too, and `-v` is the short form.
+#[test]
+fn env_verbose_names_the_command_line_as_a_source() {
+    let (home, project) = current_fixture("25.0.4+101");
+
+    Command::cargo_bin("jlo-bin")
+        .unwrap()
+        .args(["env", "--offline", "-v", "25"])
+        .current_dir(&project)
+        .env("HOME", home.path())
+        .env("JLO_HOME", home.path().join(".jlo"))
+        .env_remove("JAVA_HOME")
+        .env("PATH", "/usr/bin")
+        .assert()
+        .success()
+        .code(0)
+        .stderr("25.0.4+101  (from the command line)\n");
+}
+
+/// Without the flag the path stays silent, which is what keeps the autoload
+/// hook from printing a line on every new shell and every cd.
+#[test]
+fn env_without_verbose_still_says_nothing() {
+    let (home, project) = current_fixture("25.0.4+101");
+    std::fs::write(project.join(".jlorc"), "25\n").unwrap();
+
+    Command::cargo_bin("jlo-bin")
+        .unwrap()
+        .args(["env", "--offline"])
+        .current_dir(&project)
+        .env("HOME", home.path())
+        .env("JLO_HOME", home.path().join(".jlo"))
+        .env_remove("JAVA_HOME")
+        .env("PATH", "/usr/bin")
+        .assert()
+        .success()
+        .code(0)
+        .stdout(predicate::str::contains("export JAVA_HOME="))
+        .stderr(predicate::str::is_empty());
+}
+
+/// Not added to `home`: its stdout is a bare path for `$(jlo home)`, and it
+/// has no no-op case to explain.
+#[test]
+fn home_has_no_verbose_flag() {
+    Command::cargo_bin("jlo-bin")
+        .unwrap()
+        .args(["home", "--verbose", "25"])
+        .assert()
+        .failure()
+        .code(2);
+}

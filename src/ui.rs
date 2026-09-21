@@ -451,6 +451,16 @@ pub(crate) fn provenance_line(active: &Active) -> String {
     format!("{subject}  ({note})")
 }
 
+/// `jlo env --verbose`: one line saying which JDK is now active and where the
+/// version came from.
+///
+/// stderr, because stdout on this path is the environment channel - the `jlo`
+/// shell function sources it, and a status line arriving there would be
+/// executed rather than read.
+pub(crate) fn env_report(active: &Active) {
+    eprintln!("{}", provenance_line(active));
+}
+
 /// The active JDK is not the one the config pins.
 ///
 /// Unconditional - deliberately not gated on `is_terminal()` the way the

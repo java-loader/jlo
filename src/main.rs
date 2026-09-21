@@ -138,7 +138,11 @@ fn run() -> Result<(), CommandError> {
     let client = AdoptiumClient::new(api_url);
 
     match command {
-        cli::Command::Env { version, offline } => cmd_env(&client, version, offline),
+        cli::Command::Env {
+            version,
+            offline,
+            verbose,
+        } => cmd_env(&client, version, offline, verbose),
         cli::Command::Home { version, offline } => cmd_home(&client, version, offline),
         cli::Command::Exec { args } => cmd_exec(&client, &args),
         cli::Command::Current => cmd_current(),
@@ -197,9 +201,31 @@ fn cmd_env(
     client: &AdoptiumClient,
     version: Option<String>,
     offline: bool,
+    verbose: bool,
 ) -> Result<(), CommandError> {
     let resolved = resolve_java_version_from(version)?;
-    setup(client, &resolved.version, offline)?;
+    let change = setup(client, &resolved.version, offline)?;
+
+    // Opt-in, for the reason `setup` prints nothing at all: the autoload hook
+    // calls it from PROMPT_COMMAND/chpwd, and the hook never passes --verbose.
+    // Reported here rather than inside `setup` so the hook path keeps exactly
+    // one writer, and through the same formatter `jlo current` uses so the two
+    // answers cannot drift.
+    if verbose {
+        ui::env_report(&ui::Active {
+            version: change
+                .java_home
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned()),
+            major: resolved.version.parse().ok(),
+            path: change.java_home,
+            source: Some(resolved.source),
+            // `env` asked for this version, so nothing can be pinned elsewhere
+            // - the config either is the source or was overridden by hand.
+            pinned_elsewhere: None,
+            unchanged: change.unchanged,
+        });
+    }
 
     // The exports on stdout are the whole effect of this command. If stdout is
     // a terminal nothing captured them, so the exit code says success while
@@ -841,7 +867,11 @@ fn shell_quote(value: &str) -> String {
 /// Rust, instead of once per shell dialect. When it declines, it declines
 /// before anything reaches stdout: the hook sources that stream, so a partial
 /// export would be worse than no export at all.
-fn setup(client: &AdoptiumClient, java_version: &str, offline: bool) -> Result<(), CommandError> {
+fn setup(
+    client: &AdoptiumClient,
+    java_version: &str,
+    offline: bool,
+) -> Result<EnvChange, CommandError> {
     let store = JdkStore::discover()?;
     let java_home = if offline {
         offline_java_home(&store, java_version, "env")?
@@ -869,9 +899,25 @@ fn setup(client: &AdoptiumClient, java_version: &str, offline: bool) -> Result<(
         exports.push(format!("export PATH={}", shell_quote(&updated_path)));
     }
 
+    // Read before the vector is consumed: "nothing to export" is the whole of
+    // what --verbose needs to distinguish "already correct" from "did
+    // nothing", which were indistinguishable while this path was silent.
+    let unchanged = exports.is_empty();
     ui::print_lines(exports);
 
-    Ok(())
+    Ok(EnvChange {
+        java_home,
+        unchanged,
+    })
+}
+
+/// What a `setup` call did, for the caller that may have been asked to report
+/// it.
+#[derive(Debug)]
+struct EnvChange {
+    java_home: PathBuf,
+    /// No exports were needed: `$JAVA_HOME` and `PATH` were already right.
+    unchanged: bool,
 }
 
 fn install_jdk(
@@ -1060,7 +1106,7 @@ mod tests {
 
     #[test]
     fn cmd_env_rejects_an_unsupported_version() {
-        let err = cmd_env(&offline_client(), Some("nope".to_string()), false)
+        let err = cmd_env(&offline_client(), Some("nope".to_string()), false, false)
             .expect_err("'nope' is not a major version");
         assert_eq!(
             format!("{:#}", err.error),
@@ -1074,7 +1120,7 @@ mod tests {
     /// JDK matches Java nope".
     #[test]
     fn cmd_env_offline_rejects_an_unsupported_version() {
-        let err = cmd_env(&offline_client(), Some("nope".to_string()), true)
+        let err = cmd_env(&offline_client(), Some("nope".to_string()), true, false)
             .expect_err("'nope' is not a major version");
         assert_eq!(
             format!("{:#}", err.error),
