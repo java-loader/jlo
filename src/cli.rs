@@ -8,15 +8,16 @@
 use clap::{Parser, Subcommand};
 
 const AFTER_HELP: &str = "\
-env, home, exec, update and init take a Java major version:
+env, home, exec, install, update and init take a Java major version:
 
-  jlo env [VERSION]          jlo update [VERSION...]
-  jlo home [VERSION]         jlo init [VERSION]
+  jlo env [VERSION]          jlo install [VERSION...]
+  jlo home [VERSION]         jlo update [VERSION...]
   jlo exec [VERSION] -- <COMMAND> [ARGS]...
+  jlo init [VERSION]
 
-When VERSION is omitted, env, home, exec and update resolve it from the
-nearest .jlorc at or above the current directory, then ~/.jlo/default.jlorc.
-init instead pins the latest release.
+When VERSION is omitted, env, home, exec, install and update resolve it from
+the nearest .jlorc at or above the current directory, then
+~/.jlo/default.jlorc. init instead pins the latest release.
 
 Examples:
   jlo env 25                       Use Java 25 in this shell
@@ -24,6 +25,7 @@ Examples:
   jlo env                          Use the pinned version
   jlo current                      Show which JDK is active, and why
   jlo exec 21 -- ./gradlew build   Run a build on Java 21
+  jlo install 25                   Download Java 25 without switching to it
   jlo update --all                 Bring every installed JDK up to date
   jlo remove 11 17                 Remove every installed Java 11 and 17
 
@@ -240,6 +242,33 @@ some other version lives, see jlo home."
         /// List only what is installed; never touch the network
         #[arg(long)]
         offline: bool,
+    },
+
+    // Attribute strings rather than a doc comment, for the reason given at
+    // the top of this enum: JAVA_HOME below would have to be backtick-quoted
+    // in rustdoc, and clap would then print the backticks.
+    #[command(
+        about = "Install the latest build of a major version, without changing this shell",
+        long_about = "\
+Install the latest build of a major version, without changing this shell
+
+Downloads the latest build Adoptium offers of every major version
+named. Nothing is exported and no shell is touched: neither JAVA_HOME
+nor PATH changes, here or anywhere else.
+
+The usual route is jlo env, which switches the current shell and
+downloads the JDK on demand if it is missing, so an explicit install
+is for the cases that come before that - warming a CI cache, preparing
+for offline work, or seeding a machine without switching it. A major
+already on its latest build is reported and left alone.
+
+When VERSION is omitted, it resolves from the nearest .jlorc at or
+above the current directory, then ~/.jlo/default.jlorc. Only major
+versions are accepted: 21, not 21.0.5."
+    )]
+    Install {
+        /// Major versions to install. Default: from .jlorc
+        versions: Vec<String>,
     },
 
     /// Update installed JDKs to their latest minor release

@@ -188,6 +188,80 @@ fn help_mentions_version_resolution_and_examples() {
         .stdout(predicate::str::contains("jlo exec 21 -- ./gradlew build"));
 }
 
+/// `install` was missing entirely until it was added as its own verb: the
+/// obvious first guess was an `unrecognized subcommand` error, and nothing in
+/// the help pointed at `update`. It has to be listed where the other
+/// version-taking commands are, or the discoverability problem is unfixed.
+#[test]
+fn install_is_documented_in_help() {
+    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
+    cmd.arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("jlo install [VERSION...]"))
+        .stdout(predicate::str::contains("jlo install 25"));
+}
+
+/// The reason `install` is a command of its own rather than an alias on
+/// `update`: there is no such thing as installing every major, so the flag
+/// that makes sense for `update` must not be a documented spelling here.
+#[test]
+fn install_has_no_all_flag() {
+    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
+    cmd.args(["install", "--all"])
+        .env("JLO_ADOPTIUM_API_URL", "http://127.0.0.1:1")
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains("--all"));
+
+    let mut help = Command::cargo_bin("jlo-bin").unwrap();
+    help.args(["install", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--all").not());
+}
+
+/// `install` does not touch the shell, so nothing may reach stdout - the
+/// wrapper sources what lands there. The argument check fails before the
+/// network, hence the unreachable API address.
+#[test]
+fn install_rejects_an_invalid_version_without_writing_to_stdout() {
+    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
+    cmd.args(["install", "abc"])
+        .env("JLO_ADOPTIUM_API_URL", "http://127.0.0.1:1")
+        .assert()
+        .failure()
+        .code(1)
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains(
+            "no valid Java versions provided to install",
+        ));
+}
+
+/// A bare `jlo install` resolves the version the same way env/home/exec do.
+/// With no .jlorc anywhere above the run directory and no user default, that
+/// resolution is what fails - not the download.
+#[test]
+#[serial]
+fn install_without_a_version_resolves_from_config() {
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+
+    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
+    cmd.arg("install")
+        .current_dir(project.path())
+        .env("HOME", home.path())
+        .env("JLO_HOME", home.path().join(".jlo"))
+        .env("JLO_ADOPTIUM_API_URL", "http://127.0.0.1:1")
+        .assert()
+        .failure()
+        .code(1)
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains(".jlorc"))
+        .stderr(predicate::str::contains("jlo init"));
+}
+
 #[test]
 fn use_alias_is_documented_in_help() {
     // `jlo-init.sh` has always accepted `use` as an alias for `env`; the
@@ -346,6 +420,7 @@ fn every_subcommand_has_help() {
         "exec",
         "current",
         "list",
+        "install",
         "update",
         "prune",
         "remove",

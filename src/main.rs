@@ -133,6 +133,7 @@ fn run() -> Result<(), CommandError> {
         cli::Command::Exec { args } => cmd_exec(&client, &args),
         cli::Command::Current => cmd_current(),
         cli::Command::List { offline } => cmd_list(&client, offline),
+        cli::Command::Install { versions } => cmd_install(&client, versions),
         cli::Command::Update { versions, all } => cmd_update(&client, versions, all),
         cli::Command::Prune => cmd_prune(),
         cli::Command::Remove { versions } => cmd_remove(&versions),
@@ -710,58 +711,99 @@ fn cmd_init(
     })
 }
 
+/// Download the latest build of each major named, without touching the
+/// current shell.
+///
+/// Deliberately a second verb rather than an alias for `update`: "make sure
+/// this major is here" and "bring what is here up to date" are different
+/// questions, and they coincide only because jlo keeps exactly one build per
+/// major. Hence no `--all` here - there is no such thing as installing every
+/// major - while `update` keeps its own meaning and wording.
+fn cmd_install(client: &AdoptiumClient, versions: Vec<String>) -> Result<(), CommandError> {
+    let store = JdkStore::discover()?;
+    let versions = requested_versions(versions, "install")?;
+    install_each(client, &store, versions)
+}
+
 fn cmd_update(
     client: &AdoptiumClient,
     versions: Vec<String>,
     all: bool,
 ) -> Result<(), CommandError> {
     let store = JdkStore::discover()?;
-    let mut versions_to_install: HashSet<String> = HashSet::new();
 
     // `--all` and explicit versions are mutually exclusive (clap enforces it),
-    // so these three arms are the whole input space.
-    if all {
-        store
+    // so these two arms are the whole input space.
+    let versions_to_install = if all {
+        let installed: HashSet<String> = store
             .installed_majors()
             .context("could not determine installed JDK versions")?
             .into_iter()
-            .for_each(|v| {
-                versions_to_install.insert(v.to_string());
-            });
+            .map(|v| v.to_string())
+            .collect();
 
-        if versions_to_install.is_empty() {
+        if installed.is_empty() {
             return Err(anyhow!("no installed JDKs to update").into());
         }
-    } else if versions.is_empty() {
-        versions_to_install.insert(conf::resolve()?.version);
+        installed
     } else {
-        for v in versions {
-            if conf::is_valid_version(&v) {
-                versions_to_install.insert(v);
-            } else {
-                ui::warning!("skipping invalid version '{v}'");
-            }
-        }
+        requested_versions(versions, "update")?
+    };
 
-        if versions_to_install.is_empty() {
-            return Err(anyhow!("no valid Java versions provided to update").into());
+    install_each(client, &store, versions_to_install)
+}
+
+/// The majors an explicit run should download: the list given, or the version
+/// resolved from config when the list is empty - the same resolution `env`,
+/// `home` and `exec` do, so a bare `jlo install` means the pinned version like
+/// everywhere else.
+///
+/// An invalid entry is warned about and skipped, so one typo in a list of four
+/// does not cost the other three. A list that leaves nothing valid behind is
+/// an error naming `verb`, the command that asked.
+fn requested_versions(versions: Vec<String>, verb: &str) -> Result<HashSet<String>, CommandError> {
+    if versions.is_empty() {
+        return Ok(HashSet::from([conf::resolve()?.version]));
+    }
+
+    let mut requested = HashSet::new();
+    for v in versions {
+        if conf::is_valid_version(&v) {
+            requested.insert(v);
+        } else {
+            ui::warning!("skipping invalid version '{v}'");
         }
     }
 
-    // Sort versions_to_install alphabetically for consistent processing order
-    let mut versions_to_install: Vec<_> = versions_to_install.into_iter().collect();
-    versions_to_install.sort();
+    if requested.is_empty() {
+        return Err(anyhow!("no valid Java versions provided to {verb}").into());
+    }
+
+    Ok(requested)
+}
+
+/// The one download site behind both `install` and `update`: the two verbs
+/// differ only in how they arrive at this set of majors.
+fn install_each(
+    client: &AdoptiumClient,
+    store: &JdkStore,
+    versions: HashSet<String>,
+) -> Result<(), CommandError> {
+    // Sorted for a stable processing order, rather than whatever order the
+    // hash set happens to iterate in.
+    let mut versions: Vec<_> = versions.into_iter().collect();
+    versions.sort();
 
     let mut installed_any = false;
-    for java_version in versions_to_install {
-        installed_any |= update(client, &store, &java_version)?;
+    for java_version in versions {
+        installed_any |= update(client, store, &java_version)?;
     }
 
-    // An update leaves the superseded minor on disk on purpose - a command
+    // A download leaves the superseded minor on disk on purpose - a command
     // that downloads should not also delete, and the old JDK may still be
     // wired into an open shell or an IDE. Point at `jlo prune` instead of
     // doing it here.
-    if let Some(hint) = superseded_hint(installed_any, count_superseded(&store)) {
+    if let Some(hint) = superseded_hint(installed_any, count_superseded(store)) {
         ui::hint!("{hint}");
     }
 
@@ -769,17 +811,18 @@ fn cmd_update(
 }
 
 /// How many installs `jlo prune` would remove, or 0 if that cannot be
-/// determined. A hint is not worth failing an otherwise successful update, so
-/// an unreadable JDK directory just means no hint.
+/// determined. A hint is not worth failing an otherwise successful run, so an
+/// unreadable JDK directory just means no hint.
 fn count_superseded(store: &JdkStore) -> usize {
     store.superseded_count().unwrap_or(0)
 }
 
-/// The line `jlo update` ends on when this run left an older minor behind.
+/// The line `jlo install` and `jlo update` end on when this run left an older
+/// minor behind.
 ///
 /// `None` when there is nothing to say: no install happened (the leftovers
-/// predate this run, and nagging on every no-op update trains the user to
-/// ignore the line), or nothing is superseded.
+/// predate this run, and nagging on every no-op run trains the user to ignore
+/// the line), or nothing is superseded.
 fn superseded_hint(installed_any: bool, superseded: usize) -> Option<String> {
     if !installed_any || superseded == 0 {
         return None;
@@ -1139,6 +1182,39 @@ mod tests {
             format!("{:#}", err.error),
             "no valid Java versions provided to update"
         );
+    }
+
+    /// Same rejection as `update`, but the message names the verb the user
+    /// actually typed - the two commands share the check, not the wording.
+    #[test]
+    fn cmd_install_rejects_a_list_of_only_invalid_versions() {
+        let err = cmd_install(&offline_client(), owned(&["abc"]))
+            .expect_err("nothing was left to install");
+        assert_eq!(
+            format!("{:#}", err.error),
+            "no valid Java versions provided to install"
+        );
+    }
+
+    // -- requested_versions --
+
+    #[test]
+    fn requested_versions_keeps_the_valid_entries_of_a_mixed_list() {
+        let requested = requested_versions(owned(&["21", "abc", "25"]), "install")
+            .expect("two of the three are valid");
+        assert_eq!(
+            requested,
+            HashSet::from(["21".to_string(), "25".to_string()])
+        );
+    }
+
+    /// A major named twice is one download, not two: the set is what reaches
+    /// `install_each`.
+    #[test]
+    fn requested_versions_deduplicates() {
+        let requested =
+            requested_versions(owned(&["21", "21"]), "install").expect("21 is a valid major");
+        assert_eq!(requested, HashSet::from(["21".to_string()]));
     }
 
     /// The usage line is advice printed *under* the error, so it travels with

@@ -82,16 +82,17 @@ This allows automatic discovery of installed JDKs by IDEs like IntelliJ IDEA.
 3. [Checking What Is Active](#checking-what-is-active)
 4. [Executing a Command](#executing-a-command)
 5. [Initialization](#initialization)
-6. [Updating Java Versions](#updating-java-versions)
-7. [Listing Versions](#listing-versions)
-8. [Removing Versions](#removing-versions)
-9. [Pruning Superseded Versions](#pruning-superseded-versions)
-10. [Using a JDK J'Lo Did Not Install](#using-a-jdk-jlo-did-not-install)
-11. [Managing J’Lo Itself](#managing-jlo-itself)
-12. [Getting Help](#getting-help)
-13. [Supported Shells](#supported-shells)
-14. [Shell Completions](#shell-completions)
-15. [Environment Variables](#environment-variables)
+6. [Installing Java Versions](#installing-java-versions)
+7. [Updating Java Versions](#updating-java-versions)
+8. [Listing Versions](#listing-versions)
+9. [Removing Versions](#removing-versions)
+10. [Pruning Superseded Versions](#pruning-superseded-versions)
+11. [Using a JDK J'Lo Did Not Install](#using-a-jdk-jlo-did-not-install)
+12. [Managing J’Lo Itself](#managing-jlo-itself)
+13. [Getting Help](#getting-help)
+14. [Supported Shells](#supported-shells)
+15. [Shell Completions](#shell-completions)
+16. [Environment Variables](#environment-variables)
 
 ## Environment Setup
 
@@ -255,6 +256,41 @@ jlo init --force 21
 25
 ```
 
+## Installing Java Versions
+
+The command `jlo install` downloads the latest build of each major version you name, and changes nothing else.
+Neither `JAVA_HOME` nor `PATH` moves — here or in any other shell.
+
+```shell
+jlo install 25
+```
+
+Most of the time you do not need it: [`jlo env`](#environment-setup), [`jlo home`](#resolving-java_home) and
+[`jlo exec`](#executing-a-command) all download a missing JDK on demand. An explicit install is for the cases that
+come before that — warming a CI cache, preparing for offline work, or seeding a machine without switching it.
+
+**Behavior:**
+- Multiple versions can be specified as arguments; each is installed at the latest build Adoptium offers.
+- If no arguments are provided, it installs the Java version specified in the nearest `.jlorc` file at or above the
+  current directory, falling back to `~/.jlo/default.jlorc` if none is found.
+- A major version that is already on its latest build is reported and left alone. There is no `--all`: installing
+  *every* major version is not a thing to ask for. To bring what is already installed up to date, that is
+  [`jlo update --all`](#updating-java-versions).
+- Like `jlo update`, a superseded minor release stays on disk and the command ends with a reminder to run
+  [`jlo prune`](#pruning-superseded-versions).
+
+**Usage examples:**
+```shell
+# install the latest Java 25 build
+jlo install 25
+
+# install Java 21 and 25 in one go
+jlo install 21 25
+
+# install the Java version specified in .jlorc or ~/.jlo/default.jlorc
+jlo install
+```
+
 ## Updating Java Versions
 
 The command `jlo update` updates installed Java versions to their latest minor releases.
@@ -266,6 +302,10 @@ jlo update --all
 ```
 
 That updates every installed major version in one go — no need to name them individually.
+
+It is the counterpart of [`jlo install`](#installing-java-versions): `install` makes sure a major version is here,
+`update` brings what is already here up to date. They coincide for a single named version, because J'Lo keeps exactly
+one build per major.
 
 **Behavior:**
 - The `--all` flag updates all installed Java versions; it cannot be combined with explicit versions.

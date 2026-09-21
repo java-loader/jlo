@@ -1069,6 +1069,23 @@ fn a_missing_checksum_warns_but_installs() {
 // The install verb is hidden
 // ---------------------------------------------------------------------------
 
+/// Whether `haystack` offers `token` as a word of its own rather than as the
+/// tail of a longer identifier.
+///
+/// A plain `contains` was enough until `jlo install` existed. `clap_complete`
+/// names its generated dispatch states after the subcommand path, so the
+/// visible verb produces `jlo__subcmd__install` - which ends in the hidden
+/// verb's spelling without offering it. The boundary check is what separates
+/// the two.
+fn offers_word(haystack: &str, token: &str) -> bool {
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    haystack.match_indices(token).any(|(at, _)| {
+        let before = haystack[..at].chars().next_back();
+        let after = haystack[at + token.len()..].chars().next();
+        !before.is_some_and(is_word) && !after.is_some_and(is_word)
+    })
+}
+
 /// `hide = true` would only drop it from `--help`: `clap_complete` still emits
 /// hidden subcommands into generated completion scripts, and clap's "did you
 /// mean" engine still offers them for typos. Intercepting the raw token before
@@ -1082,23 +1099,35 @@ fn the_install_verb_appears_in_no_generated_surface() {
     for name in ["completions/jlo.bash", "completions/_jlo"] {
         let body = std::fs::read_to_string(jlo.join(name)).unwrap();
         assert!(
-            !body.contains("__install"),
+            !offers_word(&body, "__install"),
             "{name} offers the hidden install verb"
         );
     }
 
     let help = Command::new(&binary).arg("--help").output().unwrap();
     assert!(
-        !String::from_utf8_lossy(&help.stdout).contains("__install"),
+        !offers_word(&String::from_utf8_lossy(&help.stdout), "__install"),
         "--help lists the hidden install verb"
     );
 
     let typo = Command::new(&binary).arg("__instal").output().unwrap();
     let said = String::from_utf8_lossy(&typo.stderr);
     assert!(
-        !said.contains("__install"),
+        !offers_word(&said, "__install"),
         "clap suggested the hidden install verb for a typo: {said}"
     );
+}
+
+/// The boundary check must still catch the thing it is there to catch: a
+/// generated surface that really does offer the hidden verb as a command word.
+#[test]
+fn offers_word_separates_the_hidden_verb_from_a_longer_identifier() {
+    assert!(!offers_word("cmd=\"jlo__subcmd__install\"", "__install"));
+    assert!(offers_word(
+        "opts=\"env home __install update\"",
+        "__install"
+    ));
+    assert!(offers_word("jlo,__install)", "__install"));
 }
 
 // ---------------------------------------------------------------------------
