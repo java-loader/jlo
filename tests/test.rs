@@ -477,34 +477,25 @@ fn version() {
 }
 
 #[test]
-fn version_subcommand_is_a_transition_shim_hidden_from_discovery() {
+fn version_is_not_a_subcommand_anywhere() {
     // `jlo version` was removed from the clap `Command` enum in favour of
-    // `-V`/`--version`, in the same commit that added the `sing` easter
-    // egg's raw-argv interception - `hide = true` would only suppress it
-    // from `--help`, not from generated completions or clap's typo
-    // suggestions. But unlike `sing`, `version` isn't gone: a transition
-    // shim (see the comment in `main.rs`, just before `Cli::parse()`)
-    // keeps it *working* for one release, because the OLD `jlo` shell
-    // function - already resident in a user's shell at `selfupdate` time -
-    // calls `"$J" version` itself, against the newly-installed binary.
+    // `-V`/`--version`, and the transition shim that kept it working for
+    // v0.2.0's resident shell wrapper is gone too. What must not come back
+    // is `version` as a *discoverable* subcommand: `hide = true` would only
+    // suppress it from `--help`, not from generated completions or clap's
+    // typo-suggestion engine, which is precisely the drift this CLI rewrite
+    // exists to eliminate.
     //
     // "version" legitimately appears elsewhere in this output (the
     // `-V, --version` option, and JAVA_HOME/`.jlorc` prose that talks
-    // about "a version"), so unlike the `sing` test this can't assert the
-    // word is wholly absent. Each check below targets the specific shape a
-    // *subcommand* entry would take, distinguishing it from those
-    // legitimate occurrences - `.contains("version")` would false-positive
-    // on `--version` and on that prose.
+    // about "a version"), so this can't assert the word is wholly absent.
+    // Each check below targets the specific shape a *subcommand* entry
+    // would take - `.contains("version")` would false-positive on
+    // `--version` and on that prose.
 
-    // The shim prints the bare crate version - not clap's `jlo 0.2.0` form
-    // - so the old wrapper's `echo -n "..."; "$J" --version` output still
-    // reads as a clean version string.
-    let mut shim = Command::cargo_bin("jlo-bin").unwrap();
-    shim.arg("version")
-        .assert()
-        .success()
-        .code(0)
-        .stdout(format!("{}\n", env!("CARGO_PKG_VERSION")));
+    // The bare token is now an ordinary usage error.
+    let mut gone = Command::cargo_bin("jlo-bin").unwrap();
+    gone.arg("version").assert().failure();
 
     // No "  version" line in the Commands: list (as opposed to the
     // "  -V, --version  Print version" Options line, which starts with
@@ -539,7 +530,7 @@ fn version_subcommand_is_a_transition_shim_hidden_from_discovery() {
         .success()
         .stdout(predicate::str::is_match(r"(?m)^'version:").unwrap().not());
 
-    // A typo must still be a real usage error, and since the shim isn't a
+    // A typo must still be a real usage error, and since `version` is not a
     // clap subcommand, clap's "did you mean" engine can't offer it either.
     let mut typo = Command::cargo_bin("jlo-bin").unwrap();
     typo.arg("vrsion")
