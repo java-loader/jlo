@@ -1004,7 +1004,7 @@ mod tests {
 
     // -- offline_java_home --
     //
-    // The install directory is not configurable (ADR-0005), so `jlo home
+    // The install directory is not configurable, so `jlo home
     // --offline` is covered here against an injected `JdkStore` rather than
     // by spawning the binary; the integration suite asserts only the exit
     // status and that no network call happens.

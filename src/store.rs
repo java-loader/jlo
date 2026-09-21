@@ -76,7 +76,7 @@ pub(crate) enum RemoveError {
     /// only when there is not.
     InUse(String),
     /// Everything that matched lacks the `.jlo-managed` marker, so J'Lo did
-    /// not install it and will not delete it (ADR-0005). Like
+    /// not install it and will not delete it. Like
     /// [`Self::NotInstalled`], this fires only when it leaves nothing to do.
     Unmanaged(Vec<String>),
     /// The install directory itself could not be read.
@@ -158,7 +158,7 @@ pub(crate) struct JdkStore {
 }
 
 impl JdkStore {
-    /// The real store for this machine (see ADR 0005).
+    /// The real store for this machine. The location is not configurable.
     pub(crate) fn discover() -> anyhow::Result<Self> {
         let home = env::home_dir().context("could not determine home directory")?;
         Ok(Self::at(base_dir_for(env::consts::OS, &home)))
@@ -356,7 +356,7 @@ impl JdkStore {
     /// reasons are the three [`RemoveError`] variants -
     /// [`RemoveError::NotInstalled`] (the JDK is already absent, which is
     /// what was asked for), [`RemoveError::Unmanaged`] (J'Lo did not install
-    /// it, ADR-0005) and [`RemoveError::InUse`] (`$JAVA_HOME` points at it) -
+    /// it) and [`RemoveError::InUse`] (`$JAVA_HOME` points at it) -
     /// and each becomes an *error* only when it leaves nothing to remove at
     /// all, because a command told exactly what to delete must not report
     /// success having deleted nothing.
@@ -1209,7 +1209,7 @@ mod tests {
 
     // -- remove: the two refusals --
 
-    /// ADR-0005: no marker, no deletion. The user named this install
+    /// No marker, no deletion. The user named this install
     /// explicitly, so silently skipping it and exiting 0 would claim a
     /// removal that did not happen.
     #[test]
