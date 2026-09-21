@@ -488,6 +488,29 @@ mod tests {
         assert_eq!(find_project_config(&deep, Some(&home)), None);
     }
 
+    /// ADR-0004: `.git` is matched with `exists`, not `is_dir`. A worktree
+    /// and a submodule record it as a *file*, and both are still repository
+    /// roots - so swapping in `is_dir()` would walk straight out of one and
+    /// pick up a `.jlorc` belonging to the superproject. Every other test
+    /// here creates `.git` as a directory, so nothing else catches that.
+    #[test]
+    fn find_project_config_stops_at_a_worktree_whose_git_is_a_file() {
+        let home = tempdir().unwrap();
+        let home = canon(home.path());
+        let outer = home.join("outer");
+        let worktree = outer.join("worktree");
+        let deep = worktree.join("src");
+        fs::create_dir_all(&deep).unwrap();
+        fs::write(
+            worktree.join(".git"),
+            "gitdir: /elsewhere/.git/worktrees/w\n",
+        )
+        .unwrap();
+        fs::write(outer.join(".jlorc"), "17\n").unwrap();
+
+        assert_eq!(find_project_config(&deep, Some(&home)), None);
+    }
+
     #[test]
     fn find_project_config_finds_jlorc_at_vcs_root() {
         // Stopping at the VCS root still checks the root itself.

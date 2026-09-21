@@ -29,54 +29,111 @@ fn bare_invocation_prints_help() {
     // rather than real coverage of the subcommand list.
 }
 
+/// The names jlo used to have, and the one it hides.
+///
+/// `clean` became `prune`, `prune` became `jlo remove --superseded`,
+/// `default` folded into `jlo init --global`, `version` became `-V`, and
+/// `env --verbose` gave way to `jlo current`. None was kept as an alias.
+/// `sing` is the other half of the same rule: it still works, and it is
+/// likewise not discoverable.
+///
+/// The four channels below are the whole of "not discoverable", and they are
+/// four because `hide = true` only ever suppressed the first: the `--help`
+/// listing, the two generated completion scripts, and clap's typo-suggestion
+/// engine. A name leaking into a completion script is the drift the CLI
+/// rewrite exists to eliminate, so this is one test over a list rather than
+/// one test per name.
 #[test]
-fn help_flags_print_help() {
-    for flag in ["-h", "--help"] {
-        let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
-        cmd.arg(flag)
+fn removed_and_hidden_names_are_nowhere_to_be_found() {
+    // A bare substring would false-positive: "version" appears in the
+    // `-V, --version` option line and throughout the .jlorc prose, and "sing"
+    // sits inside "using", "missing", "parsing". Match the whole word, and
+    // for the help listing the shape a *subcommand entry* takes.
+    fn absent(
+        word: &str,
+    ) -> predicates::boolean::NotPredicate<predicates::str::RegexPredicate, str> {
+        predicate::str::is_match(format!(r"(?i)\b{word}\b"))
+            .unwrap()
+            .not()
+    }
+
+    let bash = Command::cargo_bin("jlo-bin")
+        .unwrap()
+        .args(["completions", "bash"])
+        .assert()
+        .success();
+    let bash = String::from_utf8(bash.get_output().stdout.clone()).unwrap();
+    let zsh = Command::cargo_bin("jlo-bin")
+        .unwrap()
+        .args(["completions", "zsh"])
+        .assert()
+        .success();
+    let zsh = String::from_utf8(zsh.get_output().stdout.clone()).unwrap();
+
+    for name in ["clean", "prune", "default", "version", "sing"] {
+        // 1. Not a line in the Commands: listing. `version` is the reason
+        //    this is anchored rather than a `contains`.
+        Command::cargo_bin("jlo-bin")
+            .unwrap()
+            .arg("--help")
             .assert()
             .success()
-            .code(0)
-            .stdout(predicate::str::contains("Usage: jlo"));
-    }
-}
+            .stdout(
+                predicate::str::is_match(format!(r"(?m)^\s*{name}(\s|$)"))
+                    .unwrap()
+                    .not(),
+            );
 
-#[test]
-fn the_rule_based_deletion_verbs_are_gone_entirely() {
-    // `clean` became `prune`, and `prune` became `jlo remove --superseded`.
-    // Neither old name was kept as an alias: one name for one command,
-    // everywhere. Typing either is an ordinary usage error - not a hidden
-    // path that still works.
-    for old_name in ["clean", "prune"] {
-        let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
-        cmd.arg(old_name)
+        // 2. and 3. Not a case in either generated completion script - the
+        //    shape every real subcommand takes there.
+        assert!(
+            !bash.contains(&format!("jlo,{name})"))
+                && !bash.contains(&format!("jlo__subcmd__{name}")),
+            "'{name}' leaked into the bash completion script"
+        );
+        assert!(
+            !zsh.lines()
+                .any(|line| line.starts_with(&format!("'{name}:"))),
+            "'{name}' leaked into the zsh completion script"
+        );
+    }
+
+    // 4. Typing one is an ordinary usage error, and clap cannot suggest what
+    //    it does not know about.
+    for (typo, name) in [("vrsion", "version"), ("sng", "sing"), ("prnue", "prune")] {
+        Command::cargo_bin("jlo-bin")
+            .unwrap()
+            .arg(typo)
             .assert()
             .failure()
-            .stderr(predicate::str::contains(format!(
-                "unrecognized subcommand '{old_name}'"
-            )));
+            .stderr(absent(name));
     }
 
-    // And neither appears anywhere in the overview - not in the Commands:
-    // list, and not in any line of prose still pointing at an old name.
-    let mut help = Command::cargo_bin("jlo-bin").unwrap();
-    help.arg("--help")
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("remove"))
-        .stdout(predicate::str::contains("clean").not())
-        .stdout(predicate::str::contains("prune").not());
-}
+    // Removed means gone, not hidden-but-working.
+    for name in ["clean", "prune", "default", "version"] {
+        Command::cargo_bin("jlo-bin")
+            .unwrap()
+            .arg(name)
+            .assert()
+            .failure();
+    }
 
-#[test]
-fn ls_alias_is_documented_in_help() {
-    // Visible, unlike `clean`: `ls` is a second name worth discovering, the
-    // same call `env`/`use` makes.
-    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
-    cmd.arg("--help")
+    // The easter egg is hidden, not removed.
+    Command::cargo_bin("jlo-bin")
+        .unwrap()
+        .arg("sing")
         .assert()
         .success()
-        .stdout(predicate::str::is_match(r"(?m)^\s*list\s+.*\[alias: ls\]").unwrap());
+        .code(0)
+        .stderr(predicate::str::contains("There are no Easter Eggs"));
+
+    // `env --verbose` went the same way, and has no subcommand entry to check.
+    Command::cargo_bin("jlo-bin")
+        .unwrap()
+        .args(["env", "--verbose"])
+        .assert()
+        .failure()
+        .code(2);
 }
 
 #[test]
@@ -227,32 +284,6 @@ fn remove_superseded_refuses_a_version_alongside_it() {
         .stderr(predicate::str::contains("cannot be used with"));
 }
 
-#[test]
-fn help_mentions_version_resolution_and_examples() {
-    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
-    cmd.arg("--help")
-        .assert()
-        .success()
-        .stdout(predicate::str::contains(".jlorc"))
-        .stdout(predicate::str::contains("default.jlorc"))
-        .stdout(predicate::str::contains("Examples:"))
-        .stdout(predicate::str::contains("jlo exec 21 -- ./gradlew build"));
-}
-
-/// `install` was missing entirely until it was added as its own verb: the
-/// obvious first guess was an `unrecognized subcommand` error, and nothing in
-/// the help pointed at `update`. It has to be listed where the other
-/// version-taking commands are, or the discoverability problem is unfixed.
-#[test]
-fn install_is_documented_in_help() {
-    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
-    cmd.arg("--help")
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("jlo install [VERSION...]"))
-        .stdout(predicate::str::contains("jlo install 25"));
-}
-
 /// The reason `install` is a command of its own rather than an alias on
 /// `update`: there is no such thing as installing every major, so the flag
 /// that makes sense for `update` must not be a documented spelling here.
@@ -320,31 +351,6 @@ fn install_without_a_version_falls_through_to_the_latest_release() {
 }
 
 #[test]
-fn use_alias_is_documented_in_help() {
-    // `jlo-init.sh` has always accepted `use` as an alias for `env`; the
-    // binary silently rejected it until this alias was added. A *hidden*
-    // alias would only half-fix that, so it must show up in `jlo --help`,
-    // not just work when typed.
-    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
-    cmd.arg("--help")
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("[alias: use]"));
-}
-
-#[test]
-fn init_help_states_the_default_when_version_is_omitted() {
-    // `[VERSION]` alone signals "optional" too subtly for the compact `-h`
-    // tier, and doesn't say what filling it in falls back to; that has to
-    // be in the argument's own help line, not just `long_about`.
-    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
-    cmd.args(["init", "-h"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("Default: latest release"));
-}
-
-#[test]
 fn version_flag_prints_the_crate_version() {
     let mut flag = Command::cargo_bin("jlo-bin").unwrap();
     let flag_out = flag
@@ -363,47 +369,6 @@ fn version_flag_prints_the_crate_version() {
         .assert()
         .success()
         .stdout(predicate::str::contains(env!("CARGO_PKG_VERSION")));
-}
-
-#[test]
-fn unknown_command_is_a_usage_error() {
-    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
-    cmd.arg("nosuchcmd")
-        .assert()
-        .failure()
-        .code(2)
-        .stderr(predicate::str::contains("nosuchcmd"));
-}
-
-#[test]
-fn unknown_command_suggests_a_real_one() {
-    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
-    cmd.arg("enb")
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("env"));
-}
-
-#[test]
-fn the_default_subcommand_is_gone() {
-    // `jlo default <v>` folded into `jlo init --global <v>`: both only ever
-    // wrote a .jlorc, so one command with a scope flag replaces two.
-    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
-    cmd.args(["default", "21"])
-        .assert()
-        .failure()
-        .code(2)
-        .stderr(predicate::str::contains("default"));
-}
-
-#[test]
-fn init_help_mentions_global_and_force() {
-    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
-    cmd.args(["init", "-h"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("--global"))
-        .stdout(predicate::str::contains("--force"));
 }
 
 #[test]
@@ -470,30 +435,6 @@ fn init_without_force_hints_at_force() {
 }
 
 #[test]
-fn every_subcommand_has_help() {
-    for sub in [
-        "env",
-        "home",
-        "exec",
-        "current",
-        "list",
-        "install",
-        "update",
-        "remove",
-        "init",
-        "selfupdate",
-        "completions",
-    ] {
-        let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
-        cmd.args([sub, "--help"])
-            .assert()
-            .success()
-            .code(0)
-            .stdout(predicate::str::contains("Usage: jlo"));
-    }
-}
-
-#[test]
 fn exec_help_is_not_passed_to_the_child() {
     let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
     cmd.args(["exec", "--help"])
@@ -546,131 +487,6 @@ fn exec_passes_hyphen_args_through_to_the_child() {
 }
 
 #[test]
-fn sing_is_hidden_everywhere_but_still_works() {
-    // "sing" as a bare substring shows up inside ordinary words the help/
-    // completion text may legitimately contain (using, missing, parsing,
-    // ...), so check the whole word instead - case-insensitive since clap
-    // and shells don't care about case for this. `Not<RegexPredicate>`
-    // isn't `Clone`, so build a fresh one per assertion.
-    fn not_the_word_sing() -> predicates::boolean::NotPredicate<predicates::str::RegexPredicate, str>
-    {
-        predicate::str::is_match(r"(?i)\bsing\b").unwrap().not()
-    }
-
-    // `hide = true` only ever suppressed the `--help` listing; `sing` is no
-    // longer a clap subcommand at all, so this covers all three leaks in
-    // one command family: help, completions (both shells), and clap's own
-    // typo-suggestion engine.
-    let mut help = Command::cargo_bin("jlo-bin").unwrap();
-    help.arg("--help")
-        .assert()
-        .success()
-        .stdout(not_the_word_sing());
-
-    let mut bash = Command::cargo_bin("jlo-bin").unwrap();
-    bash.args(["completions", "bash"])
-        .assert()
-        .success()
-        .stdout(not_the_word_sing());
-
-    let mut zsh = Command::cargo_bin("jlo-bin").unwrap();
-    zsh.args(["completions", "zsh"])
-        .assert()
-        .success()
-        .stdout(not_the_word_sing());
-
-    // A typo must still be a real usage error - it must not silently
-    // succeed - and the suggestion it prints must not name the hidden
-    // command either.
-    let mut typo = Command::cargo_bin("jlo-bin").unwrap();
-    typo.arg("sng")
-        .assert()
-        .failure()
-        .stderr(not_the_word_sing());
-
-    // The easter egg itself must still work when invoked directly.
-    let mut sing = Command::cargo_bin("jlo-bin").unwrap();
-    sing.arg("sing")
-        .assert()
-        .success()
-        .code(0)
-        .stderr(predicate::str::contains("There are no Easter Eggs"));
-}
-
-#[test]
-fn version() {
-    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
-    cmd.arg("--version")
-        .assert()
-        .success()
-        .code(0)
-        .stdout(predicate::str::is_match(r"^jlo \d+\.\d+\.\d+\n$").unwrap());
-}
-
-#[test]
-fn version_is_not_a_subcommand_anywhere() {
-    // `jlo version` was removed from the clap `Command` enum in favour of
-    // `-V`/`--version`, and the transition shim that kept it working for
-    // v0.2.0's resident shell wrapper is gone too. What must not come back
-    // is `version` as a *discoverable* subcommand: `hide = true` would only
-    // suppress it from `--help`, not from generated completions or clap's
-    // typo-suggestion engine, which is precisely the drift this CLI rewrite
-    // exists to eliminate.
-    //
-    // "version" legitimately appears elsewhere in this output (the
-    // `-V, --version` option, and JAVA_HOME/`.jlorc` prose that talks
-    // about "a version"), so this can't assert the word is wholly absent.
-    // Each check below targets the specific shape a *subcommand* entry
-    // would take - `.contains("version")` would false-positive on
-    // `--version` and on that prose.
-
-    // The bare token is now an ordinary usage error.
-    let mut gone = Command::cargo_bin("jlo-bin").unwrap();
-    gone.arg("version").assert().failure();
-
-    // No "  version" line in the Commands: list (as opposed to the
-    // "  -V, --version  Print version" Options line, which starts with
-    // "-V," not "version").
-    let mut help = Command::cargo_bin("jlo-bin").unwrap();
-    help.arg("--help").assert().success().stdout(
-        predicate::str::is_match(r"(?m)^\s*version(\s|$)")
-            .unwrap()
-            .not(),
-    );
-
-    // No `jlo,version)`/`jlo__subcmd__version` case in the generated bash
-    // completion script - that's the shape every *real* subcommand takes
-    // there (see e.g. `jlo,home)` / `cmd="jlo__subcmd__home"`).
-    let mut bash = Command::cargo_bin("jlo-bin").unwrap();
-    bash.args(["completions", "bash"])
-        .assert()
-        .success()
-        .stdout(
-            predicate::str::is_match(r"jlo,version\)|jlo__subcmd__version")
-                .unwrap()
-                .not(),
-        );
-
-    // No `'version:...'` entry in the generated zsh completion script -
-    // that's the shape every *real* subcommand takes there (see e.g.
-    // `'home:Print the JAVA_HOME path for a version' \`, where "home" is
-    // the command and "version" only appears inside its description).
-    let mut zsh = Command::cargo_bin("jlo-bin").unwrap();
-    zsh.args(["completions", "zsh"])
-        .assert()
-        .success()
-        .stdout(predicate::str::is_match(r"(?m)^'version:").unwrap().not());
-
-    // A typo must still be a real usage error, and since `version` is not a
-    // clap subcommand, clap's "did you mean" engine can't offer it either.
-    let mut typo = Command::cargo_bin("jlo-bin").unwrap();
-    typo.arg("vrsion")
-        .assert()
-        .failure()
-        .stderr(predicate::str::is_match(r"(?i)\bversion\b").unwrap().not());
-}
-
-#[test]
 fn bare_invocation_matches_help_flag_byte_for_byte() {
     // `jlo` (exploration) and `jlo --help` (usage error convention) must
     // print the identical overview - only the exit-code handling in `main`
@@ -691,24 +507,21 @@ fn bare_invocation_matches_help_flag_byte_for_byte() {
 
 #[test]
 fn list_offline_succeeds_without_network() {
-    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
-    // Either JDKs are installed (one version per line on stdout) or none are
-    // (a note on stderr) - both are success, and neither needs the network.
-    cmd.args(["list", "--offline"])
+    // An empty store, not the developer's: "no JDKs installed" is a success
+    // with a note on stderr, and reading the real store would make the
+    // outcome depend on what happens to be on the machine.
+    let home = tempfile::tempdir().unwrap();
+
+    Command::cargo_bin("jlo-bin")
+        .unwrap()
+        .args(["list", "--offline"])
+        .env("HOME", home.path())
         .env("JLO_ADOPTIUM_API_URL", "http://127.0.0.1:1")
         .assert()
         .success()
-        .code(0);
-}
-
-#[test]
-fn list_rejects_unknown_option() {
-    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
-    cmd.args(["list", "--nope"])
-        .assert()
-        .failure()
-        .code(2)
-        .stderr(predicate::str::contains("--nope"));
+        .code(0)
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("No JDKs installed"));
 }
 
 /// The JDK store lives under `$HOME`, so a `jlo list` test that does not
@@ -811,6 +624,30 @@ fn list_remote_network_failure_points_at_offline() {
         .stderr(predicate::str::contains("jlo list --offline"));
 }
 
+// -- the three tests that really talk to Adoptium --
+//
+// ADR-0002: the fixtures can drift silently from the live API, and these are
+// the only thing that would notice. Everything else runs against mockito or a
+// dead port.
+//
+// They install a real ~200 MB JDK, so `$HOME` has to move: `JdkStore::base()`
+// is $HOME-derived (ADR-0005), and without this they wrote into the
+// developer's own ~/Library/Java/JavaVirtualMachines and read back whatever
+// was already there - `cargo test --release` mutated the machine, and the
+// result depended on what had been installed beforehand.
+//
+// The replacement is one directory under `target/`, not a fresh temp dir per
+// test: all three share it, so a run downloads at most once, and CI can cache
+// the path across runs. It deliberately survives between runs on a developer
+// machine too - the second `cargo test` is then offline for these.
+
+/// The `$HOME` the real-network tests install into.
+fn network_test_home() -> std::path::PathBuf {
+    let home = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("network-home");
+    std::fs::create_dir_all(&home).unwrap();
+    home
+}
+
 #[test]
 #[serial]
 fn init_with_version() {
@@ -819,6 +656,8 @@ fn init_with_version() {
 
     let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
     cmd.args(["init", "21"])
+        // An explicit version never asks Adoptium anything.
+        .env("JLO_ADOPTIUM_API_URL", "http://127.0.0.1:1")
         .assert()
         .success()
         .code(0)
@@ -833,9 +672,18 @@ fn init_with_version() {
     temp_dir.close().unwrap();
 }
 
+/// A bare `jlo init` pins the latest release, which is the one thing it asks
+/// Adoptium for - so mockito answers, rather than this being a fourth
+/// real-network test. ADR-0002 names three, and now there are three.
 #[test]
 #[serial]
 fn init() {
+    let mut server = mockito::Server::new();
+    let _r = server
+        .mock("GET", "/v3/info/available_releases")
+        .with_body(include_str!("fixtures/available_releases.json"))
+        .create();
+
     // create a temp dir and switch to it
     let temp_dir = tempfile::tempdir().unwrap();
     std::env::set_current_dir(&temp_dir).unwrap();
@@ -843,6 +691,7 @@ fn init() {
     // run init
     let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
     cmd.arg("init")
+        .env("JLO_ADOPTIUM_API_URL", server.url())
         .assert()
         .success()
         .code(0)
@@ -864,6 +713,7 @@ fn init() {
     // run init again to check for existing file error
     let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
     cmd.arg("init")
+        .env("JLO_ADOPTIUM_API_URL", server.url())
         .assert()
         .failure()
         .code(1)
@@ -885,6 +735,9 @@ fn init() {
 fn home() {
     // create a temp dir and set its path to JLO_HOME
     let temp_dir = tempfile::tempdir().unwrap();
+    // The JDK store is $HOME-derived (ADR-0005), so every command below is
+    // given one under `target/` rather than the developer's own.
+    let home = network_test_home();
     unsafe {
         std::env::set_var("JLO_HOME", temp_dir.path());
     }
@@ -895,6 +748,7 @@ fn home() {
 
     // run home (version resolved from .jlorc)
     let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
+    cmd.env("HOME", &home);
     let assert = cmd.arg("home").assert().success().code(0);
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
 
@@ -912,6 +766,7 @@ fn home() {
 
     // explicit version argument resolves the same way
     let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
+    cmd.env("HOME", &home);
     let assert = cmd.args(["home", "25"]).assert().success().code(0);
     let stdout_explicit = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
     assert_eq!(stdout_explicit, stdout);
@@ -930,6 +785,9 @@ fn home() {
 fn exec() {
     // create a temp dir and set its path to JLO_HOME
     let temp_dir = tempfile::tempdir().unwrap();
+    // The JDK store is $HOME-derived (ADR-0005), so every command below is
+    // given one under `target/` rather than the developer's own.
+    let home = network_test_home();
     unsafe {
         std::env::set_var("JLO_HOME", temp_dir.path());
     }
@@ -940,6 +798,7 @@ fn exec() {
 
     // exit code of the child propagates through exec
     let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
+    cmd.env("HOME", &home);
     cmd.args(["exec", "25", "--", "sh", "-c", "exit 7"])
         .assert()
         .failure()
@@ -947,6 +806,7 @@ fn exec() {
 
     // JAVA_HOME is set in the child and its bin is first on PATH
     let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
+    cmd.env("HOME", &home);
     let assert = cmd
         .args([
             "exec",
@@ -972,6 +832,7 @@ fn exec() {
 
     // version resolved from .jlorc when omitted (no explicit version before --)
     let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
+    cmd.env("HOME", &home);
     cmd.args(["exec", "--", "java", "-version"])
         .assert()
         .success()
@@ -980,6 +841,7 @@ fn exec() {
 
     // missing '--' is a usage error
     let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
+    cmd.env("HOME", &home);
     cmd.args(["exec", "25", "java", "-version"])
         .assert()
         .failure()
@@ -988,6 +850,7 @@ fn exec() {
 
     // a command that cannot be launched exits 127 with an error on stderr
     let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
+    cmd.env("HOME", &home);
     cmd.args(["exec", "25", "--", "definitely-not-a-real-command-xyz"])
         .assert()
         .failure()
@@ -1001,6 +864,7 @@ fn exec() {
     // version-omitted path used to silently drop the second `--` because
     // clap eats the leading separator before `cmd_exec` ever sees it).
     let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
+    cmd.env("HOME", &home);
     cmd.args([
         "exec",
         "25",
@@ -1014,6 +878,7 @@ fn exec() {
     .stderr(predicate::str::contains("could not execute '--'"));
 
     let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
+    cmd.env("HOME", &home);
     cmd.args(["exec", "--", "--", "definitely-not-a-real-command-xyz"])
         .assert()
         .failure()
@@ -1033,6 +898,9 @@ fn exec() {
 fn env() {
     // create a temp dir and set its path to JLO_HOME
     let temp_dir = tempfile::tempdir().unwrap();
+    // The JDK store is $HOME-derived (ADR-0005), so every command below is
+    // given one under `target/` rather than the developer's own.
+    let home = network_test_home();
     unsafe {
         std::env::set_var("JLO_HOME", temp_dir.path());
     }
@@ -1043,6 +911,7 @@ fn env() {
 
     // run env
     let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
+    cmd.env("HOME", &home);
     cmd.arg("env").assert().success().code(0).stdout(
         predicate::str::contains("export JAVA_HOME='")
             .and(predicate::str::contains("export PATH='")),
@@ -1120,17 +989,6 @@ fn init_reports_api_http_error() {
         .stderr(predicate::str::contains("HTTP 500"));
 }
 
-/// Where `jlo` installs JDKs, mirroring `JdkStore::discover()` in store.rs.
-/// IntelliJ-compatible: `~/Library/Java/JavaVirtualMachines` on macOS, `~/.jdks` elsewhere.
-fn jdk_base() -> std::path::PathBuf {
-    let home = std::env::home_dir().unwrap();
-    if cfg!(target_os = "macos") {
-        home.join("Library/Java/JavaVirtualMachines")
-    } else {
-        home.join(".jdks")
-    }
-}
-
 /// Pull the value out of an `export NAME='...'` line of `jlo env` output,
 /// undoing the single-quoting the binary applies.
 ///
@@ -1148,44 +1006,6 @@ fn exported_var(stdout: &str, name: &str) -> Option<String> {
 
 fn exported_path(stdout: &str) -> Option<String> {
     exported_var(stdout, "PATH")
-}
-
-#[test]
-#[serial]
-fn env_removes_stale_jdk_bin_entries() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    unsafe {
-        std::env::set_var("JLO_HOME", temp_dir.path());
-    }
-    std::env::set_current_dir(&temp_dir).unwrap();
-    std::fs::write(".jlorc", "25").unwrap();
-
-    // A JDK bin dir jlo prepended on an earlier run, for a version we are no longer using.
-    let stale = jdk_base().join("99.0.1").join("bin");
-    let input_path = format!("{}:/usr/bin:/bin", stale.display());
-
-    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
-    let assert = cmd
-        .arg("env")
-        .env("PATH", &input_path)
-        .assert()
-        .success()
-        .code(0);
-    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
-    let new_path = exported_path(&stdout).expect("env must export PATH");
-
-    assert!(
-        !new_path.split(':').any(|p| p == stale.to_str().unwrap()),
-        "stale JDK bin must be removed from PATH.\n  stale: {}\n  got:   {}",
-        stale.display(),
-        new_path
-    );
-
-    std::env::set_current_dir(std::env::temp_dir()).unwrap();
-    unsafe {
-        std::env::remove_var("JLO_HOME");
-    }
-    temp_dir.close().unwrap();
 }
 
 /// End to end, through a real shell: the `jlo` function evaluates what the
@@ -1267,94 +1087,6 @@ fn shell_single_quote(value: &str) -> String {
 }
 
 #[test]
-#[serial]
-fn env_without_jlo_home_keeps_unrelated_home_path_entries() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    unsafe {
-        std::env::remove_var("JLO_HOME");
-    }
-    std::env::set_current_dir(&temp_dir).unwrap();
-    std::fs::write(".jlorc", "25").unwrap();
-
-    // User-local PATH entries that have nothing to do with jlo.
-    let home = std::env::home_dir().unwrap();
-    let cargo_bin = home.join(".cargo").join("bin");
-    let user_bin = home.join("bin");
-    let input_path = format!(
-        "{}:{}:/usr/bin:/bin",
-        cargo_bin.display(),
-        user_bin.display()
-    );
-
-    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
-    let assert = cmd
-        .arg("env")
-        .env("PATH", &input_path)
-        .assert()
-        .success()
-        .code(0);
-    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
-    let new_path = exported_path(&stdout).expect("env must export PATH");
-
-    for keep in [&cargo_bin, &user_bin] {
-        assert!(
-            new_path.split(':').any(|p| p == keep.to_str().unwrap()),
-            "PATH entry under $HOME must survive.\n  expected: {}\n  got:      {}",
-            keep.display(),
-            new_path
-        );
-    }
-
-    std::env::set_current_dir(std::env::temp_dir()).unwrap();
-    temp_dir.close().unwrap();
-}
-
-#[test]
-#[serial]
-fn env_is_idempotent() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    unsafe {
-        std::env::set_var("JLO_HOME", temp_dir.path());
-    }
-    std::env::set_current_dir(&temp_dir).unwrap();
-    std::fs::write(".jlorc", "25").unwrap();
-
-    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
-    let assert = cmd
-        .arg("env")
-        .env("PATH", "/usr/bin:/bin")
-        .assert()
-        .success()
-        .code(0);
-    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
-    let first_path = exported_path(&stdout).expect("first env run must export PATH");
-    let java_home =
-        exported_var(&stdout, "JAVA_HOME").expect("first env run must export JAVA_HOME");
-
-    // Second run with the environment the first run produced: nothing left to change.
-    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
-    let assert = cmd
-        .arg("env")
-        .env("PATH", &first_path)
-        .env("JAVA_HOME", &java_home)
-        .assert()
-        .success()
-        .code(0);
-    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
-
-    assert_eq!(
-        stdout, "",
-        "re-running env in an already-configured shell must emit nothing, got: {stdout:?}"
-    );
-
-    std::env::set_current_dir(std::env::temp_dir()).unwrap();
-    unsafe {
-        std::env::remove_var("JLO_HOME");
-    }
-    temp_dir.close().unwrap();
-}
-
-#[test]
 fn completions_emit_a_script_per_shell() {
     for (shell, needle) in [
         ("bash", "complete"),
@@ -1369,15 +1101,6 @@ fn completions_emit_a_script_per_shell() {
             .stdout(predicate::str::contains(needle))
             .stdout(predicate::str::contains("jlo"));
     }
-}
-
-#[test]
-fn completions_reject_an_unknown_shell() {
-    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
-    cmd.args(["completions", "nosuchshell"])
-        .assert()
-        .failure()
-        .code(2);
 }
 
 #[test]
@@ -1544,23 +1267,6 @@ fn current_warns_but_still_answers_when_the_config_disagrees() {
         ));
 }
 
-/// Case 4. Nothing is configured, but the active JDK is the newest installed
-/// one - which is stage 3 of the cascade, i.e. exactly what a bare `jlo env`
-/// here would resolve to. Saying so is more useful than "nothing pinned",
-/// which used to be the answer and said nothing about why this JDK.
-#[test]
-fn current_names_the_newest_installed_jdk_when_nothing_is_configured() {
-    let (home, project) = current_fixture("25.0.4+101");
-
-    current_cmd(home.path(), &project)
-        .env("JAVA_HOME", store_base(home.path()).join("25.0.4+101"))
-        .assert()
-        .success()
-        .code(0)
-        .stdout("25.0.4+101  (from the newest installed JDK)\n")
-        .stderr(predicate::str::is_empty());
-}
-
 /// Stage 3 names an *install*, not a major, so the check behind it has to be
 /// one too. Nothing configured, 21.0.5+11 active, 21.0.6+7 installed beside
 /// it: the majors agree, but a bare `jlo env` here would resolve major 21 and
@@ -1650,17 +1356,6 @@ fn current_never_touches_the_network() {
         .stdout("25.0.4+101  (from the newest installed JDK)\n");
 }
 
-/// No `--offline` flag: a flag that would always be on is noise, so the fact
-/// is documented instead. And no version argument - `current` means the active
-/// one; asking about an arbitrary version is `jlo home`'s job.
-#[test]
-fn current_takes_no_flags_or_version() {
-    for extra in ["--offline", "21"] {
-        let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
-        cmd.args(["current", extra]).assert().failure().code(2);
-    }
-}
-
 // -- jlo env's output channel --
 
 /// ADR-0001: on success `env` writes export statements to stdout and nothing
@@ -1703,23 +1398,104 @@ fn neither_env_nor_home_has_a_verbose_flag() {
     }
 }
 
-// -- the version-resolution cascade, end to end --
+// -- every rule survives without colour --
 //
-// Four stages: the nearest `.jlorc`, `$JLO_HOME/default.jlorc`, the newest
-// JDK already installed, then the latest release, downloaded. `jlo home` is
-// the probe throughout: it resolves exactly as `env` and `exec` do, and prints
-// the answer as one line on stdout instead of exports a shell has to source.
-//
-// Every command below points `JLO_ADOPTIUM_API_URL` at a port nothing listens
-// on. That turns "no network access" into an assertion rather than a claim: a
-// run that reaches Adoptium fails with a connection error instead of printing
-// a path.
+// ADR-0007: `NO_COLOR`, `CLICOLOR=0` and `TERM=dumb` are handled by `console`
+// itself, so no rule in that ADR may depend on colour *alone* to be
+// understood. None of the three appeared in any test file, and neither did
+// the plainer version of the same question: whether anything writes an escape
+// sequence by hand, which `console` would not strip whatever the environment
+// says.
 
-/// `jlo home` against a fixture store, with the network wired to fail.
+/// The status words are words, `!` and the tick are distinct characters, and
+/// the active marker is distinguished by *position* - so a run with colour
+/// turned off every way it can be turned off still carries every distinction,
+/// and carries no escape bytes at all.
+#[test]
+fn a_listing_reads_the_same_with_colour_off() {
+    let home = tempfile::tempdir().unwrap();
+    install_fake_jdk(home.path(), "21.0.11+10");
+    install_fake_jdk(home.path(), "21.0.9+10");
+    let active = jdk_store_in(home.path()).join("21.0.9+10");
+
+    let assert = Command::cargo_bin("jlo-bin")
+        .unwrap()
+        .args(["list", "--offline"])
+        .env("HOME", home.path())
+        .env("JAVA_HOME", &active)
+        .env("JLO_ADOPTIUM_API_URL", "http://127.0.0.1:1")
+        .env("NO_COLOR", "1")
+        .env("CLICOLOR", "0")
+        .env("TERM", "dumb")
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+
+    // Not one escape byte, on either stream. `console` answers for its own
+    // `style()` calls; a hand-written "\x1b[31m" anywhere is what this sees.
+    for (name, stream) in [("stdout", &stdout), ("stderr", &stderr)] {
+        assert!(
+            !stream.contains('\u{1b}'),
+            "{name} carries an escape sequence with colour off: {stream:?}"
+        );
+    }
+
+    // The distinctions survive as text: a status word per row, and the active
+    // row marked by the gutter column rather than by a colour.
+    assert_eq!(
+        stdout, "    21  21.0.11+10  installed\n \u{2192}  21  21.0.9+10   superseded\n",
+        "with colour off the rows must still say which is which"
+    );
+    assert!(
+        stderr.contains("`jlo remove --superseded` (1 superseded)"),
+        "the tip must still name its command: {stderr:?}"
+    );
+}
+
+/// The other half: a destructive run says what it did in characters, not in
+/// green. The tick and the `!` are the closed marker vocabulary of rule 5.
+#[test]
+fn a_deletion_report_reads_the_same_with_colour_off() {
+    let home = tempfile::tempdir().unwrap();
+    install_fake_jdk(home.path(), "21.0.11+10");
+    install_fake_jdk(home.path(), "21.0.9+10");
+
+    let assert = Command::cargo_bin("jlo-bin")
+        .unwrap()
+        .args(["remove", "--superseded"])
+        .env("HOME", home.path())
+        .env("JLO_ADOPTIUM_API_URL", "http://127.0.0.1:1")
+        .env_remove("JAVA_HOME")
+        .env("NO_COLOR", "1")
+        .env("CLICOLOR", "0")
+        .env("TERM", "dumb")
+        .assert()
+        .success();
+
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(!stderr.contains('\u{1b}'), "{stderr:?}");
+    assert!(stderr.contains("\u{2713} Removed 1 JDK"), "{stderr:?}");
+}
+
+// -- the cascade is wired into every verb that resolves a version --
+//
+// The rule itself - which of the four stages wins, and where `--offline`
+// stops - is unit-tested in `src/main.rs` (`cascade_*`) against the same
+// cases, without a process spawn or a temp store. What a unit test cannot
+// reach is the wiring: each verb has to call the cascade rather than grow a
+// lookup of its own. That is what this section covers, one case per verb.
+//
+// Stage 3 (the newest installed JDK) is the probe, because it is the last
+// stage every verb can reach without the network - and every command below
+// points `JLO_ADOPTIUM_API_URL` at a port nothing listens on, which turns
+// "no network access" into an assertion rather than a claim.
+
+/// A command run against a fixture store, with the network wired to fail.
 fn cascade_cmd(home: &std::path::Path, project: &std::path::Path, args: &[&str]) -> Command {
     let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
-    cmd.arg("home")
-        .args(args)
+    cmd.args(args)
         .current_dir(project)
         .env("HOME", home)
         .env("JLO_HOME", home.join(".jlo"))
@@ -1732,43 +1508,14 @@ fn installed_path(home: &std::path::Path, version: &str) -> String {
     format!("{}\n", store_base(home).join(version).display())
 }
 
-/// Stage 3. Nothing is configured, so the newest JDK on disk answers - and
-/// answers without a round trip, which the unreachable API proves.
-#[test]
-fn home_falls_back_to_the_newest_installed_jdk() {
-    let (home, project) = store_fixture(&["17.0.11+9", "21.0.5+11"]);
-
-    cascade_cmd(home.path(), &project, &[])
-        .assert()
-        .success()
-        .code(0)
-        .stdout(installed_path(home.path(), "21.0.5+11"));
-}
-
-/// The case this cascade is most easily got wrong in. A machine holding only
-/// an outdated major resolves to *that* major: stage 3 never asks Adoptium
-/// whether something newer exists, because putting a network round trip on
-/// every bare `jlo env` to answer a question `jlo update` already answers
-/// would be the wrong trade. Nothing is downloaded, and 25 does not appear.
-#[test]
-fn home_keeps_an_outdated_install_rather_than_downloading_a_newer_major() {
-    let (home, project) = store_fixture(&["17.0.11+9"]);
-
-    cascade_cmd(home.path(), &project, &[])
-        .assert()
-        .success()
-        .code(0)
-        .stdout(installed_path(home.path(), "17.0.11+9"));
-}
-
 /// Stage 4, reached only when nothing is configured *and* nothing is
 /// installed. The download is what fails here, which is the point: the old
 /// behaviour refused to resolve at all and sent the user to `jlo init`.
 #[test]
-fn home_reaches_for_the_latest_release_when_nothing_is_installed() {
+fn a_bare_command_reaches_for_the_latest_release_when_nothing_is_installed() {
     let (home, project) = store_fixture(&[]);
 
-    cascade_cmd(home.path(), &project, &[])
+    cascade_cmd(home.path(), &project, &["home"])
         .assert()
         .failure()
         .code(1)
@@ -1779,92 +1526,28 @@ fn home_reaches_for_the_latest_release_when_nothing_is_installed() {
         .stderr(predicate::str::contains("jlo init").not());
 }
 
-/// The same machine with `--offline`: the cascade stops one stage short and
-/// reports the refusal it has always reported. This is why the autoload hook,
-/// which calls `jlo env --offline` on every `cd`, can never start a download.
 #[test]
-fn home_offline_refuses_instead_of_downloading() {
-    let (home, project) = store_fixture(&[]);
+fn home_resolves_the_newest_installed_jdk() {
+    let (home, project) = store_fixture(&["17.0.11+9", "21.0.5+11"]);
 
-    // The whole sentence, not two substrings of it: the decision was that
-    // this message stays exactly as it was when a missing config was the
-    // ordinary outcome, so the wording is the thing under test.
-    cascade_cmd(home.path(), &project, &["--offline"])
-        .assert()
-        .failure()
-        .code(1)
-        .stdout(predicate::str::is_empty())
-        .stderr(predicate::str::contains(
-            "No '.jlorc' found in the current directory or its parents, and no default \
-             config file. Please run 'jlo init' to create a configuration file.",
-        ));
-}
-
-/// `--offline` stops *after* stage 3, not before it: what is already on disk
-/// costs no network, so it is still an answer.
-#[test]
-fn home_offline_still_uses_the_newest_installed_jdk() {
-    let (home, project) = store_fixture(&["21.0.5+11"]);
-
-    cascade_cmd(home.path(), &project, &["--offline"])
+    cascade_cmd(home.path(), &project, &["home"])
         .assert()
         .success()
         .code(0)
         .stdout(installed_path(home.path(), "21.0.5+11"));
 }
 
-/// Stage 2 beats stage 3. `jlo init --global` is how a user asks for a stable
-/// answer on neutral ground, and a JDK installed for some other project must
-/// not quietly override it - which is the one sharp edge of resolving to
-/// "whatever is newest here".
-#[test]
-fn a_default_config_beats_the_newest_installed_jdk() {
-    let (home, project) = store_fixture(&["17.0.11+9", "25.0.4+101"]);
-    let jlo_home = home.path().join(".jlo");
-    std::fs::create_dir_all(&jlo_home).unwrap();
-    std::fs::write(jlo_home.join("default.jlorc"), "17\n").unwrap();
-
-    cascade_cmd(home.path(), &project, &[])
-        .assert()
-        .success()
-        .code(0)
-        .stdout(installed_path(home.path(), "17.0.11+9"));
-}
-
-/// Stage 1 beats stage 2, which beats stage 3 - the whole order in one run.
-#[test]
-fn a_project_config_beats_both_the_default_and_the_newest_install() {
-    let (home, project) = store_fixture(&["17.0.11+9", "21.0.5+11", "25.0.4+101"]);
-    let jlo_home = home.path().join(".jlo");
-    std::fs::create_dir_all(&jlo_home).unwrap();
-    std::fs::write(jlo_home.join("default.jlorc"), "17\n").unwrap();
-    std::fs::write(project.join(".jlorc"), "21\n").unwrap();
-
-    cascade_cmd(home.path(), &project, &[])
-        .assert()
-        .success()
-        .code(0)
-        .stdout(installed_path(home.path(), "21.0.5+11"));
-}
-
-/// `env` reaches stage 3 as well - `cascade_cmd` probes with `home` - and
-/// its stdout is exactly two export lines and nothing else.
+/// The same answer, as exports. stdout is the environment channel here - the
+/// jlo shell function evaluates this stream - so the assertion is the whole
+/// of it, not a substring.
 #[test]
 fn env_resolves_the_newest_installed_jdk_and_exports_only_that() {
     let (home, project) = store_fixture(&["21.0.5+11"]);
 
-    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
-    cmd.args(["env", "--offline"])
-        .current_dir(&project)
-        .env("HOME", home.path())
-        .env("JLO_HOME", home.path().join(".jlo"))
-        .env("JLO_ADOPTIUM_API_URL", "http://127.0.0.1:1")
-        .env_remove("JAVA_HOME")
+    cascade_cmd(home.path(), &project, &["env", "--offline"])
         .assert()
         .success()
         .code(0)
-        // stdout is the environment channel: the jlo shell function evaluates
-        // this stream, so anything else arriving here would be executed.
         .stdout(
             predicate::str::is_match(
                 r"^export JAVA_HOME='[^']*21\.0\.5\+11'\nexport PATH='[^']*'\n$",
@@ -1872,4 +1555,110 @@ fn env_resolves_the_newest_installed_jdk_and_exports_only_that() {
             .unwrap(),
         )
         .stderr(predicate::str::is_empty());
+}
+
+/// `exec` had no cascade coverage at all: the version is optional there too,
+/// and the child is where the answer shows up.
+#[cfg(unix)]
+#[test]
+fn exec_resolves_the_newest_installed_jdk_for_the_child() {
+    let (home, project) = store_fixture(&["21.0.5+11"]);
+
+    cascade_cmd(
+        home.path(),
+        &project,
+        &["exec", "--", "sh", "-c", "echo \"$JAVA_HOME\""],
+    )
+    .assert()
+    .success()
+    .code(0)
+    .stdout(installed_path(home.path(), "21.0.5+11"));
+}
+
+/// `update` and `install` resolve through the same cascade, and both then ask
+/// Adoptium about whatever it produced. With the network wired to fail, the
+/// version named in the failure is the assertion: reaching Adoptium at all
+/// means stage 3 answered.
+#[test]
+fn update_and_install_resolve_the_newest_installed_jdk() {
+    for verb in ["update", "install"] {
+        let (home, project) = store_fixture(&["21.0.5+11"]);
+
+        cascade_cmd(home.path(), &project, &[verb])
+            .assert()
+            .failure()
+            .code(1)
+            .stdout(predicate::str::is_empty())
+            // Not "no valid Java versions provided": the cascade produced 21,
+            // and it is the request about 21 that failed.
+            .stderr(predicate::str::contains("Adoptium"));
+    }
+}
+
+// -- the success paths of update and remove --
+//
+// Both were covered only by their refusals. `update` needs Adoptium to answer,
+// so it runs against mockito with the captured asset response; `remove` never
+// touches the network.
+
+/// A major already on its latest build is reported and left alone - the
+/// branch that decides not to download.
+#[test]
+fn update_leaves_a_major_already_on_its_latest_build_alone() {
+    let mut server = mockito::Server::new();
+    let _a = server
+        .mock(
+            "GET",
+            mockito::Matcher::Regex(r"^/v3/assets/latest/21/hotspot".to_string()),
+        )
+        .match_query(mockito::Matcher::Any)
+        .with_body(include_str!("fixtures/assets_latest.json"))
+        .create();
+
+    let home = tempfile::tempdir().unwrap();
+    // The exact semver the fixture names, so `find_exact` matches.
+    install_fake_jdk(home.path(), "21.0.11+10.0.LTS");
+
+    Command::cargo_bin("jlo-bin")
+        .unwrap()
+        .args(["update", "21"])
+        .env("HOME", home.path())
+        .env("JLO_ADOPTIUM_API_URL", server.url())
+        .env_remove("JAVA_HOME")
+        .assert()
+        .success()
+        .code(0)
+        // Nothing was downloaded, so nothing is superseded and no hint follows.
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("21.0.11+10.0.LTS"))
+        .stderr(predicate::str::contains("superseded").not());
+}
+
+/// Naming a major removes every build of it, and says which ones went.
+#[test]
+fn remove_deletes_every_build_of_the_major_named() {
+    let home = tempfile::tempdir().unwrap();
+    install_fake_jdk(home.path(), "21.0.11+10");
+    install_fake_jdk(home.path(), "21.0.9+10");
+    install_fake_jdk(home.path(), "17.0.11+10");
+
+    Command::cargo_bin("jlo-bin")
+        .unwrap()
+        .args(["remove", "21"])
+        .env("HOME", home.path())
+        .env("JLO_ADOPTIUM_API_URL", "http://127.0.0.1:1")
+        .env_remove("JAVA_HOME")
+        .assert()
+        .success()
+        .code(0)
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("Removed 2 JDKs"));
+
+    let store = jdk_store_in(home.path());
+    assert!(!store.join("21.0.11+10").exists());
+    assert!(!store.join("21.0.9+10").exists());
+    assert!(
+        store.join("17.0.11+10").exists(),
+        "another major is untouched"
+    );
 }

@@ -55,6 +55,16 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y zsh
 
+      # The three real-network tests (home, exec, env - ADR-0002) install a
+      # real Temurin JDK. They do it into target/tmp/network-home rather than
+      # the runner's $HOME, so it is a path that can be carried between runs:
+      # without this every job downloads ~200 MB from Adoptium.
+      - name: Cache the JDK store used by the real-network tests
+        uses: actions/cache@v4
+        with:
+          path: target/tmp/network-home
+          key: jdk-store-${{ matrix.os }}-${{ matrix.arch }}
+
       - name: Build release
         run: cargo test --release
         env:

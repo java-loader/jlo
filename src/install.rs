@@ -1281,6 +1281,39 @@ mod tests {
         Layout::new(home.to_path_buf())
     }
 
+    /// ADR-0006: the lock lives on the open file description, so it survives
+    /// `selfupdate`'s `exec` - but only if the fd does. std opens every file
+    /// `O_CLOEXEC`, and nothing in the type system undoes that, so a refactor
+    /// that drops the `fcntl_setfd` call compiles, passes every other test,
+    /// and silently releases the lock at exactly the moment the install is
+    /// half-published: the new binary in place, its scripts and receipt not
+    /// yet written.
+    ///
+    /// `tests/selfupdate.rs` proves an *externally* held lock blocks a second
+    /// update. This is the other half: that ours is still held after the
+    /// `exec`, which is a property of the descriptor rather than of anything
+    /// observable from outside.
+    #[cfg(unix)]
+    #[test]
+    // The underscore says "nothing reads this in production", which is still
+    // true; this test reads it precisely because the field's whole purpose is
+    // the fd underneath it.
+    #[allow(clippy::used_underscore_binding)]
+    fn the_lock_fd_survives_an_exec() {
+        let home = tempfile::tempdir().unwrap();
+        let lock = Lock::acquire(home.path()).expect("nothing else holds it");
+        let file = lock
+            ._file
+            .as_ref()
+            .expect("acquire opens the lock file itself");
+
+        let flags = rustix::io::fcntl_getfd(file).unwrap();
+        assert!(
+            !flags.contains(rustix::io::FdFlags::CLOEXEC),
+            "the lock fd carries FD_CLOEXEC and would be closed by selfupdate's exec"
+        );
+    }
+
     #[test]
     fn single_quoting_survives_an_apostrophe() {
         assert_eq!(sq("o'brien"), r"'o'\''brien'");

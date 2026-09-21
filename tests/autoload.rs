@@ -428,6 +428,32 @@ fn find_stops_at_vcs_root() {
     );
 }
 
+/// The same rule as `find_project_config_stops_at_a_worktree_whose_git_is_a_file`
+/// in `src/conf.rs`, in the other implementation. Two tests for one rule are
+/// justified here for the reason ADR-0004 gives: the walk exists twice, in
+/// Rust and in shell, and the shell half is `[ -e ]` rather than `[ -d ]`.
+/// Nothing but this notices if one dialect drifts to `-d`.
+#[test]
+fn find_stops_at_a_worktree_whose_git_is_a_file() {
+    assert_lookup(
+        "find_stops_at_a_worktree_whose_git_is_a_file",
+        |home| {
+            let outer = home.join("outer");
+            let worktree = outer.join("worktree");
+            let deep = worktree.join("src");
+            std::fs::create_dir_all(&deep).unwrap();
+            std::fs::write(
+                worktree.join(".git"),
+                "gitdir: /elsewhere/.git/worktrees/w\n",
+            )
+            .unwrap();
+            std::fs::write(outer.join(".jlorc"), "17\n").unwrap();
+            deep
+        },
+        false,
+    );
+}
+
 /// `$HOME` is the other boundary. Built the other way round - the `.jlorc`
 /// sits *above* the home directory - so `home` here is a subdirectory of the
 /// temp tree rather than the tree itself.

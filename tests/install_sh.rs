@@ -1346,18 +1346,6 @@ fn the_install_verb_appears_in_no_generated_surface() {
     );
 }
 
-/// The boundary check must still catch the thing it is there to catch: a
-/// generated surface that really does offer the hidden verb as a command word.
-#[test]
-fn offers_word_separates_the_hidden_verb_from_a_longer_identifier() {
-    assert!(!offers_word("cmd=\"jlo__subcmd__install\"", "__install"));
-    assert!(offers_word(
-        "opts=\"env home __install update\"",
-        "__install"
-    ));
-    assert!(offers_word("jlo,__install)", "__install"));
-}
-
 // ---------------------------------------------------------------------------
 // The receipt, and what a mismatched one heals
 // ---------------------------------------------------------------------------

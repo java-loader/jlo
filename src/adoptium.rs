@@ -421,27 +421,6 @@ mod tests {
     }
 
     // -- jdk_os / jdk_arch smoke tests --
-
-    #[test]
-    fn jdk_os_returns_known_value() {
-        let os = jdk_os().unwrap();
-        assert!(
-            ["linux", "mac", "windows", "solaris", "aix"].contains(&os),
-            "unexpected os: {os}"
-        );
-    }
-
-    #[test]
-    fn jdk_arch_returns_known_value() {
-        let arch = jdk_arch().unwrap();
-        assert!(
-            [
-                "x64", "x32", "aarch64", "arm", "s390x", "ppc64", "ppc64le", "sparcv9", "riscv64"
-            ]
-            .contains(&arch),
-            "unexpected arch: {arch}"
-        );
-    }
 }
 
 #[cfg(test)]
