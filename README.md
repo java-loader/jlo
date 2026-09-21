@@ -69,7 +69,7 @@ jlo env
 > entering a project that pins a JDK you do not have prints one line telling you so, and leaves the environment alone.
 > Run `jlo env` yourself to install it.
 
-JDKs are installed to `~/Library/Java/JavaVirtualMachines/` on macOS and `~/.jdks/` on Linux and Windows —
+JDKs are installed to `~/Library/Java/JavaVirtualMachines/` on macOS and `~/.jdks/` on Linux —
 the same locations IntelliJ IDEA uses, so both tools see the same JDKs.
 This allows automatic discovery of installed JDKs by IDEs like IntelliJ IDEA.
 
@@ -680,7 +680,7 @@ generated files, and prints it in the lines it tells you to add.
 
 > [!IMPORTANT]
 > `JLO_HOME` is **not** where the JDKs go, and it is **not** `JAVA_HOME`. Downloaded JDKs are installed to
-> `~/Library/Java/JavaVirtualMachines/` (macOS) or `~/.jdks/` (Linux, Windows) — the locations IntelliJ IDEA uses — and
+> `~/Library/Java/JavaVirtualMachines/` (macOS) or `~/.jdks/` (Linux) — the locations IntelliJ IDEA uses — and
 > that directory is not configurable. Pointing `JLO_HOME` elsewhere moves J'Lo's own config and scripts, not your JDKs.
 
 

@@ -654,16 +654,9 @@ fn find_jdk_path(jdk_metadata: &JdkMetadata, temp_dest: &Path) -> anyhow::Result
         extracted_jdk_path = extracted_jdk_path.join("Contents").join("Home");
     }
 
-    if env::consts::OS == "windows" {
-        let java_bin = extracted_jdk_path.join("bin").join("java.exe");
-        if !java_bin.exists() {
-            bail!("java executable is missing at {java_bin:?}");
-        }
-    } else {
-        let java_bin = extracted_jdk_path.join("bin").join("java");
-        if !java_bin.exists() {
-            bail!("java executable is missing at {java_bin:?}");
-        }
+    let java_bin = extracted_jdk_path.join("bin").join("java");
+    if !java_bin.exists() {
+        bail!("java executable is missing at {java_bin:?}");
     }
 
     Ok(extracted_jdk_path)
@@ -705,20 +698,12 @@ mod tests {
         }
     }
 
-    fn java_binary_name() -> &'static str {
-        if env::consts::OS == "windows" {
-            "java.exe"
-        } else {
-            "java"
-        }
-    }
-
     /// Create a mock extracted JDK under `source`, in the layout
     /// [`find_jdk_path`] expects, and return its directory.
     fn create_extracted_jdk(source: &Path, release: &str) -> PathBuf {
         let jdk_dir = extracted_jdk_dir(source, release);
         fs::create_dir_all(jdk_dir.join("bin")).unwrap();
-        fs::write(jdk_dir.join("bin").join(java_binary_name()), "").unwrap();
+        fs::write(jdk_dir.join("bin").join("java"), "").unwrap();
         jdk_dir
     }
 
@@ -737,12 +722,6 @@ mod tests {
     fn base_dir_matches_intellij_layout_on_linux() {
         let home = Path::new("/home/u");
         assert_eq!(base_dir_for("linux", home), home.join(".jdks"));
-    }
-
-    #[test]
-    fn base_dir_matches_intellij_layout_on_windows() {
-        let home = Path::new("/Users/u");
-        assert_eq!(base_dir_for("windows", home), home.join(".jdks"));
     }
 
     // -- find_matching --
@@ -1565,7 +1544,7 @@ mod tests {
 
         assert!(dest.exists());
         assert!(dest.join(MARKER_FILE).exists());
-        assert!(dest.join("bin").join(java_binary_name()).exists());
+        assert!(dest.join("bin").join("java").exists());
     }
 
     /// The caller needs the installed path (for `ui.finish` and its own return
