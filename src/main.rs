@@ -6,6 +6,7 @@ mod install;
 mod selfupdate;
 mod store;
 mod ui;
+mod version;
 
 use crate::adoptium::{AdoptiumClient, JdkMetadata};
 use crate::store::{JdkStore, RemoveError};

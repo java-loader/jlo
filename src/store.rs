@@ -1,7 +1,7 @@
 use crate::adoptium::JdkMetadata;
 use crate::ui::InstallUi;
+use crate::version::compare;
 use anyhow::{Context, bail};
-use semver_rs::compare;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::env;
@@ -143,9 +143,8 @@ struct Candidate {
     path: PathBuf,
     /// The directory name, or `None` when it is not valid UTF-8.
     name: Option<String>,
-    /// The major version the name parses to, or `None` when it is not a
-    /// semver. `semver_rs::parse` is lenient, so this can be `0` - see
-    /// [`is_jdk_version_dir`].
+    /// The major version the name parses to, or `None` when the name is not
+    /// a semver - see [`is_jdk_version_dir`].
     major: Option<i64>,
     /// Whether the directory carries the `.jlo-managed` marker.
     managed: bool,
@@ -510,8 +509,11 @@ impl JdkStore {
                     .map(ToString::to_string);
                 let major = name
                     .as_deref()
-                    .and_then(|name| semver_rs::parse(name, None).ok())
-                    .map(|semver| semver.major);
+                    .and_then(|name| crate::version::parse(name).ok())
+                    // A major that does not fit an `i64` is not a JDK; the rest
+                    // of the crate counts majors in `i64` because that is what
+                    // the Adoptium API hands back.
+                    .and_then(|semver| i64::try_from(semver.major).ok());
                 let managed = path.join(MARKER_FILE).exists();
                 Candidate {
                     path,
@@ -549,7 +551,7 @@ fn sort_by_semver_desc(candidates: &mut [Candidate]) {
     candidates.sort_by(|a, b| {
         let a_str = a.name.as_deref().unwrap_or("");
         let b_str = b.name.as_deref().unwrap_or("");
-        compare(b_str, a_str, None).unwrap_or(Ordering::Equal)
+        compare(b_str, a_str).unwrap_or(Ordering::Equal)
     });
 }
 
@@ -594,10 +596,11 @@ fn same_dir(a: &Path, b: &Path) -> bool {
     }
 }
 
-/// `semver_rs::parse` is lenient - it happily turns any junk into `0.0.0` - so a
-/// directory only counts as a JDK when it parses to a real major version.
+/// A directory counts as a JDK when its name parses as a version. That is what
+/// jlo names its installs, and it is what keeps a hand-placed `temurin-21.0.5`
+/// out of the listing.
 fn is_jdk_version_dir(name: &str) -> bool {
-    semver_rs::parse(name, None).is_ok_and(|sv| sv.major > 0)
+    crate::version::parse(name).is_ok()
 }
 
 fn find_jdk_path(jdk_metadata: &JdkMetadata, temp_dest: &Path) -> anyhow::Result<PathBuf> {

@@ -1,6 +1,6 @@
 use crate::ui::InstallUi;
+use crate::version::compare;
 use anyhow::{Context, bail};
-use semver_rs::compare;
 use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
 use std::env;
@@ -233,7 +233,7 @@ impl AdoptiumClient {
             }
         }
 
-        jdks.sort_by(|a, b| compare(&b.version, &a.version, None).unwrap_or(Ordering::Equal));
+        jdks.sort_by(|a, b| compare(&b.version, &a.version).unwrap_or(Ordering::Equal));
         Ok(jdks)
     }
 

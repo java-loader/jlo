@@ -437,8 +437,8 @@ fn guard_against_a_newer_install(layout: &Layout, latest: &str) -> Result<()> {
 }
 
 fn is_newer(candidate: &str, current: &str) -> Result<bool> {
-    let ordering = semver_rs::compare(candidate, current, None).map_err(|e| {
-        anyhow!("could not compare J'Lo versions {candidate:?} and {current:?}: {e}")
+    let ordering = crate::version::compare(candidate, current).with_context(|| {
+        format!("could not compare J'Lo versions {candidate:?} and {current:?}")
     })?;
     Ok(ordering == Ordering::Greater)
 }

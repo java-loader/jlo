@@ -699,7 +699,7 @@ fn build_rows(
 
     rows.sort_by(|a, b| {
         b.major.cmp(&a.major).then_with(|| {
-            semver_rs::compare(&b.version, &a.version, None).unwrap_or(Ordering::Equal)
+            crate::version::compare(&b.version, &a.version).unwrap_or(Ordering::Equal)
         })
     });
     rows
@@ -716,7 +716,7 @@ fn supersedes_every_install(jdk: &RemoteJdk, installed: &[InstalledJdk]) -> bool
         return false;
     }
     majors.all(|i| {
-        semver_rs::compare(&jdk.version, &i.version, None).is_ok_and(|ord| ord == Ordering::Greater)
+        crate::version::compare(&jdk.version, &i.version).is_ok_and(|ord| ord == Ordering::Greater)
     })
 }
 
@@ -737,7 +737,7 @@ fn local_status(jdk: &InstalledJdk, installed: &[InstalledJdk]) -> Status {
     }
     let superseded = installed.iter().any(|other| {
         other.major == jdk.major
-            && semver_rs::compare(&other.version, &jdk.version, None)
+            && crate::version::compare(&other.version, &jdk.version)
                 .is_ok_and(|ord| ord == Ordering::Greater)
     });
     if superseded {
@@ -1152,6 +1152,26 @@ mod tests {
                 row(21, "21.0.12+101.0.LTS", Status::Update),
                 row(21, "21.0.11+10.0.LTS", Status::Installed),
                 row(21, "21.0.9+10.0.LTS", Status::Superseded),
+            ]
+        );
+    }
+
+    /// Build metadata is not part of semver precedence, so two Adoptium
+    /// builds of the same patch are equal and neither supersedes the other.
+    /// `prune` reads the same ordering, so marking one `Superseded` here
+    /// would promise a deletion that picks an arbitrary winner.
+    #[test]
+    fn build_rows_leaves_two_builds_of_one_patch_both_installed() {
+        let rows = build_rows(
+            &[remote("21.0.11+10.0.LTS", 21)],
+            &[local("21.0.11+10.0.LTS", 21), local("21.0.11+9.0.LTS", 21)],
+            None,
+        );
+        assert_eq!(
+            rows,
+            vec![
+                row(21, "21.0.11+10.0.LTS", Status::Installed),
+                row(21, "21.0.11+9.0.LTS", Status::Installed),
             ]
         );
     }

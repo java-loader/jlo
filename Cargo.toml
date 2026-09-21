@@ -57,7 +57,9 @@ serde_json = "1.0.145"
 # feature set (aes-crypto, bzip2, lzma, ppmd, xz, zstd, deflate64, time).
 # `deflate-flate2` reuses the flate2 backend already pulled in for tar.gz.
 zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2"] }
-semver_rs = "0.2.0"
+# Hand-written parser with no dependencies of its own. `semver_rs` pulled the
+# whole `regex` engine into the release binary just to compare version strings.
+semver = "1"
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
 

@@ -32,11 +32,6 @@ allow = [
 ]
 confidence-threshold = 0.9
 
-# Note: semver_rs declares no `license` expression in its manifest, so
-# cargo-deny falls back to scanning its LICENSE file (MIT) and emits a
-# `no-license-field` warning. That warning is informational; the license is
-# resolved correctly, so no `[[licenses.clarify]]` entry is needed.
-
 [bans]
 # Duplicate versions of the same crate bloat the binary; warn so they stay visible.
 multiple-versions = "warn"
