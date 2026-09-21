@@ -125,7 +125,16 @@ main() {
 
   # The tarball carries exactly one file, 'jlo-bin'. The shell code used to
   # travel beside it and could fall out of step with it; it is compiled in now.
-  if ! tar -xzf "$FQ_JLO_BUNDLE" -C "$JLO_BIN_DIR"; then
+  #
+  # cd into the directory instead of passing paths to tar. GNU tar unquotes
+  # file names by default, so a backslash escape in a name - a JLO_HOME
+  # containing a literal \n, say - is turned into the character it denotes
+  # before tar ever looks for it, and the extraction fails on a path that does
+  # exist. That applies to the argument of -f as much as to -C, so neither may
+  # carry a user-supplied path. bsdtar does not unquote, which is why this only
+  # ever showed up on Linux. cd is a shell builtin and does no such thing, and
+  # the subshell keeps the working directory change local.
+  if ! (cd "$JLO_BIN_DIR" && tar -xzf jlo.tar.gz); then
     echo "Failed to extract jlo binary from $FQ_JLO_BUNDLE" >&2
     rm -f "$FQ_JLO_BUNDLE"
     exit 1

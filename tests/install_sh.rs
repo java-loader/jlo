@@ -19,6 +19,32 @@ use std::process::{Command, Output};
 
 const INTERPRETERS: &[&str] = &["/bin/bash", "zsh"];
 
+/// A `tar` that unquotes backslash escapes in its arguments, the way GNU tar
+/// does by default and bsdtar does not.
+///
+/// Without it this whole class of bug is invisible on a macOS dev machine and
+/// only surfaces on Linux CI: a `JLO_HOME` holding a literal `\n` is turned
+/// into a real newline before tar looks for it, so extraction fails on a path
+/// that does exist. `install.sh` must therefore never hand tar a
+/// user-supplied path - not as `-C`, and not as the argument of `-f`.
+fn stub_gnu_tar(bin: &Path) {
+    let tar = bin.join("tar");
+    std::fs::write(
+        &tar,
+        "#!/bin/sh\n\
+         # Refuse any argument carrying a backslash escape, which real GNU tar\n\
+         # would silently reinterpret instead.\n\
+         for a in \"$@\"; do\n\
+         \x20 case \"$a\" in *'\\n'*) echo \"tar: unquoted $a\" >&2; exit 2 ;; esac\n\
+         done\n\
+         exec /usr/bin/tar \"$@\"\n",
+    )
+    .unwrap();
+    let mut perms = std::fs::metadata(&tar).unwrap().permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+    std::fs::set_permissions(&tar, perms).unwrap();
+}
+
 fn manifest() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
@@ -120,6 +146,9 @@ fn run_installer(jlo_home: Option<&str>, checksum: Checksum) -> (tempfile::TempD
     let dir = tempfile::tempdir().unwrap();
     let tarball = release_tarball(dir.path());
     let stubbin = stub_curl(dir.path(), &tarball, checksum);
+    // Every install test runs against it: install.sh must never hand tar a
+    // path it could reinterpret, whatever the test is otherwise about.
+    stub_gnu_tar(&stubbin);
     let home = dir.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
 
