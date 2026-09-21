@@ -52,6 +52,13 @@ jobs:
     # needs chain: on a manual dispatch release-please is skipped, and without
     # this build would be skipped too even though resolve succeeded.
     if: ${{ always() && needs.resolve.result == 'success' }}
+    # Narrower than the workflow-wide block above: this job only reads the
+    # sources, but it does mint an OIDC token and write an attestation. Nothing
+    # here needs write access to the repository.
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     strategy:
       matrix:
         include:
@@ -89,11 +96,31 @@ jobs:
       - name: Build package
         run: tar --no-same-owner -czf ${{ matrix.package }}.tar.gz jlo-autoload.sh jlo-init.sh -C target/release jlo-bin
 
+      # The updater verifies this before it unpacks anything. It shares an
+      # origin with the tarball, so it catches a corrupt or truncated download,
+      # not a compromised release - the attestation below is what narrows that
+      # gap, and only for whoever runs 'gh attestation verify'.
+      #
+      # Written with the bare file name (no path), so 'shasum -a 256 -c' works
+      # from whatever directory the tarball was downloaded into.
+      - name: Checksum package
+        env:
+          PACKAGE: ${{ matrix.package }}
+        run: shasum -a 256 "$PACKAGE.tar.gz" > "$PACKAGE.tar.gz.sha256"
+
+      # Ties the tarball to the workflow run and the commit that produced it.
+      # No key management on our side; verifiable with
+      #   gh attestation verify jlo-<platform>.tar.gz --repo java-loader/jlo
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: ${{ matrix.package }}.tar.gz
+
       - name: Upload package
         uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.package }}-artifact
-          path: jlo-*.tar.gz
+          path: jlo-*.tar.gz*
 
   upload:
     needs: [resolve, build]
@@ -110,7 +137,9 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ needs.resolve.outputs.tag_name }}
-          files: jlo-*.tar.gz
+          files: |
+            jlo-*.tar.gz
+            jlo-*.tar.gz.sha256
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -118,6 +147,8 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           tag_name: stable
-          files: jlo-*.tar.gz
+          files: |
+            jlo-*.tar.gz
+            jlo-*.tar.gz.sha256
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
