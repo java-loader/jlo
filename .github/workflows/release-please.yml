@@ -142,13 +142,3 @@ jobs:
             jlo-*.tar.gz.sha256
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Update stable release for existing users
-        uses: softprops/action-gh-release@v3
-        with:
-          tag_name: stable
-          files: |
-            jlo-*.tar.gz
-            jlo-*.tar.gz.sha256
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

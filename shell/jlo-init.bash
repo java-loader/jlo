@@ -4,14 +4,15 @@
 # zsh copy lives beside it. Splitting the two is what lets each one be written
 # for a single parser - this file never has to also be valid sh or zsh.
 jlo() {
-  local J arg out url tmp rc
+  local J arg out
   J="${JLO_HOME-}/bin/jlo-bin"
   case "$1" in
-    env|use)
+    env|use|selfupdate)
       # The branch below *evaluates* stdout, so help and version output - which
-      # clap prints to stdout - must never reach it. Scoped to env/use on
-      # purpose: a wrapper-wide scan would hijack a child's flags in
-      # 'jlo exec -- ./gradlew --help'. env/use take at most a version.
+      # clap prints to stdout - must never reach it. Scoped to these three verbs
+      # on purpose: a wrapper-wide scan would hijack a child's flags in
+      # 'jlo exec -- ./gradlew --help'. env/use take at most a version, and
+      # selfupdate takes nothing.
       for arg in "$@"; do
         case "$arg" in
           -h|--help|-V|--version)
@@ -31,42 +32,14 @@ jlo() {
       # failure instead of eval-ing a half-written environment - see the
       # explicit `return 0` in jlo_after_cd, which keeps that status out of the
       # user's prompt.
+      #
+      # 'selfupdate' rides the same branch: the binary prints the reload line
+      # (`. $JLO_HOME/jlo.sh`, plus whichever optional stubs this shell had
+      # enabled) on stdout, and eval-ing it replaces the resident jlo function
+      # with the one the new binary just generated. An update that was already
+      # current prints nothing, so `eval ""` is a no-op.
       out="$("$J" "$@")" || return
       eval "$out"
-      ;;
-    selfupdate)
-      # Progress, not machine output: stderr, the installer's own stdout
-      # included. stdout is the environment channel (see the env|use branch).
-      url='https://raw.githubusercontent.com/java-loader/jlo/refs/heads/main/install.sh'
-      printf 'Before update: ' >&2
-      "$J" --version >&2
-      # To a file, not `sh -c "$(curl ...)"`. That form hides two failures: an
-      # HTTP error makes `curl -f` write nothing, and `sh -c ""` exits 0; and a
-      # connection dropped mid-transfer leaves a truncated but non-empty body,
-      # which `-f` cannot catch at all.
-      tmp="$(mktemp "${TMPDIR:-/tmp}/jlo-install.XXXXXX")" || {
-        echo "jlo: could not create a temporary file for the installer" >&2
-        return 1
-      }
-      if ! curl -fsSL "$url" -o "$tmp"; then
-        rm -f "$tmp"
-        echo "jlo: could not download the installer from $url" >&2
-        return 1
-      fi
-      if [ ! -s "$tmp" ]; then
-        rm -f "$tmp"
-        echo "jlo: the installer downloaded from $url was empty" >&2
-        return 1
-      fi
-      sh "$tmp" >&2
-      rc=$?
-      rm -f "$tmp"
-      if [ "$rc" -ne 0 ]; then
-        echo "jlo: the installer failed (exit $rc); jlo was not updated" >&2
-        return "$rc"
-      fi
-      printf 'After update: ' >&2
-      "$J" --version >&2
       ;;
     *)
       "$J" "$@"

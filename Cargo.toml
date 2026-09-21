@@ -27,6 +27,14 @@ assert_cmd = "2"
 mockito = "1"
 predicates = "3"
 serial_test = "4"
+# Already compiled as normal dependencies; repeated here so the integration
+# tests can build the release tarball `selfupdate` downloads and checksum it
+# the same way the release workflow does, instead of shelling out to tools
+# whose flags differ between macOS and GNU userlands.
+flate2 = "1.1.4"
+tar = "0.4"
+sha2 = "0.11.0"
+hex = "0.4.3"
 
 [dependencies]
 anyhow = "1"
@@ -52,3 +60,10 @@ zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2
 semver_rs = "0.2.0"
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
+
+# `selfupdate` holds an exclusive lock across the `exec` of the binary it just
+# published, which needs `flock` and an `fcntl` that clears `FD_CLOEXEC` -
+# neither is in std. rustix wraps both safely, so the crate keeps its
+# `unsafe_code = "deny"`, and it is already in the tree via tempfile.
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", default-features = false, features = ["std", "fs"] }

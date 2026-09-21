@@ -829,6 +829,7 @@ dependencies = [
  "indicatif",
  "mockito",
  "predicates",
+ "rustix",
  "semver_rs",
  "serde",
  "serde_json",

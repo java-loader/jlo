@@ -1411,3 +1411,95 @@ fn a_receipt_naming_a_different_jlo_home_is_left_alone() {
         "the binary rewrote a layout whose receipt describes another JLO_HOME"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The post-update reload line
+// ---------------------------------------------------------------------------
+
+/// The reload line `jlo selfupdate` prints, evaluated in a shell that sourced
+/// exactly `enabled` of the optional stubs. Reports which of the three files
+/// the eval actually re-sourced.
+///
+/// Sourcing is observed by re-defining the files' own effects rather than by
+/// spying on `.`: each stub is marked by having the shell record it in a
+/// variable the moment it runs.
+fn reload_in(sh: &str, home: &Path, jlo: &Path, enabled: &[&str]) -> Output {
+    let mut sources = String::new();
+    for name in std::iter::once("jlo.sh").chain(enabled.iter().copied()) {
+        sources.push('.');
+        sources.push(' ');
+        sources.push_str(&squote(&jlo.join(name)));
+        sources.push('\n');
+    }
+    let reload = Command::new(jlo.join("bin").join("jlo-bin"))
+        .args(["__install", "--reload"])
+        .env("HOME", home)
+        .env("JLO_HOME", jlo)
+        .output()
+        .unwrap();
+    assert!(reload.status.success());
+    let line = String::from_utf8_lossy(&reload.stdout).into_owned();
+
+    // `.` is shadowed *after* the opt-in sourcing above, so it only records
+    // what the eval'd reload line does.
+    Command::new(sh)
+        .arg("-c")
+        .arg(format!(
+            "{sources}\
+             . () {{ echo \"sourced=$1\"; }}\n\
+             eval {}\n\
+             echo \"status=$?\"\n",
+            squote(Path::new(&line))
+        ))
+        .env("HOME", home)
+        .env_remove("JLO_HOME")
+        .output()
+        .unwrap()
+}
+
+/// The reload always re-sources `jlo.sh` - that is the resident wrapper being
+/// replaced - and never enables an optional stub the user had not enabled.
+#[test]
+fn the_reload_line_re_sources_only_what_this_shell_had_enabled() {
+    let (dir, _) = install(None);
+    let home = dir.path().join("home");
+    let jlo = home.join(".jlo");
+
+    for sh in INTERPRETERS {
+        if skip_missing(
+            "the_reload_line_re_sources_only_what_this_shell_had_enabled",
+            sh,
+        ) {
+            continue;
+        }
+
+        let bare = reload_in(sh, &home, &jlo, &[]);
+        let stdout = String::from_utf8_lossy(&bare.stdout);
+        assert!(
+            stdout.contains("sourced=") && stdout.contains("jlo.sh"),
+            "{sh}: the reload did not re-source jlo.sh: {stdout:?}"
+        );
+        assert!(
+            !stdout.contains("autoload.sh") && !stdout.contains("completions.sh"),
+            "{sh}: the reload enabled a stub the user had not: {stdout:?}"
+        );
+        // A false `[ -n ... ]` must not become the status of the whole eval.
+        assert!(
+            stdout.contains("status=0"),
+            "{sh}: a successful reload reported failure: {stdout:?}"
+        );
+
+        let opted_in = reload_in(sh, &home, &jlo, &["autoload.sh", "completions.sh"]);
+        let stdout = String::from_utf8_lossy(&opted_in.stdout);
+        for name in ["jlo.sh", "autoload.sh", "completions.sh"] {
+            assert!(
+                stdout.contains(name),
+                "{sh}: the reload skipped {name} although this shell had it: {stdout:?}"
+            );
+        }
+        assert!(
+            stdout.contains("status=0"),
+            "{sh}: a successful reload reported failure: {stdout:?}"
+        );
+    }
+}

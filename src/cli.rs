@@ -312,8 +312,8 @@ Use jlo prune to remove superseded minor versions by rule instead."
 
     /// Update jlo itself
     ///
-    /// Handled by the jlo shell function the installer generates, not by
-    /// this binary.
+    /// Downloads the latest release, verifies its published SHA256, and
+    /// replaces this binary. Does nothing when it is already current.
     Selfupdate,
 
     #[command(

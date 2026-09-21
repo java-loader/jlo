@@ -20,6 +20,9 @@ use std::time::{Duration, Instant};
 /// matters because the autoload hook runs on every `cd`.
 pub(crate) struct InstallUi {
     bar: ProgressBar,
+    /// What is being fetched - "JDK" or "J'Lo". Only the non-tty lines and the
+    /// summary name it; the live bar carries the version in its prefix.
+    label: &'static str,
     version: String,
     started: Instant,
     tty: bool,
@@ -28,6 +31,7 @@ pub(crate) struct InstallUi {
 impl std::fmt::Debug for InstallUi {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("InstallUi")
+            .field("label", &self.label)
             .field("version", &self.version)
             .field("tty", &self.tty)
             .finish_non_exhaustive()
@@ -36,6 +40,12 @@ impl std::fmt::Debug for InstallUi {
 
 impl InstallUi {
     pub(crate) fn new(version: &str) -> Self {
+        Self::labelled("JDK", version)
+    }
+
+    /// The same live region for J'Lo's own binary, which `selfupdate`
+    /// downloads over the same `ureq` stack as a JDK.
+    pub(crate) fn labelled(label: &'static str, version: &str) -> Self {
         let tty = supports_live_region();
         let bar = if tty {
             // Styled via the builder, which does not draw: a bar configured
@@ -54,17 +64,18 @@ impl InstallUi {
         if tty {
             bar.enable_steady_tick(TICK);
         }
-        Self::with_bar(version, bar, tty)
+        Self::with_bar(label, version, bar, tty)
     }
 
     #[cfg(test)]
     pub(crate) fn hidden(version: &str) -> Self {
-        Self::with_bar(version, ProgressBar::hidden(), false)
+        Self::with_bar("JDK", version, ProgressBar::hidden(), false)
     }
 
-    fn with_bar(version: &str, bar: ProgressBar, tty: bool) -> Self {
+    fn with_bar(label: &'static str, version: &str, bar: ProgressBar, tty: bool) -> Self {
         Self {
             bar,
+            label,
             version: version.to_string(),
             started: Instant::now(),
             tty,
@@ -80,7 +91,8 @@ impl InstallUi {
             self.bar.set_style(download_style());
         } else {
             eprintln!(
-                "Downloading JDK {} ({})",
+                "Downloading {} {} ({})",
+                self.label,
                 self.version,
                 indicatif::HumanBytes(total_size)
             );
@@ -120,7 +132,12 @@ impl InstallUi {
         self.bar.finish_and_clear();
         eprintln!(
             "{}",
-            format_summary(&self.version, &tilde(dest), self.started.elapsed())
+            format_summary(
+                self.label,
+                &self.version,
+                &tilde(dest),
+                self.started.elapsed()
+            )
         );
     }
 
@@ -771,9 +788,9 @@ fn spinner_style() -> ProgressStyle {
 /// emit colour by looking at *stdout*, and the `jlo` shell function runs
 /// `. <(jlo-bin env)` - so stdout is a pipe on the one path that matters and
 /// the default targeting silently strips every colour from this line.
-fn format_summary(version: &str, dest: &str, elapsed: Duration) -> String {
+fn format_summary(label: &str, version: &str, dest: &str, elapsed: Duration) -> String {
     format!(
-        "{} JDK {} {} {}  {}",
+        "{} {label} {} {} {}  {}",
         style("✓").green().for_stderr(),
         version,
         style("→").dim().for_stderr(),
@@ -941,7 +958,7 @@ mod tests {
     fn summary_names_the_exact_version_and_destination() {
         // The major version is what the user typed; the exact version is the
         // one fact the summary exists to record.
-        let line = format_summary("21.0.8+9", "~/.jdks/21.0.8", Duration::from_secs(18));
+        let line = format_summary("JDK", "21.0.8+9", "~/.jdks/21.0.8", Duration::from_secs(18));
         assert!(line.contains("JDK 21.0.8+9"), "got: {line}");
         assert!(line.contains("~/.jdks/21.0.8"), "got: {line}");
         assert!(line.contains("(18s)"), "got: {line}");

@@ -3,6 +3,7 @@ mod cli;
 mod conf;
 mod extract;
 mod install;
+mod selfupdate;
 mod store;
 mod ui;
 
@@ -31,13 +32,13 @@ pub(crate) const JLO_HOME_DIR_NAME: &str = ".jlo";
 /// lines in the order the user has always seen - the error first, the dimmed
 /// advice second - which printing at the failure site would invert.
 #[derive(Debug)]
-struct CommandError {
+pub(crate) struct CommandError {
     error: anyhow::Error,
     hint: Option<String>,
 }
 
 impl CommandError {
-    fn with_hint(error: anyhow::Error, hint: impl Into<String>) -> Self {
+    pub(crate) fn with_hint(error: anyhow::Error, hint: impl Into<String>) -> Self {
         Self {
             error,
             hint: Some(hint.into()),
@@ -140,10 +141,7 @@ fn run() -> Result<(), CommandError> {
             global,
             force,
         } => cmd_init(&client, version, global, force),
-        cli::Command::Selfupdate => Err(anyhow!(
-            "self-update is handled by the jlo shell function. Source jlo.sh from your shell profile, or re-run the installer."
-        )
-        .into()),
+        cli::Command::Selfupdate => selfupdate::cmd_selfupdate(),
         cli::Command::Completions { shell } => {
             cmd_completions(shell);
             Ok(())

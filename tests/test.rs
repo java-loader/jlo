@@ -679,18 +679,6 @@ fn list_remote_network_failure_points_at_offline() {
 }
 
 #[test]
-fn selfupdate_not_supported() {
-    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
-    cmd.arg("selfupdate")
-        .assert()
-        .failure()
-        .code(1)
-        .stderr(predicate::str::contains(
-            "handled by the jlo shell function",
-        ));
-}
-
-#[test]
 #[serial]
 fn init_with_version() {
     let temp_dir = tempfile::tempdir().unwrap();
