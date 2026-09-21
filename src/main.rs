@@ -6,7 +6,7 @@ mod store;
 mod ui;
 
 use crate::adoptium::{AdoptiumClient, JdkMetadata};
-use crate::store::JdkStore;
+use crate::store::{JdkStore, RemoveError};
 use crate::ui::InstallUi;
 use anyhow::{Context, anyhow};
 use clap::Parser;
@@ -47,6 +47,25 @@ impl CommandError {
 impl From<anyhow::Error> for CommandError {
     fn from(error: anyhow::Error) -> Self {
         Self { error, hint: None }
+    }
+}
+
+/// `JdkStore::remove` refuses with a typed error that already knows which
+/// advice line belongs under it, so the conversion is the whole of
+/// `cmd_remove`'s error handling - no matching on message text.
+impl From<RemoveError> for CommandError {
+    fn from(error: RemoveError) -> Self {
+        let hint = error.hint();
+        // Only the store variant carries a context chain worth preserving;
+        // the refusals are a single sentence this type formats itself.
+        let error = match error {
+            RemoveError::Store(e) => e,
+            refusal => anyhow!("{refusal}"),
+        };
+        match hint {
+            Some(hint) => Self::with_hint(error, hint),
+            None => error.into(),
+        }
     }
 }
 
@@ -120,11 +139,12 @@ fn run() -> Result<(), CommandError> {
 
     match command {
         cli::Command::Env { version } => cmd_env(&client, version),
-        cli::Command::Home { version } => cmd_home(&client, version),
+        cli::Command::Home { version, offline } => cmd_home(&client, version, offline),
         cli::Command::Exec { args } => cmd_exec(&client, &args),
         cli::Command::List { offline } => cmd_list(&client, offline),
         cli::Command::Update { versions, all } => cmd_update(&client, versions, all),
-        cli::Command::Clean => cmd_clean(),
+        cli::Command::Prune => cmd_prune(),
+        cli::Command::Remove { versions } => cmd_remove(&versions),
         cli::Command::Init {
             version,
             global,
@@ -197,12 +217,37 @@ fn unsourced_env_hint(java_version: &str) -> String {
     )
 }
 
-fn cmd_home(client: &AdoptiumClient, version: Option<String>) -> Result<(), CommandError> {
+fn cmd_home(
+    client: &AdoptiumClient,
+    version: Option<String>,
+    offline: bool,
+) -> Result<(), CommandError> {
     let java_version = resolve_java_version_from(version)?;
     let store = JdkStore::discover()?;
-    let java_home = resolve_java_home(client, &store, &java_version)?;
+    let java_home = if offline {
+        offline_java_home(&store, &java_version)?
+    } else {
+        resolve_java_home(client, &store, &java_version)?
+    };
     println!("{}", java_home.to_string_lossy());
     Ok(())
+}
+
+/// `jlo home --offline`: answer from the store alone.
+///
+/// The point of the flag is that asking the question cannot trigger the
+/// several-hundred-megabyte answer - a CI step with a short timeout, or a
+/// network-isolated sandbox, needs a probe that fails fast rather than one
+/// that hangs on a connection attempt. The exit status is the answer, so
+/// there is no distinct code for "not installed": 1, like every other
+/// failure here.
+fn offline_java_home(store: &JdkStore, java_version: &str) -> Result<PathBuf, CommandError> {
+    store.find_matching(java_version).ok_or_else(|| {
+        CommandError::with_hint(
+            anyhow!("no installed JDK matches Java {java_version}"),
+            format!("Run 'jlo home {java_version}' without --offline to install it."),
+        )
+    })
 }
 
 /// Diverges on success: `run_exec` replaces the process image. The `Result` is
@@ -455,11 +500,30 @@ fn cmd_list(client: &AdoptiumClient, offline: bool) -> Result<(), CommandError> 
     Ok(())
 }
 
-fn cmd_clean() -> Result<(), CommandError> {
+fn cmd_prune() -> Result<(), CommandError> {
     let store = JdkStore::discover()?;
-    let report = store.clean().context("could not clean JDKs")?;
-    ui::clean_report(&report);
+    let report = store.prune().context("could not prune JDKs")?;
+    ui::prune_report(&report);
     Ok(())
+}
+
+fn cmd_remove(versions: &[String]) -> Result<(), CommandError> {
+    let store = JdkStore::discover()?;
+    let report = store.remove(versions, active_java_home().as_deref())?;
+    ui::remove_report(&report);
+    Ok(())
+}
+
+/// The directory `$JAVA_HOME` currently points at, if the variable is set to
+/// anything.
+///
+/// Read here rather than in `JdkStore` so the store stays a filesystem
+/// module: `remove` takes the live JDK as an argument, which is also what
+/// makes its refusal testable without mutating the process environment.
+fn active_java_home() -> Option<PathBuf> {
+    env::var_os("JAVA_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
 }
 
 fn cmd_init(
@@ -546,7 +610,7 @@ fn cmd_update(
 
     // An update leaves the superseded minor on disk on purpose - a command
     // that downloads should not also delete, and the old JDK may still be
-    // wired into an open shell or an IDE. Point at `jlo clean` instead of
+    // wired into an open shell or an IDE. Point at `jlo prune` instead of
     // doing it here.
     if let Some(hint) = superseded_hint(installed_any, count_superseded(&store)) {
         ui::hint!("{hint}");
@@ -555,7 +619,7 @@ fn cmd_update(
     Ok(())
 }
 
-/// How many installs `jlo clean` would remove, or 0 if that cannot be
+/// How many installs `jlo prune` would remove, or 0 if that cannot be
 /// determined. A hint is not worth failing an otherwise successful update, so
 /// an unreadable JDK directory just means no hint.
 fn count_superseded(store: &JdkStore) -> usize {
@@ -574,7 +638,7 @@ fn superseded_hint(installed_any: bool, superseded: usize) -> Option<String> {
 
     let plural = if superseded == 1 { "" } else { "s" };
     Some(format!(
-        "{superseded} superseded JDK{plural} still installed - run 'jlo clean' to remove {}.",
+        "{superseded} superseded JDK{plural} still installed - run 'jlo prune' to remove {}.",
         if superseded == 1 { "it" } else { "them" }
     ))
 }
@@ -798,6 +862,55 @@ mod tests {
         );
     }
 
+    // -- offline_java_home --
+    //
+    // The install directory is not configurable (ADR-0005), so `jlo home
+    // --offline` is covered here against an injected `JdkStore` rather than
+    // by spawning the binary; the integration suite asserts only the exit
+    // status and that no network call happens.
+
+    /// A fake store holding one JDK directory, marked managed the way an
+    /// install leaves it.
+    fn store_with(base: &Path, version: &str) -> JdkStore {
+        let dir = base.join(version);
+        std::fs::create_dir_all(dir.join("bin")).unwrap();
+        std::fs::write(dir.join("bin").join("java"), "").unwrap();
+        std::fs::File::create(dir.join(".jlo-managed")).unwrap();
+        JdkStore::at(base)
+    }
+
+    #[test]
+    fn offline_java_home_answers_from_the_store() {
+        let dir = tempdir().unwrap();
+        let store = store_with(dir.path(), "21.0.3+9");
+
+        let path = offline_java_home(&store, "21").expect("21 is installed");
+        assert_eq!(path, dir.path().join("21.0.3+9"));
+    }
+
+    /// The exit status is the answer a script wants, and the hint has to name
+    /// the command that would actually install it - the whole point of the
+    /// flag is that this one did not.
+    #[test]
+    fn offline_java_home_fails_without_installing_anything() {
+        let dir = tempdir().unwrap();
+        let store = store_with(dir.path(), "21.0.3+9");
+
+        let err = offline_java_home(&store, "17").expect_err("17 is not installed");
+        assert_eq!(
+            format!("{:#}", err.error),
+            "no installed JDK matches Java 17"
+        );
+        assert_eq!(
+            err.hint.as_deref(),
+            Some("Run 'jlo home 17' without --offline to install it.")
+        );
+        assert!(
+            !dir.path().join("17").exists(),
+            "--offline must not create anything"
+        );
+    }
+
     // -- unsourced_env_hint --
 
     /// The hint exists to hand the caller a command that does work without a
@@ -821,7 +934,7 @@ mod tests {
         let hint = superseded_hint(true, 2).expect("an install plus leftovers earns a hint");
         assert!(hint.contains('2'), "hint should say how many: {hint}");
         assert!(
-            hint.contains("jlo clean"),
+            hint.contains("jlo prune"),
             "hint should name the command: {hint}"
         );
     }
@@ -832,7 +945,7 @@ mod tests {
         assert!(hint.contains("1 superseded JDK "), "{hint}");
     }
 
-    /// Nothing was superseded, so pointing at `jlo clean` would send the user
+    /// Nothing was superseded, so pointing at `jlo prune` would send the user
     /// to a command that removes nothing.
     #[test]
     fn superseded_hint_silent_when_nothing_is_superseded() {

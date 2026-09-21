@@ -18,7 +18,8 @@ fn bare_invocation_prints_help() {
         .stdout(predicate::str::contains("exec"))
         .stdout(predicate::str::contains("list"))
         .stdout(predicate::str::contains("update"))
-        .stdout(predicate::str::contains("clean"))
+        .stdout(predicate::str::contains("prune"))
+        .stdout(predicate::str::contains("remove"))
         .stdout(predicate::str::contains("init"))
         .stdout(predicate::str::contains("selfupdate"))
         .stdout(predicate::str::contains("completions"));
@@ -38,6 +39,120 @@ fn help_flags_print_help() {
             .code(0)
             .stdout(predicate::str::contains("Usage: jlo"));
     }
+}
+
+#[test]
+fn clean_is_gone_entirely() {
+    // `clean` was renamed to `prune`, with no alias left behind: one name
+    // for one command, everywhere. Typing the old one is an ordinary usage
+    // error - not a hidden path that still works.
+    let mut old_name = Command::cargo_bin("jlo-bin").unwrap();
+    old_name
+        .arg("clean")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unrecognized subcommand 'clean'"));
+
+    // And it appears nowhere in the overview - not in the Commands: list,
+    // and not in any line of prose still pointing at the old name.
+    let mut help = Command::cargo_bin("jlo-bin").unwrap();
+    help.arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("prune"))
+        .stdout(predicate::str::contains("clean").not());
+}
+
+#[test]
+fn ls_alias_is_documented_in_help() {
+    // Visible, unlike `clean`: `ls` is a second name worth discovering, the
+    // same call `env`/`use` makes.
+    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
+    cmd.arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::is_match(r"(?m)^\s*list\s+.*\[alias: ls\]").unwrap());
+}
+
+#[test]
+fn ls_lists_the_same_thing_as_list() {
+    // `--offline` is unaffected by the alias, and is the form that does not
+    // need the network.
+    let mut aliased = Command::cargo_bin("jlo-bin").unwrap();
+    let aliased = aliased
+        .args(["ls", "--offline"])
+        .env("JLO_ADOPTIUM_API_URL", "http://127.0.0.1:1")
+        .assert()
+        .success();
+
+    let mut spelled_out = Command::cargo_bin("jlo-bin").unwrap();
+    let spelled_out = spelled_out
+        .args(["list", "--offline"])
+        .env("JLO_ADOPTIUM_API_URL", "http://127.0.0.1:1")
+        .assert()
+        .success();
+
+    assert_eq!(aliased.get_output().stdout, spelled_out.get_output().stdout);
+}
+
+#[test]
+fn home_offline_fails_without_touching_the_network() {
+    // The whole point of the flag: an agent or a CI step can ask "is this
+    // JDK here?" without risking a several-hundred-megabyte answer. The API
+    // URL points at a port nothing listens on, so a network attempt would
+    // surface as a connection error rather than this message - and major 99
+    // does not exist, so no real install can satisfy it either.
+    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
+    cmd.args(["home", "--offline", "99"])
+        .env("JLO_ADOPTIUM_API_URL", "http://127.0.0.1:1")
+        .assert()
+        .failure()
+        .code(1)
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("no installed JDK matches Java 99"))
+        .stderr(predicate::str::contains("without --offline"));
+}
+
+#[test]
+fn remove_refuses_a_version_that_is_not_installed() {
+    // Major 99 is not a real release, so this exercises the refusal without
+    // depending on - or touching - whatever the host has installed.
+    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
+    cmd.args(["remove", "99"])
+        .env("JLO_ADOPTIUM_API_URL", "http://127.0.0.1:1")
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains("no installed JDK matches '99'"))
+        .stderr(predicate::str::contains("Nothing was removed"))
+        .stderr(predicate::str::contains("jlo list --offline"));
+}
+
+#[test]
+fn remove_names_every_version_that_missed_in_one_message() {
+    // None of 97, 98, 99 is a real release. All three have to be named at
+    // once: since the rule is that none of them ran, reporting only the
+    // first would send the user through one rerun per typo.
+    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
+    cmd.args(["remove", "97", "98", "99"])
+        .env("JLO_ADOPTIUM_API_URL", "http://127.0.0.1:1")
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains(
+            "no installed JDK matches '97', '98' or '99'",
+        ))
+        .stderr(predicate::str::contains("Nothing was removed"));
+}
+
+#[test]
+fn remove_requires_at_least_one_version() {
+    // A bare `jlo remove` must be a usage error, not a no-op that exits 0.
+    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
+    cmd.arg("remove")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Usage: jlo remove"));
 }
 
 #[test]
@@ -210,7 +325,8 @@ fn every_subcommand_has_help() {
         "exec",
         "list",
         "update",
-        "clean",
+        "prune",
+        "remove",
         "init",
         "selfupdate",
         "completions",

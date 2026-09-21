@@ -66,11 +66,14 @@ This allows automatic discovery of installed JDKs by IDEs like IntelliJ IDEA.
 3. [Executing a Command](#executing-a-command)
 4. [Initialization](#initialization)
 5. [Updating Java Versions](#updating-java-versions)
-6. [Cleaning Installed Versions](#cleaning-installed-versions)
-7. [Managing J’Lo Itself](#managing-jlo-itself)
-8. [Getting Help](#getting-help)
-9. [Shell Completions](#shell-completions)
-10. [Environment Variables](#environment-variables)
+6. [Listing Versions](#listing-versions)
+7. [Removing Versions](#removing-versions)
+8. [Pruning Superseded Versions](#pruning-superseded-versions)
+9. [Using a JDK J'Lo Did Not Install](#using-a-jdk-jlo-did-not-install)
+10. [Managing J’Lo Itself](#managing-jlo-itself)
+11. [Getting Help](#getting-help)
+12. [Shell Completions](#shell-completions)
+13. [Environment Variables](#environment-variables)
 
 ## Environment Setup
 
@@ -111,6 +114,9 @@ scripts, Makefiles, CI pipelines, and other non-interactive contexts (see
 - If the requested Java version is not installed, it will be downloaded and installed automatically.
 - Only the resolved path is written to standard output; all diagnostics (download progress, etc.) go to standard error,
   so `$(jlo home …)` stays clean.
+- `--offline` answers from what is already installed and never touches the network: it prints the path if the version
+  is there, and exits with status 1 if it is not. Use it to *ask* whether a JDK is available without risking a
+  several-hundred-megabyte download — in a CI step with a short timeout, or in a network-isolated sandbox.
 
 It is the J'Lo equivalent of macOS's `/usr/libexec/java_home -v <version>`.
 
@@ -124,6 +130,9 @@ jlo home 25
 
 # capture it into an environment variable
 export JAVA_HOME="$(jlo home 25)"
+
+# is Java 21 available here? no download, no network, exit code is the answer
+jlo home --offline 21
 ```
 
 ## Executing a Command
@@ -201,7 +210,7 @@ That updates every installed major version in one go — no need to name them in
 - If no arguments are provided, it updates the Java version specified in the nearest `.jlorc` file at or above the
   current directory, falling back to `~/.jlo/default.jlorc` if none is found.
 - The superseded minor release stays on disk — an open shell or IDE may still point at it. When an update leaves one
-  behind, `jlo update` ends with a reminder to run [`jlo clean`](#cleaning-installed-versions).
+  behind, `jlo update` ends with a reminder to run [`jlo prune`](#pruning-superseded-versions).
 
 **Usage examples:**
 ```shell
@@ -223,6 +232,8 @@ latest build of each major version — annotated with what you already have inst
 ```bash
 jlo list
 ```
+
+`jlo ls` is an alias for `jlo list`.
 
 ```
 26  26.0.2+101              installed
@@ -251,8 +262,8 @@ The tip goes to standard error, so it never ends up in a pipe alongside the list
 Major versions Adoptium has no build for on this platform are omitted, so everything listed is installable.
 
 Add `--offline` to skip the network and list only what is installed locally — including every minor version you
-have, not just the newest per major. Installations J'Lo did not create are marked `(unmanaged)`; `jlo clean`
-leaves those alone.
+have, not just the newest per major. Installations J'Lo did not create are marked `(unmanaged)`; `jlo prune` and
+`jlo remove` leave those alone.
 
 ```bash
 jlo list --offline
@@ -261,13 +272,89 @@ jlo list --offline
 Colours switch off automatically when the output is not a terminal, so `jlo list | grep LTS` and friends work as
 expected.
 
-## Cleaning Installed Versions
+## Removing Versions
 
-The command `jlo clean` removes older minor versions of installed Java versions, keeping only the latest minor
+The command `jlo remove` deletes the installed JDKs you name. Its counterpart,
+[`jlo prune`](#pruning-superseded-versions), deletes by rule instead — `remove` is the versions you chose, `prune` is
+whatever "keep the newest minor of each major" leaves over.
+
+```bash
+jlo remove 17
+```
+
+Several can go at once, and a version may be a whole major or one exact build:
+
+```bash
+jlo remove 11 17.0.11+10
+```
+
+**Behavior:**
+- Each VERSION is either a major version (removing every installed build of it) or the exact version of one install,
+  as shown by `jlo list --offline`. It is not a version range: `17.0` matches nothing.
+- **An installation J'Lo will not delete is reported and skipped; the rest still go.** There are three such cases,
+  and each is an error only when it leaves nothing to remove at all:
+  - nothing installed matches the version — the JDK is already absent, which is what you asked for, so this is a
+    note rather than a failure. `jlo remove 3 4 5 17` removes Java 17 and reports that nothing matched `3`, `4` or `5`.
+  - J'Lo did not install it — no `.jlo-managed` marker. Remove it by hand when you are done with it.
+  - your `JAVA_HOME` points at it. Deleting that one would leave your shell pointing at a path that no longer exists,
+    so J'Lo leaves it and says so. Switch away (`jlo env 21`) and run the command again to get it. There is no flag to
+    override this.
+- None of the three can delete anything, so none of them stops the versions that can: `jlo remove 21 24 25 26` while
+  your shell is on 26 removes 21, 24 and 25, and warns that 26 was left behind.
+- Exit status is 1 when nothing was removed, 0 otherwise.
+
+**Usage examples:**
+```shell
+# remove every installed Java 17
+jlo remove 17
+
+# remove Java 11 and Java 17; a version that is not installed is just reported
+jlo remove 11 17
+
+# remove one exact build, leaving its siblings in the same major alone
+jlo remove 17.0.11+10
+```
+
+## Pruning Superseded Versions
+
+The command `jlo prune` removes older minor versions of installed Java versions, keeping only the latest minor
 release for each major version.
+
+```bash
+jlo prune
+```
 
 J'Lo only removes installations at `~/.jdks/` (or `~/Library/Java/JavaVirtualMachines/` on macOS) that were installed
 by J'Lo itself.
+
+> This command was called `jlo clean` before 1.0. The old name was removed rather than kept as an alias: `clean`
+> suggested build output (`cargo clean`, `gradle clean`) — cheap, regenerable, safe — while this command deletes real
+> JDKs, and leaving both names alive would have kept that reading available.
+
+## Using a JDK J'Lo Did Not Install
+
+J'Lo has no command that takes a path, but it does not need one: it finds every JDK in its install directory, whether
+or not it put it there. To make a vendor-supplied JDK, a local OpenJDK build, or an early-access build usable by
+`jlo env`, `jlo home` and `jlo exec`, move it into that directory under a version-shaped name:
+
+```bash
+# macOS
+mv /path/to/jdk ~/Library/Java/JavaVirtualMachines/21.0.11+9
+
+# Linux
+mv /path/to/jdk ~/.jdks/21.0.11+9
+```
+
+The directory name is the whole registration: it has to parse as a semantic version with a major above zero, and that
+major is what `jlo env 21` and friends then match on. The directory itself must be a JDK root — the one holding `bin`,
+`lib` and `release`. On macOS that is the `Contents/Home` directory inside a `.jdk` bundle, not the bundle.
+
+Such a JDK is **unmanaged**: it carries no `.jlo-managed` marker, so
+
+- `jlo list --offline` shows it, annotated `(unmanaged)`;
+- `jlo prune` and `jlo remove` will not delete it — remove it by hand when you are done with it;
+- `jlo update` cannot update it. Adoptium does not list it, so there is no newer minor to resolve. If you also install
+  that major from Adoptium, both remain, and `jlo env` picks the highest version of the two.
 
 ## Managing J’Lo Itself
 
@@ -362,7 +449,14 @@ jlo exec 21 -- ./gradlew build
 
 # Or, when you only need the path (e.g. to export it for several later commands):
 export JAVA_HOME="$(jlo home 21)"
+
+# Probe first, when a download would be unwelcome: --offline never touches the
+# network and exits non-zero if the JDK is not already installed.
+if jlo home --offline 21 >/dev/null; then echo "Java 21 is here"; fi
 ```
+
+Inside a step with a short timeout, or in a network-isolated sandbox, use `jlo home --offline` to ask whether a JDK is
+available: without it, the question and the several-hundred-megabyte answer are the same command.
 
 ```makefile
 # Makefile

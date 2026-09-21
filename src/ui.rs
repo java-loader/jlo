@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 /// is erased once the install succeeds, leaving exactly one summary line behind.
 ///
 /// The rule the whole module follows: output persists in proportion to how
-/// durable the side effect is. A JDK on disk survives until `jlo clean`, so it
+/// durable the side effect is. A JDK on disk survives until `jlo prune`, so it
 /// earns a line. Exporting `JAVA_HOME` lasts until the shell exits and is fully
 /// implied by the command the user typed, so it prints nothing at all - which
 /// matters because the autoload hook runs on every `cd`.
@@ -203,11 +203,11 @@ macro_rules! created {
 
 pub(crate) use {created, error, hint, warning};
 
-/// Report a `jlo clean` run.
+/// Report a `jlo prune` run.
 ///
-/// `clean` is the one command that destroys things, so unlike `jlo env` it
+/// `prune` is the one command that destroys things, so unlike `jlo env` it
 /// always says what it did - including when the answer is "nothing".
-pub(crate) fn clean_report(report: &crate::store::CleanReport) {
+pub(crate) fn prune_report(report: &crate::store::PruneReport) {
     // Styling adds invisible escape bytes, so pad the plain number first and
     // style the padded string - the same rule the `jlo list` columns follow.
     let width = report
@@ -233,7 +233,7 @@ pub(crate) fn clean_report(report: &crate::store::CleanReport) {
     let count = report.removed_count();
     if count == 0 {
         eprintln!(
-            "{} Nothing to clean {}",
+            "{} Nothing to prune {}",
             style("✓").green().for_stderr(),
             style("(only the newest of each major is installed)")
                 .dim()
@@ -266,6 +266,65 @@ pub(crate) fn clean_report(report: &crate::store::CleanReport) {
     }
 }
 
+/// Report a `jlo remove` run.
+///
+/// Shaped like [`prune_report`] - it destroys things, so it always says what
+/// it did - but it never has a "nothing to do" line: `JdkStore::remove`
+/// returns an error rather than an empty report, so reaching here means at
+/// least one JDK was deleted or failed to delete. The trailing notes cover
+/// the targets that did not contribute one.
+pub(crate) fn remove_report(report: &crate::store::RemoveReport) {
+    for version in &report.removed {
+        eprintln!("{}  {}", style("removed").dim().for_stderr(), version);
+    }
+
+    for failure in &report.failures {
+        eprintln!("{} {}", style("!").red().for_stderr(), failure);
+    }
+
+    let count = report.removed.len();
+    eprintln!(
+        "{} Removed {} JDK{}",
+        style("✓").green().for_stderr(),
+        count,
+        if count == 1 { "" } else { "s" }
+    );
+
+    // Listed, not counted: the user named these, so anything they expected
+    // to go and which did not is worth a line of its own.
+    for version in &report.skipped_unmanaged {
+        eprintln!(
+            "{}",
+            style(format!("  left {version} alone (not managed by jlo)"))
+                .dim()
+                .for_stderr()
+        );
+    }
+
+    // Not a failure - the JDK is already absent, which is what was asked for
+    // - so this is a dim note under a successful run rather than a warning.
+    // It is still said, because it is usually a typo.
+    if !report.not_installed.is_empty() {
+        eprintln!(
+            "{}",
+            style(format!(
+                "  nothing installed matched {}",
+                crate::store::quoted_list(&report.not_installed)
+            ))
+            .dim()
+            .for_stderr()
+        );
+    }
+
+    // Last, and a warning rather than a dim note: of the three skips this is
+    // the only one the user can act on, so it is the line the run should end
+    // on - not something buried among the notes above it.
+    if let Some(version) = &report.skipped_in_use {
+        warning!("left {version} alone: JAVA_HOME points at it");
+        hint!("  Switch the shell to another JDK first, e.g. 'jlo env 21', then remove it.");
+    }
+}
+
 /// The `jlo list --offline` listing: the JDKs already installed.
 ///
 /// Every line of either listing starts with the major version, because that -
@@ -290,7 +349,7 @@ pub(crate) fn offline_list(installed: &[InstalledJdk], store: &JdkStore) {
         if jdk.managed {
             row
         } else {
-            // `jlo clean` leaves these alone; say so rather than let the user
+            // `jlo prune` leaves these alone; say so rather than let the user
             // wonder why a version never goes away.
             format!("{} {}", row, style("(unmanaged)").dim())
         }

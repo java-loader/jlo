@@ -24,6 +24,7 @@ Examples:
   jlo env                          Use the pinned version
   jlo exec 21 -- ./gradlew build   Run a build on Java 21
   jlo update --all                 Bring every installed JDK up to date
+  jlo remove 11 17                 Remove every installed Java 11 and 17
 
 Environment:
   JLO_HOME   J'Lo's own directory (default ~/.jlo): the shell scripts,
@@ -131,6 +132,11 @@ Print the JAVA_HOME path for a version
 Writes the path and nothing else to stdout, so $(jlo home 21) stays
 clean. Unlike jlo env it does not modify the current shell.
 
+The JDK is downloaded from Adoptium on demand if it is not installed.
+Pass --offline to answer from what is already installed instead: the
+path if it is there, exit status 1 if it is not, and no network access
+either way.
+
 When VERSION is omitted, it resolves from the nearest .jlorc at or
 above the current directory, then ~/.jlo/default.jlorc. Only major
 versions are accepted: 21, not 21.0.5."
@@ -138,6 +144,10 @@ versions are accepted: 21, not 21.0.5."
     Home {
         /// Java major version. Default: from .jlorc
         version: Option<String>,
+
+        /// Only look at installed JDKs; never download, never touch the network
+        #[arg(long)]
+        offline: bool,
     },
 
     #[command(
@@ -165,6 +175,7 @@ the child only; the current shell is untouched.",
     },
 
     /// Show available and installed JDKs
+    #[command(visible_alias = "ls")]
     List {
         /// List only what is installed; never touch the network
         #[arg(long)]
@@ -188,8 +199,36 @@ the child only; the current shell is untouched.",
     /// Remove superseded minor versions
     ///
     /// Keeps the newest minor release of every installed major version and
-    /// deletes the rest. Only JDKs J'Lo installed are touched.
-    Clean,
+    /// deletes the rest. Only JDKs J'Lo installed are touched. To remove a
+    /// version outright rather than by rule, see jlo remove.
+    Prune,
+
+    // Attribute strings rather than a doc comment, for the reason given at
+    // the top of this enum: JAVA_HOME below would have to be backtick-quoted
+    // in rustdoc, and clap would then print the backticks.
+    #[command(
+        about = "Remove installed JDKs",
+        long_about = "\
+Remove installed JDKs
+
+Each VERSION is either a major version - jlo remove 17 removes every
+installed 17.x - or the exact version of one install, e.g. 17.0.11+10.
+Name several to remove them in one go:
+
+  jlo remove 11 17
+
+An install J'Lo will not delete is reported and skipped; the others
+still go. There are three such cases: nothing installed matches the
+version, J'Lo did not install it, or JAVA_HOME points at it. Each is an
+error only when it leaves nothing to remove at all.
+
+Use jlo prune to remove superseded minor versions by rule instead."
+    )]
+    Remove {
+        /// Major versions, or exact versions of single installs
+        #[arg(required = true)]
+        versions: Vec<String>,
+    },
 
     /// Write .jlorc pinning this project's Java version
     ///
