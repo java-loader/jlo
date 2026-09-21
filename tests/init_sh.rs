@@ -338,11 +338,13 @@ fn shipped_scripts_parse_under_every_supported_shell() {
 // selfupdate: a failed update must not look like a successful one
 // ---------------------------------------------------------------------------
 
-/// A `curl` stub. With `body`, it writes those bytes to the `-o` path the way a
-/// completed transfer would - truncated content included, which is what a
-/// dropped connection actually leaves behind. Without one, it writes nothing
-/// and fails, which is what `curl -f` does on an HTTP error.
-fn stub_curl(dir: &Path, body: Option<&str>, status: i32) -> PathBuf {
+/// A `curl` stub, shadowing the real one on `PATH`. The wrapper shells out to
+/// `curl`, so controlling `curl` is the only way to pin what it gets back; the
+/// binary's own HTTP client is not on this path. With `body` the stub writes
+/// those bytes to the `-o` path - truncated content included, which is what a
+/// dropped connection leaves behind. Without one it writes nothing and fails,
+/// which is what `curl -f` does on an HTTP error.
+fn stub_installer_curl(dir: &Path, body: Option<&str>, status: i32) -> PathBuf {
     let bin = dir.join("stubbin");
     std::fs::create_dir_all(&bin).unwrap();
     let write = match body {
@@ -408,7 +410,7 @@ fn selfupdate_fails_loudly_when_the_download_fails() {
             continue;
         }
         let home = jlo_home_with_stub("echo 'jlo 0.3.0'");
-        let stubbin = stub_curl(home.path(), None, 22);
+        let stubbin = stub_installer_curl(home.path(), None, 22);
         let out = run_selfupdate(sh, home.path(), &stubbin);
         let stdout = String::from_utf8_lossy(&out.stdout);
         let stderr = String::from_utf8_lossy(&out.stderr);
@@ -444,7 +446,7 @@ fn selfupdate_fails_on_a_truncated_installer() {
             continue;
         }
         let home = jlo_home_with_stub("echo 'jlo 0.3.0'");
-        let stubbin = stub_curl(home.path(), Some(&half), 0);
+        let stubbin = stub_installer_curl(home.path(), Some(&half), 0);
         let out = run_selfupdate(sh, home.path(), &stubbin);
         let stdout = String::from_utf8_lossy(&out.stdout);
         let stderr = String::from_utf8_lossy(&out.stderr);
@@ -469,7 +471,7 @@ fn selfupdate_propagates_the_installers_exit_status() {
             continue;
         }
         let home = jlo_home_with_stub("echo 'jlo 0.3.0'");
-        let stubbin = stub_curl(home.path(), Some("echo 'boom' >&2\nexit 3\n"), 0);
+        let stubbin = stub_installer_curl(home.path(), Some("echo 'boom' >&2\nexit 3\n"), 0);
         let out = run_selfupdate(sh, home.path(), &stubbin);
         let stdout = String::from_utf8_lossy(&out.stdout);
         assert!(
@@ -493,7 +495,7 @@ fn selfupdate_reports_success_only_when_the_installer_succeeded() {
             continue;
         }
         let home = jlo_home_with_stub("echo 'jlo 0.3.0'");
-        let stubbin = stub_curl(home.path(), Some("echo 'Successfully installed'\n"), 0);
+        let stubbin = stub_installer_curl(home.path(), Some("echo 'Successfully installed'\n"), 0);
         let out = run_selfupdate(sh, home.path(), &stubbin);
         let stdout = String::from_utf8_lossy(&out.stdout);
         let stderr = String::from_utf8_lossy(&out.stderr);

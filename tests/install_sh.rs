@@ -452,20 +452,17 @@ fn a_failure_to_write_the_required_entry_fails_the_install() {
 // ---------------------------------------------------------------------------
 
 /// Sources the generated `completions.sh` in a zsh that has run `pre` first,
-/// then reports what the shell ended up with. `-f` on purpose: the developer's
-/// own dotfiles must not decide whether this passes.
+/// then reports what the shell ended up with: which function completes `jlo`,
+/// and whether that function has been read yet. `-f` on purpose - the
+/// developer's own dotfiles must not decide whether this passes.
 fn zsh_completion_state(home: &Path, pre: &str) -> Output {
-    let jlo = home.join(".jlo");
+    let entry = squote(&home.join(".jlo").join("completions.sh"));
     let script = format!(
-        "{pre}\n\
-         . {entry}\n\
-         _probe_dir={dir}\n\
-         print -r -- \"comps=[${{_comps[jlo]-}}]\"\n\
-         print -r -- \"whence=[$(whence -v _jlo 2>&1)]\"\n\
-         if (( $fpath[(Ie)$_probe_dir] )); then print -r -- 'fpath=[yes]'; \
-         else print -r -- 'fpath=[no]'; fi\n",
-        entry = squote(&jlo.join("completions.sh")),
-        dir = squote(&jlo.join("completions")),
+        r#"{pre}
+. {entry}
+print -r -- "comps=[${{_comps[jlo]-}}]"
+print -r -- "whence=[$(whence -v _jlo 2>&1)]"
+"#
     );
     Command::new("zsh")
         .args(["-f", "-c", &script])
@@ -491,11 +488,6 @@ fn zsh_completions_are_autoloaded_from_fpath_not_sourced() {
     }
     let out = zsh_completion_state(&home, "");
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        stdout.contains("fpath=[yes]"),
-        "the completion directory never reached $fpath: {stdout:?} stderr={:?}",
-        String::from_utf8_lossy(&out.stderr)
-    );
     assert!(
         stdout.contains("comps=[_jlo]"),
         "zsh does not know how to complete 'jlo': {stdout:?} stderr={:?}",

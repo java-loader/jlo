@@ -500,12 +500,6 @@ them in `$JLO_HOME/completions.sh`, which picks the right one for whichever shel
 [ -s "$HOME/.jlo/completions.sh" ] && . "$HOME/.jlo/completions.sh"
 ```
 
-Under zsh the completion is **autoloaded**: the line puts `$JLO_HOME/completions/` on `$fpath` and zsh reads the
-~12 KB `_jlo` on your first Tab press, not on every shell start. The line works wherever you put it — before your
-framework it simply extends `$fpath` ahead of `compinit`, after one that already ran `compinit` it registers `_jlo`
-on the spot. bash has no autoload equivalent (`complete -F` needs the function to exist), so its completion is read
-when you source the line.
-
 Fish is not supported: the core `jlo` shell function (`jlo-init.sh`) is bash/zsh syntax and cannot be sourced from
 fish, so `jlo env`/`jlo use` don't work there regardless of completions. If you use fish anyway and still want
 completions for the subset of J'Lo that works as a plain binary, you can generate a script yourself:

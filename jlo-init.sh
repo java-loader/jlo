@@ -31,21 +31,15 @@ jlo() {
       eval "$out"
       ;;
     selfupdate)
-      # Everything here is progress, not machine output, so it goes to stderr -
-      # including the installer's own stdout. This branch has nothing to say on
-      # the environment channel, and keeping it silent there is what lets a
-      # later version print an eval-able reload line without ambiguity.
+      # Progress, not machine output: stderr, the installer's own stdout
+      # included. stdout is the environment channel (see the env|use branch).
       url='https://raw.githubusercontent.com/java-loader/jlo/refs/heads/main/install.sh'
       printf 'Before update: ' >&2
       "$J" --version >&2
-      # Downloaded to a file, not run as `sh -c "$(curl ...)"`. Two failures
-      # that form hides. An HTTP error makes `curl -f` write *nothing*, so the
-      # substitution yields "" and `sh -c ""` exits 0 - a failed update that
-      # reports success. And a connection dropped mid-transfer yields a
-      # truncated but non-empty body, which `-f` cannot catch at all; the file
-      # keeps the bytes where they can be checked, and install.sh holds every
-      # statement inside a function it calls only on its last line, so half of
-      # it parses without doing anything.
+      # To a file, not `sh -c "$(curl ...)"`. That form hides two failures: an
+      # HTTP error makes `curl -f` write nothing, and `sh -c ""` exits 0; and a
+      # connection dropped mid-transfer leaves a truncated but non-empty body,
+      # which `-f` cannot catch at all.
       tmp="$(mktemp "${TMPDIR:-/tmp}/jlo-install.XXXXXX")" || {
         echo "jlo: could not create a temporary file for the installer" >&2
         return 1
@@ -60,8 +54,6 @@ jlo() {
         echo "jlo: the installer downloaded from $url was empty" >&2
         return 1
       fi
-      # install.sh is '#!/usr/bin/env sh' and written to POSIX; running it under
-      # /bin/bash implied a dependency it never had.
       sh "$tmp" >&2
       rc=$?
       rm -f "$tmp"
