@@ -4,7 +4,7 @@ use console::style;
 use indicatif::{ProgressBar, ProgressBarIter, ProgressStyle};
 use std::cmp::Ordering;
 use std::io::{IsTerminal, Read, stderr};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::exit;
 use std::time::{Duration, Instant};
 
@@ -389,6 +389,81 @@ fn print_listing(rows: &[Row]) {
     }
 }
 
+/// What is active in this shell, and why.
+///
+/// Built by `main` and handed here formatted-but-undecided: `ui` never
+/// consults the store, the config or the environment - it turns this into a
+/// line. The shape is deliberately wider than any one caller needs, so the
+/// machine-readable output still to come reports the same four facts under the
+/// same names rather than inventing a second schema.
+#[derive(Debug)]
+pub(crate) struct Active {
+    /// The directory `$JAVA_HOME` points at.
+    pub path: PathBuf,
+    /// The install's version, e.g. `25.0.4+101`. `None` when the JDK is not
+    /// one of jlo's, which is the one case that reports a path instead.
+    pub version: Option<String>,
+    /// The major version of `version`.
+    pub major: Option<i64>,
+    /// Where the active JDK came from. `None` when it is one of jlo's but
+    /// nothing accounts for it - either nothing is pinned, or what is pinned
+    /// is a different major, which `pinned_elsewhere` distinguishes.
+    pub source: Option<crate::conf::Source>,
+    /// A config that pins a *different* major than the one active. Set only
+    /// when the two disagree; that disagreement is the whole reason this
+    /// command answers "and why" rather than just "what".
+    pub pinned_elsewhere: Option<crate::conf::Resolved>,
+    /// The caller found the environment already correct and changed nothing.
+    /// `jlo env --verbose` sets it - saying so is the difference between
+    /// "already right" and "did nothing", which were indistinguishable
+    /// before. A command that only ever reports leaves it false: there it
+    /// would be true of every run and so say nothing.
+    pub unchanged: bool,
+}
+
+/// The one line that answers "which JDK, and why".
+///
+/// One formatter, every caller: `jlo current` and `jlo env --verbose` are two
+/// askings of the same question, and two spellings of the answer would drift.
+/// Pure - no filesystem, no environment.
+pub(crate) fn provenance_line(active: &Active) -> String {
+    // A JDK jlo did not install has no version to name, so the path is the
+    // answer: it says "not mine" completely, and the version is usually in it
+    // anyway.
+    let subject = match &active.version {
+        Some(version) => version.clone(),
+        None => active.path.display().to_string(),
+    };
+
+    let mut note = match &active.source {
+        Some(crate::conf::Source::Foreign) => "$JAVA_HOME, set outside jlo".to_string(),
+        Some(source) => format!("from {}", source.label()),
+        // Active, and a config pins something else. The stdout line still
+        // answers the question asked; the disagreement is the warning below.
+        None if active.pinned_elsewhere.is_some() => "active".to_string(),
+        None => "active, nothing pinned".to_string(),
+    };
+
+    if active.unchanged {
+        note.push_str(", already active");
+    }
+
+    format!("{subject}  ({note})")
+}
+
+/// The active JDK is not the one the config pins.
+///
+/// Unconditional - deliberately not gated on `is_terminal()` the way the
+/// unsourced-`env` hint is. That gate exists because the autoload hook sources
+/// the `env` path; nothing hooks this.
+pub(crate) fn pin_mismatch(pinned: &crate::conf::Resolved) {
+    warning!(
+        "{} pins Java {}; run 'jlo env' to switch.",
+        pinned.source.label(),
+        pinned.version
+    );
+}
+
 /// `$JAVA_HOME` is set, but to something jlo did not install.
 ///
 /// Said rather than passed over: the listing has just drawn a column whose
@@ -725,6 +800,103 @@ fn tilde(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- provenance_line --
+    //
+    // The six states `jlo current` distinguishes, plus the annotation
+    // `jlo env --verbose` adds. Pure formatting: no store, no config, no
+    // environment. Cases 1 and 6 never reach a formatter - they have no
+    // answer to print - so they are covered by the integration suite's exit
+    // codes instead.
+
+    fn active(version: &str, major: i64) -> Active {
+        Active {
+            path: PathBuf::from("/jdks").join(version),
+            version: Some(version.to_string()),
+            major: Some(major),
+            source: None,
+            pinned_elsewhere: None,
+            unchanged: false,
+        }
+    }
+
+    fn pinned(version: &str, file: &str) -> crate::conf::Resolved {
+        crate::conf::Resolved {
+            version: version.to_string(),
+            source: crate::conf::Source::ProjectConfig(PathBuf::from(file)),
+        }
+    }
+
+    /// Case 2: active, and the config that pins it is named.
+    #[test]
+    fn provenance_line_names_the_config_the_active_jdk_came_from() {
+        let mut a = active("25.0.4+101", 25);
+        a.source = Some(pinned("25", "./.jlorc").source);
+        assert_eq!(provenance_line(&a), "25.0.4+101  (from ./.jlorc)");
+    }
+
+    /// Case 3: the config pins a different major. The stdout line still
+    /// answers "what is active" - the disagreement is `pin_mismatch`'s job,
+    /// on stderr - so it must not turn into an apology here.
+    #[test]
+    fn provenance_line_stays_an_answer_when_the_config_disagrees() {
+        let mut a = active("25.0.4+101", 25);
+        a.pinned_elsewhere = Some(pinned("21", "./.jlorc"));
+        assert_eq!(provenance_line(&a), "25.0.4+101  (active)");
+    }
+
+    /// Case 4: nothing pins anything, which is a different statement from
+    /// case 3 and has to read as one.
+    #[test]
+    fn provenance_line_says_so_when_nothing_is_pinned() {
+        assert_eq!(
+            provenance_line(&active("25.0.4+101", 25)),
+            "25.0.4+101  (active, nothing pinned)"
+        );
+    }
+
+    /// Case 5: a JDK jlo does not manage. The path is the answer - it says
+    /// "not mine" completely, and naming a version would claim knowledge jlo
+    /// does not have.
+    #[test]
+    fn provenance_line_prints_the_path_for_a_foreign_java_home() {
+        let a = Active {
+            path: PathBuf::from("/opt/jdk-21"),
+            version: None,
+            major: None,
+            source: Some(crate::conf::Source::Foreign),
+            pinned_elsewhere: None,
+            unchanged: false,
+        };
+        assert_eq!(
+            provenance_line(&a),
+            "/opt/jdk-21  ($JAVA_HOME, set outside jlo)"
+        );
+    }
+
+    /// `jlo env --verbose` on a run that changed nothing. Without this the
+    /// line is identical to the one a real switch prints, which is the
+    /// complaint the flag exists to answer: "already correct" and "did
+    /// nothing" were indistinguishable.
+    #[test]
+    fn provenance_line_marks_a_run_that_changed_nothing() {
+        let mut a = active("25.0.4+101", 25);
+        a.source = Some(pinned("25", "./.jlorc").source);
+        a.unchanged = true;
+        assert_eq!(
+            provenance_line(&a),
+            "25.0.4+101  (from ./.jlorc, already active)"
+        );
+    }
+
+    /// A version given on the command line is a provenance too, and the one
+    /// `jlo env 21 --verbose` reports.
+    #[test]
+    fn provenance_line_names_the_command_line_as_a_source() {
+        let mut a = active("21.0.5+11", 21);
+        a.source = Some(crate::conf::Source::Argument);
+        assert_eq!(provenance_line(&a), "21.0.5+11  (from the command line)");
+    }
 
     #[test]
     fn elapsed_under_a_minute_is_bare_seconds() {

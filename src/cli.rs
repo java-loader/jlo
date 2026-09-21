@@ -22,6 +22,7 @@ Examples:
   jlo env 25                       Use Java 25 in this shell
   jlo init 21                      Pin Java 21 for this project
   jlo env                          Use the pinned version
+  jlo current                      Show which JDK is active, and why
   jlo exec 21 -- ./gradlew build   Run a build on Java 21
   jlo update --all                 Bring every installed JDK up to date
   jlo remove 11 17                 Remove every installed Java 11 and 17
@@ -181,6 +182,33 @@ the child only; the current shell is untouched.",
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+
+    // Attribute strings rather than a doc comment, for the reason given at
+    // the top of this enum.
+    //
+    // No --check flag: a CI gate wanting "is this shell on the pinned JDK?"
+    // is exactly that, and the name is reserved for it. It is not built,
+    // because one asker is not yet a case - until a second turns up, the
+    // exit code stays "is there an answer at all".
+    #[command(
+        about = "Show which JDK is active in this shell, and why",
+        long_about = "\
+Show which JDK is active in this shell, and why
+
+Starts from the live JAVA_HOME, not from .jlorc. The two can
+legitimately disagree - a shell left over from before you entered the
+project, say - and saying so is most of what this command is for.
+
+One line on stdout names the active version and where it came from; any
+advisory goes to stderr. Exits 1 when there is no answer at all: no
+JAVA_HOME, or a JAVA_HOME pointing at a jlo install that has since been
+removed.
+
+Never touches the network, so there is no --offline flag to pass, and
+takes no version argument - current means the active one. To ask where
+some other version lives, see jlo home."
+    )]
+    Current,
 
     /// Show available and installed JDKs
     #[command(visible_alias = "ls")]

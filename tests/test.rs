@@ -16,6 +16,7 @@ fn bare_invocation_prints_help() {
         .stdout(predicate::str::contains("env"))
         .stdout(predicate::str::contains("home"))
         .stdout(predicate::str::contains("exec"))
+        .stdout(predicate::str::contains("current"))
         .stdout(predicate::str::contains("list"))
         .stdout(predicate::str::contains("update"))
         .stdout(predicate::str::contains("prune"))
@@ -343,6 +344,7 @@ fn every_subcommand_has_help() {
         "env",
         "home",
         "exec",
+        "current",
         "list",
         "update",
         "prune",
@@ -1321,4 +1323,184 @@ fn env_survives_a_reader_that_stops_early() {
 /// it cannot break the `-c` string above.
 fn shell_escape(value: &str) -> String {
     format!("'{}'", value.replace('\'', r"'\''"))
+}
+
+// -- jlo current --
+//
+// One test per case in the command's table, each asserting stdout, stderr and
+// the exit code separately: the split between the two streams is the contract
+// (`VER=$(jlo current)` must get the answer and nothing else), so a combined
+// assertion would pass with them swapped.
+//
+// Offline by construction - nothing here needs JLO_ADOPTIUM_API_URL - and
+// `current_never_touches_the_network` pins that down by pointing the client at
+// a dead port.
+
+/// The store directory `JdkStore::discover` derives from `$HOME`. Not
+/// configurable, which is why these tests move `$HOME` instead.
+fn store_base(home: &std::path::Path) -> std::path::PathBuf {
+    if cfg!(target_os = "macos") {
+        home.join("Library/Java/JavaVirtualMachines")
+    } else {
+        home.join(".jdks")
+    }
+}
+
+/// A temp `$HOME` holding one installed JDK, plus the project directory the
+/// command runs from. The project sits *inside* `$HOME` so the `.jlorc` walk
+/// stops there rather than climbing into the real filesystem.
+fn current_fixture(version: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+    let home = tempfile::tempdir().unwrap();
+    let jdk = store_base(home.path()).join(version);
+    std::fs::create_dir_all(jdk.join("bin")).unwrap();
+    std::fs::write(jdk.join("bin").join("java"), "").unwrap();
+    std::fs::File::create(jdk.join(".jlo-managed")).unwrap();
+
+    let project = home.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    (home, project)
+}
+
+/// Every `jlo current` invocation starts from a shell that inherits nothing:
+/// `$JLO_HOME` points at a directory with no default.jlorc, so "nothing
+/// configured" is genuinely nothing.
+fn current_cmd(home: &std::path::Path, project: &std::path::Path) -> Command {
+    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
+    cmd.arg("current")
+        .current_dir(project)
+        .env("HOME", home)
+        .env("JLO_HOME", home.join(".jlo"))
+        .env_remove("JAVA_HOME");
+    cmd
+}
+
+/// Case 1. Exit 1, because stdout is empty: exiting 0 would hand
+/// `VER=$(jlo current)` an empty string and a success code.
+#[test]
+fn current_without_java_home_has_no_answer() {
+    let (home, project) = current_fixture("25.0.4+101");
+
+    current_cmd(home.path(), &project)
+        .assert()
+        .failure()
+        .code(1)
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("No JDK is active."))
+        .stderr(predicate::str::contains("jlo env"));
+}
+
+/// Case 2: the active JDK is the one the project pins, and the line says which
+/// file that is.
+#[test]
+fn current_names_the_project_config_when_it_agrees() {
+    let (home, project) = current_fixture("25.0.4+101");
+    std::fs::write(project.join(".jlorc"), "25\n").unwrap();
+
+    current_cmd(home.path(), &project)
+        .env("JAVA_HOME", store_base(home.path()).join("25.0.4+101"))
+        .assert()
+        .success()
+        .code(0)
+        .stdout("25.0.4+101  (from ./.jlorc)\n")
+        .stderr(predicate::str::is_empty());
+}
+
+/// Case 3, the one this command is for: "why am I on the wrong JDK". Exit 0,
+/// because the question asked - what is active - has an answer, and exiting 1
+/// would make `jlo current` useless in exactly the situation where you most
+/// want to read the version.
+#[test]
+fn current_warns_but_still_answers_when_the_config_disagrees() {
+    let (home, project) = current_fixture("25.0.4+101");
+    std::fs::write(project.join(".jlorc"), "21\n").unwrap();
+
+    current_cmd(home.path(), &project)
+        .env("JAVA_HOME", store_base(home.path()).join("25.0.4+101"))
+        .assert()
+        .success()
+        .code(0)
+        .stdout("25.0.4+101  (active)\n")
+        .stderr(predicate::str::contains(
+            "./.jlorc pins Java 21; run 'jlo env' to switch.",
+        ));
+}
+
+/// Case 4. "Nothing pinned" is a different statement from case 3's silence
+/// about the pin, and the line has to distinguish them.
+#[test]
+fn current_says_when_nothing_is_pinned() {
+    let (home, project) = current_fixture("25.0.4+101");
+
+    current_cmd(home.path(), &project)
+        .env("JAVA_HOME", store_base(home.path()).join("25.0.4+101"))
+        .assert()
+        .success()
+        .code(0)
+        .stdout("25.0.4+101  (active, nothing pinned)\n")
+        .stderr(predicate::str::is_empty());
+}
+
+/// Case 5: a JDK jlo does not manage. The path is the whole answer - jlo is
+/// not managing this, and naming a version would claim knowledge it does not
+/// have. No advisory either: whatever is pinned, jlo did not put this here.
+#[test]
+fn current_reports_a_foreign_java_home_by_path() {
+    let (home, project) = current_fixture("25.0.4+101");
+    std::fs::write(project.join(".jlorc"), "21\n").unwrap();
+
+    current_cmd(home.path(), &project)
+        .env("JAVA_HOME", "/opt/jdk-21")
+        .assert()
+        .success()
+        .code(0)
+        .stdout("/opt/jdk-21  ($JAVA_HOME, set outside jlo)\n")
+        .stderr(predicate::str::is_empty());
+}
+
+/// Case 6, reachable by exactly one route: `jlo remove` on the JDK the current
+/// shell is using. Without it this state reports as case 5, which is wrong -
+/// the install *was* ours, it is simply gone.
+#[test]
+fn current_reports_a_removed_install_rather_than_calling_it_foreign() {
+    let (home, project) = current_fixture("25.0.4+101");
+    let jdk = store_base(home.path()).join("25.0.4+101");
+    std::fs::remove_dir_all(&jdk).unwrap();
+
+    current_cmd(home.path(), &project)
+        .env("JAVA_HOME", &jdk)
+        .assert()
+        .failure()
+        .code(1)
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains(
+            "points at a jlo install that is no longer there",
+        ))
+        .stderr(predicate::str::contains("jlo env"));
+}
+
+/// The command answers from disk and the environment alone. The API URL points
+/// at a port nothing listens on, so a request would surface as a connection
+/// error instead of the answer.
+#[test]
+fn current_never_touches_the_network() {
+    let (home, project) = current_fixture("25.0.4+101");
+
+    current_cmd(home.path(), &project)
+        .env("JAVA_HOME", store_base(home.path()).join("25.0.4+101"))
+        .env("JLO_ADOPTIUM_API_URL", "http://127.0.0.1:1")
+        .assert()
+        .success()
+        .code(0)
+        .stdout("25.0.4+101  (active, nothing pinned)\n");
+}
+
+/// No `--offline` flag: a flag that would always be on is noise, so the fact
+/// is documented instead. And no version argument - `current` means the active
+/// one; asking about an arbitrary version is `jlo home`'s job.
+#[test]
+fn current_takes_no_flags_or_version() {
+    for extra in ["--offline", "21"] {
+        let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
+        cmd.args(["current", extra]).assert().failure().code(2);
+    }
 }

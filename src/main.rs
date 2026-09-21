@@ -141,6 +141,7 @@ fn run() -> Result<(), CommandError> {
         cli::Command::Env { version, offline } => cmd_env(&client, version, offline),
         cli::Command::Home { version, offline } => cmd_home(&client, version, offline),
         cli::Command::Exec { args } => cmd_exec(&client, &args),
+        cli::Command::Current => cmd_current(),
         cli::Command::List { offline } => cmd_list(&client, offline),
         cli::Command::Update { versions, all } => cmd_update(&client, versions, all),
         cli::Command::Prune => cmd_prune(),
@@ -527,6 +528,113 @@ fn cmd_list(client: &AdoptiumClient, offline: bool) -> Result<(), CommandError> 
     }
 
     Ok(())
+}
+
+/// The advice line under both of the states in which `jlo current` has no
+/// answer to print. Naming `jlo env` is the whole of it: that is the command
+/// that puts a JDK back in this shell.
+const NO_ACTIVE_JDK_HINT: &str = "Run 'jlo env' to activate a JDK in this shell.";
+
+/// `jlo current`: what is active in this shell, and why.
+///
+/// Starts from the live `$JAVA_HOME` rather than from `.jlorc`, because the
+/// two can legitimately disagree and saying so is most of what this command is
+/// for. Never touches the network - every fact it reports is on disk or in the
+/// environment - so there is no `--offline` flag to pass.
+///
+/// stdout carries the one answer line, stderr any advisory: the same split
+/// `jlo list` makes, and safe here because the `jlo` shell function sources
+/// stdout for `env`/`use` alone.
+///
+/// The exit status is 1 exactly when stdout is empty, so
+/// `VER=$(jlo current)` never hands back an empty string over a success code.
+fn cmd_current() -> Result<(), CommandError> {
+    let Some(java_home) = active_java_home() else {
+        return Err(CommandError::with_hint(
+            anyhow!("No JDK is active."),
+            NO_ACTIVE_JDK_HINT,
+        ));
+    };
+
+    let store = JdkStore::discover()?;
+    let installed = store.list().context("could not list installed JDKs")?;
+
+    let Some(version) = store.active_version(&installed, Some(&java_home)) else {
+        // Inside the store but not among the installs it can list: the
+        // directory went away under a shell that is still pointing at it,
+        // which is what 'jlo remove' on the live JDK leaves behind. Reporting
+        // that as a JDK set outside jlo would be wrong - the install was ours.
+        if is_inside(store.base(), &java_home) {
+            return Err(CommandError::with_hint(
+                anyhow!(
+                    "$JAVA_HOME points at a jlo install that is no longer there ({}).",
+                    java_home.display()
+                ),
+                NO_ACTIVE_JDK_HINT,
+            ));
+        }
+
+        // A JDK jlo does not manage. No config is consulted: whatever is
+        // pinned, jlo is not what put this here, and the path says that
+        // completely.
+        ui::print_lines([ui::provenance_line(&ui::Active {
+            path: java_home,
+            version: None,
+            major: None,
+            source: Some(conf::Source::Foreign),
+            pinned_elsewhere: None,
+            unchanged: false,
+        })]);
+        return Ok(());
+    };
+
+    let mut active = ui::Active {
+        major: installed
+            .iter()
+            .find(|jdk| jdk.version == version)
+            .map(|jdk| jdk.major),
+        path: java_home,
+        version: Some(version),
+        source: None,
+        pinned_elsewhere: None,
+        unchanged: false,
+    };
+
+    // A config that fails to load is still a failure: it is a file the user
+    // wrote and meant, and answering around it would hide the mistake.
+    if let Some(pinned) = conf::find()? {
+        if pinned.version.parse::<i64>().ok() == active.major {
+            active.source = Some(pinned.source);
+        } else {
+            active.pinned_elsewhere = Some(pinned);
+        }
+    }
+
+    ui::print_lines([ui::provenance_line(&active)]);
+
+    // After the answer, so it reads as a footnote to it rather than in place
+    // of it. The question asked was "what is active", and it has an answer -
+    // hence exit 0, which is what keeps this command usable in exactly the
+    // situation you most want to read the version: a stale shell inside a
+    // pinned project.
+    if let Some(pinned) = &active.pinned_elsewhere {
+        ui::pin_mismatch(pinned);
+    }
+
+    Ok(())
+}
+
+/// Whether `path` lies under `base`.
+///
+/// `$JAVA_HOME` is normally spelled exactly as the store spelled it, because
+/// `jlo env` is what set it; the canonicalized retry covers a `$HOME` that
+/// reaches the store through a symlink. `path` itself is deliberately not
+/// canonicalized - the case this decides is the one where it no longer exists.
+fn is_inside(base: &Path, path: &Path) -> bool {
+    path.starts_with(base)
+        || base
+            .canonicalize()
+            .is_ok_and(|canonical| path.starts_with(canonical))
 }
 
 fn cmd_prune() -> Result<(), CommandError> {

@@ -22,9 +22,11 @@ pub(crate) struct Resolved {
 ///
 /// Deliberately open: a later change that falls back to the newest installed
 /// JDK - or to the latest release - adds a variant here rather than reshaping
-/// the callers. The variant names are the vocabulary: the machine-readable
-/// output that is still to come tags each source with a stable string derived
-/// from them, so nothing downstream has to invent a second spelling.
+/// the callers. The variant names are the vocabulary, and their tags are
+/// fixed - `argument`, `project_config`, `default_config`, `foreign` - so the
+/// machine-readable output still to come reports this fact under names that
+/// are already settled rather than inventing a second spelling. Renaming a
+/// variant is therefore a wire-format change, not a refactor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Source {
     /// An explicit CLI argument: `jlo env 21`.
@@ -33,6 +35,26 @@ pub(crate) enum Source {
     ProjectConfig(PathBuf),
     /// `$JLO_HOME/default.jlorc`.
     DefaultConfig(PathBuf),
+    /// Not a resolution at all: `$JAVA_HOME` was set outside jlo, so no
+    /// config had any say. Never produced by [`find`] - it is how a command
+    /// that starts from the live `$JAVA_HOME` reports a JDK jlo does not
+    /// manage, without inventing a second vocabulary for "where this came
+    /// from".
+    Foreign,
+}
+
+impl Source {
+    /// What to call this source in a status line.
+    ///
+    /// Pure: a project path is already shortened against the cwd by
+    /// [`find_in`], so formatting never has to consult the filesystem.
+    pub(crate) fn label(&self) -> String {
+        match self {
+            Self::Argument => "the command line".to_string(),
+            Self::ProjectConfig(path) | Self::DefaultConfig(path) => path.display().to_string(),
+            Self::Foreign => "$JAVA_HOME".to_string(),
+        }
+    }
 }
 
 /// The configured Java version, or `Ok(None)` when nothing is configured.

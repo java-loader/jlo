@@ -77,18 +77,19 @@ This allows automatic discovery of installed JDKs by IDEs like IntelliJ IDEA.
 
 1. [Environment Setup](#environment-setup)
 2. [Resolving JAVA_HOME](#resolving-java_home)
-3. [Executing a Command](#executing-a-command)
-4. [Initialization](#initialization)
-5. [Updating Java Versions](#updating-java-versions)
-6. [Listing Versions](#listing-versions)
-7. [Removing Versions](#removing-versions)
-8. [Pruning Superseded Versions](#pruning-superseded-versions)
-9. [Using a JDK J'Lo Did Not Install](#using-a-jdk-jlo-did-not-install)
-10. [Managing J’Lo Itself](#managing-jlo-itself)
-11. [Getting Help](#getting-help)
-12. [Supported Shells](#supported-shells)
-13. [Shell Completions](#shell-completions)
-14. [Environment Variables](#environment-variables)
+3. [Checking What Is Active](#checking-what-is-active)
+4. [Executing a Command](#executing-a-command)
+5. [Initialization](#initialization)
+6. [Updating Java Versions](#updating-java-versions)
+7. [Listing Versions](#listing-versions)
+8. [Removing Versions](#removing-versions)
+9. [Pruning Superseded Versions](#pruning-superseded-versions)
+10. [Using a JDK J'Lo Did Not Install](#using-a-jdk-jlo-did-not-install)
+11. [Managing J’Lo Itself](#managing-jlo-itself)
+12. [Getting Help](#getting-help)
+13. [Supported Shells](#supported-shells)
+14. [Shell Completions](#shell-completions)
+15. [Environment Variables](#environment-variables)
 
 ## Environment Setup
 
@@ -154,6 +155,39 @@ export JAVA_HOME="$(jlo home 25)"
 
 # is Java 21 available here? no download, no network, exit code is the answer
 jlo home --offline 21
+```
+
+## Checking What Is Active
+
+The command `jlo current` answers *which JDK is active in this shell, and why*. It starts from the live `JAVA_HOME`
+rather than from `.jlorc` — the two can legitimately disagree, and saying so is most of what the command is for.
+
+**Behavior:**
+- One line on standard output names the active version and where it came from; any advisory goes to standard error.
+- It exits with status 1 exactly when there is no answer to print: `JAVA_HOME` is unset, or it points at a J'Lo
+  install that has since been removed. So `if jlo current >/dev/null; then …` reads the way you would expect.
+- It never touches the network, so there is no `--offline` flag to pass, and it takes no version argument — *current*
+  means the active one. To ask where some other version lives, use [`jlo home`](#resolving-java_home).
+
+**What each line means:**
+
+| Output | Situation |
+| --- | --- |
+| `25.0.4+101  (from ./.jlorc)` | Active, and it is what that config file pins. |
+| `25.0.4+101  (active)`, plus a warning naming the pin | Active, but the config pins a different major. Run `jlo env` to switch. |
+| `25.0.4+101  (active, nothing pinned)` | Active, and no `.jlorc` or `default.jlorc` applies here. |
+| `/opt/jdk-21  ($JAVA_HOME, set outside jlo)` | `JAVA_HOME` points at a JDK J'Lo does not manage, so there is no version for J'Lo to vouch for — the path is the answer. |
+
+The third row is the one worth knowing about: a shell opened before you entered the project keeps the JDK it started
+with, and `jlo current` is how you find that out instead of wondering why a build picked the wrong compiler.
+
+**Usage examples:**
+```shell
+# what is active here, and why?
+jlo current
+
+# is *anything* active? exit code is the answer
+jlo current >/dev/null
 ```
 
 ## Executing a Command
