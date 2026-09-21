@@ -446,3 +446,121 @@ fn a_failure_to_write_the_required_entry_fails_the_install() {
         "install.sh announced success without writing jlo.sh: {stdout}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Completions: zsh autoloads, bash cannot
+// ---------------------------------------------------------------------------
+
+/// Sources the generated `completions.sh` in a zsh that has run `pre` first,
+/// then reports what the shell ended up with. `-f` on purpose: the developer's
+/// own dotfiles must not decide whether this passes.
+fn zsh_completion_state(home: &Path, pre: &str) -> Output {
+    let jlo = home.join(".jlo");
+    let script = format!(
+        "{pre}\n\
+         . {entry}\n\
+         _probe_dir={dir}\n\
+         print -r -- \"comps=[${{_comps[jlo]-}}]\"\n\
+         print -r -- \"whence=[$(whence -v _jlo 2>&1)]\"\n\
+         if (( $fpath[(Ie)$_probe_dir] )); then print -r -- 'fpath=[yes]'; \
+         else print -r -- 'fpath=[no]'; fi\n",
+        entry = squote(&jlo.join("completions.sh")),
+        dir = squote(&jlo.join("completions")),
+    );
+    Command::new("zsh")
+        .args(["-f", "-c", &script])
+        .env("HOME", home)
+        .env_remove("JLO_HOME")
+        .output()
+        .unwrap()
+}
+
+/// The point of generating `_jlo` into a directory of its own. Sourcing the
+/// 11 KB completion into every interactive zsh undoes the reason completions
+/// are generated at install time at all - the subprocess was avoided, the parse
+/// was not. `$fpath` plus `autoload` defers that parse to the first Tab press.
+#[test]
+fn zsh_completions_are_autoloaded_from_fpath_not_sourced() {
+    let (dir, _) = install(None);
+    let home = dir.path().join("home");
+    if skip_missing(
+        "zsh_completions_are_autoloaded_from_fpath_not_sourced",
+        "zsh",
+    ) {
+        return;
+    }
+    let out = zsh_completion_state(&home, "");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("fpath=[yes]"),
+        "the completion directory never reached $fpath: {stdout:?} stderr={:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        stdout.contains("comps=[_jlo]"),
+        "zsh does not know how to complete 'jlo': {stdout:?} stderr={:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // Still a stub, not a body: nothing has read the file yet.
+    assert!(
+        stdout.contains("whence=[_jlo is an autoload shell function"),
+        "_jlo was loaded eagerly instead of autoloaded: {stdout:?}"
+    );
+}
+
+/// The ordering trap. `compinit` scans `$fpath` once, so a user whose framework
+/// (oh-my-zsh and friends) ran it before the jlo line would otherwise get a
+/// completion directory nobody ever reads. The fallback registers after the
+/// fact - and has to `autoload` first, because `compdef _jlo jlo` alone records
+/// the mapping without making `_jlo` loadable and completion comes up empty.
+#[test]
+fn zsh_completions_survive_a_framework_that_ran_compinit_first() {
+    let (dir, _) = install(None);
+    let home = dir.path().join("home");
+    if skip_missing(
+        "zsh_completions_survive_a_framework_that_ran_compinit_first",
+        "zsh",
+    ) {
+        return;
+    }
+    let out = zsh_completion_state(
+        &home,
+        "autoload -Uz compinit && compinit -i -d \"${TMPDIR:-/tmp}/jlo-zcompdump.$$\"",
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("comps=[_jlo]"),
+        "a pre-existing compinit left 'jlo' with no completion: {stdout:?} \
+         stderr={:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        stdout.contains("whence=[_jlo is an autoload shell function"),
+        "_jlo is registered but not loadable - completion would be empty: {stdout:?}"
+    );
+}
+
+/// bash has no autoload: `complete -F` must name a function that exists at
+/// registration time, so its completion stays eager. Asserted rather than
+/// assumed, so the zsh change above cannot quietly take bash with it.
+#[test]
+fn bash_completions_stay_eager() {
+    let (dir, _) = install(None);
+    let home = dir.path().join("home");
+    let sh = "/bin/bash";
+    if skip_missing("bash_completions_stay_eager", sh) {
+        return;
+    }
+    let out = source_and_run(
+        sh,
+        &home,
+        &home.join(".jlo").join("completions.sh"),
+        "complete -p jlo",
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("-F _jlo jlo"),
+        "bash has no completion for 'jlo': {stdout:?} stderr={:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
