@@ -70,6 +70,7 @@ This allows automatic discovery of installed JDKs by IDEs like IntelliJ IDEA.
 7. [Managing J’Lo Itself](#managing-jlo-itself)
 8. [Getting Help](#getting-help)
 9. [Shell Completions](#shell-completions)
+10. [Environment Variables](#environment-variables)
 
 ## Environment Setup
 
@@ -321,6 +322,27 @@ completions without a file:
 ```shell
 source <(jlo completions bash)
 ```
+
+## Environment Variables
+
+### `JLO_HOME`
+
+Where J'Lo keeps **its own files** — it defaults to `~/.jlo` and holds:
+
+| Path                        | Contents                                              |
+|-----------------------------|-------------------------------------------------------|
+| `$JLO_HOME/bin/`            | the `jlo-bin` binary and the `jlo-*.sh` shell scripts |
+| `$JLO_HOME/completions/`    | the generated bash and zsh completion scripts         |
+| `$JLO_HOME/default.jlorc`   | the user-wide default Java version (`jlo init --global`) |
+
+The installer prints an `export JLO_HOME=...` line to add to your shell profile. If `JLO_HOME` is already set when you
+run the installer, it installs into that directory and leaves your existing export alone.
+
+> [!IMPORTANT]
+> `JLO_HOME` is **not** where the JDKs go, and it is **not** `JAVA_HOME`. Downloaded JDKs are installed to
+> `~/Library/Java/JavaVirtualMachines/` (macOS) or `~/.jdks/` (Linux, Windows) — the locations IntelliJ IDEA uses — and
+> that directory is not configurable. Pointing `JLO_HOME` elsewhere moves J'Lo's own config and scripts, not your JDKs.
+
 
 # CI / scripting / AI agents
 

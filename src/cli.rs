@@ -25,6 +25,13 @@ Examples:
   jlo exec 21 -- ./gradlew build   Run a build on Java 21
   jlo update --all                 Bring every installed JDK up to date
 
+Environment:
+  JLO_HOME   J'Lo's own directory (default ~/.jlo): the shell scripts,
+             the generated completions and default.jlorc. This is NOT
+             where JDKs are installed - those go to the IntelliJ IDEA
+             directory (~/Library/Java/JavaVirtualMachines on macOS,
+             ~/.jdks elsewhere), which is not configurable.
+
 Docs: https://github.com/java-loader/jlo";
 
 #[derive(Debug, Parser)]

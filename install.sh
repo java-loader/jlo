@@ -2,7 +2,16 @@
 
 set -eu
 
-JLO_HOME="$HOME/.jlo"
+# Honour a JLO_HOME the user has already exported (from an earlier install, or
+# just for this run) instead of installing somewhere they are not sourcing from.
+# Note: JLO_HOME holds J'Lo's own files, not the JDKs - those go to the IntelliJ
+# IDEA directory and are not configurable.
+if [ -n "${JLO_HOME-}" ]; then
+  JLO_HOME_PRESET=1
+else
+  JLO_HOME_PRESET=0
+  JLO_HOME="$HOME/.jlo"
+fi
 JLO_BIN_DIR="$JLO_HOME/bin"
 LOCAL_BIN_DIR="$HOME/.local/bin"
 JLO_BASE_URL="https://github.com/java-loader/jlo/releases/latest/download"
@@ -84,6 +93,14 @@ else
   echo "Warning: could not create '$JLO_COMPLETION_DIR'; shell completions are unavailable." >&2
 fi
 
+# An already-exported JLO_HOME is the user's own profile line; telling them to
+# add ours on top would either duplicate it or silently point elsewhere.
+if [ "$JLO_HOME_PRESET" = 1 ]; then
+  JLO_HOME_LINE="# JLO_HOME is already set to '$JLO_HOME' - keep your existing export."
+else
+  JLO_HOME_LINE="export JLO_HOME=\"\$HOME/.jlo\""
+fi
+
 cat <<EOF
 Successfully installed J'Lo to $JLO_HOME.
 
@@ -91,7 +108,7 @@ Successfully installed J'Lo to $JLO_HOME.
 
 Add the following lines to the end of your shell profile file (e.g., ~/.bashrc, ~/.zshrc):
 
-export JLO_HOME="\$HOME/.jlo"
+$JLO_HOME_LINE
 [[ -s "\$JLO_HOME/bin/jlo-init.sh" ]] && source "\$JLO_HOME/bin/jlo-init.sh"
 [[ -s "\$JLO_HOME/bin/jlo-autoload.sh" ]] && source "\$JLO_HOME/bin/jlo-autoload.sh"
 
