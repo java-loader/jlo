@@ -490,3 +490,29 @@ fn selfupdate_help_is_printed_not_evaluated() {
         );
     }
 }
+
+/// A profile may well run under `set -u`, and `jlo` with no arguments is the
+/// ordinary way to ask for help. `case "$1"` aborted the shell there on an
+/// unbound parameter before the binary was reached - the same failure
+/// `tests/autoload.rs` already pins for the other file, and one the Rust
+/// compiler never sees.
+#[test]
+fn a_bare_jlo_survives_set_u() {
+    for sh in INTERPRETERS {
+        if skip_missing("a_bare_jlo_survives_set_u", sh) {
+            continue;
+        }
+        let home = jlo_home_with_stub("echo reached-the-binary");
+        let out = run_in(sh, home.path(), "set -u\njlo");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stdout.contains("reached-the-binary"),
+            "{sh}: the wrapper never reached the binary: {stdout:?} / {stderr:?}"
+        );
+        assert!(
+            !stderr.contains("unbound") && !stderr.contains("parameter not set"),
+            "{sh}: set -u aborted the wrapper: {stderr:?}"
+        );
+    }
+}

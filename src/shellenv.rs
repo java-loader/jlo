@@ -39,6 +39,16 @@ pub(crate) fn update_path(
     current_path: &str,
     jdk_base: &Path,
 ) -> anyhow::Result<Option<String>> {
+    // An empty `PATH` is the JDK's `bin` and nothing else, the same answer
+    // `child_path` gives. Going through `split_paths` instead would produce
+    // `<jdk>/bin:`, because the empty string splits into one empty entry - and
+    // an empty `PATH` entry means the working directory, so the shell would
+    // search whatever the user happened to have cd'd into. `env -i` in a CI
+    // step is the ordinary way to arrive here.
+    if current_path.is_empty() {
+        return Ok(Some(java_path.to_string()));
+    }
+
     // Remove JDK bin entries from earlier runs to avoid duplicates
     let mut path_vector: Vec<_> = env::split_paths(current_path)
         .filter(|p| !p.starts_with(jdk_base))
@@ -177,8 +187,11 @@ pub(crate) fn exec_command(java_home: &Path, command: &[String]) -> ! {
         .expect("command is non-empty (checked in parse_exec_args)");
 
     let java_bin = java_home.join("bin");
-    let new_path = current_path()
-        .and_then(|current| child_path(&java_bin.to_string_lossy(), &current))
+    let new_path = java_bin
+        .to_str()
+        .with_context(|| format!("path is not valid UTF-8: {}", java_bin.display()))
+        .and_then(|bin| current_path().map(|current| (bin, current)))
+        .and_then(|(bin, current)| child_path(bin, &current))
         .unwrap_or_else(|e| {
             ui::error!("{e:#}");
             exit(1);
@@ -428,11 +441,30 @@ mod tests {
         );
     }
 
+    /// An empty `PATH` must not become `<jdk>/bin:`. The trailing separator
+    /// leaves an empty entry, and an empty `PATH` entry is the working
+    /// directory - so the shell would search whatever directory the user is
+    /// standing in, ahead of nothing at all. The assertion here used to spell
+    /// out the wrong answer.
     #[test]
     fn update_path_handles_empty_path() {
         let jdk_base = Path::new("/home/u/.jdks");
         let result = update_path("/home/u/.jdks/21.0.12/bin", "", jdk_base).unwrap();
-        assert_eq!(result.unwrap(), "/home/u/.jdks/21.0.12/bin:");
+        assert_eq!(result.unwrap(), "/home/u/.jdks/21.0.12/bin");
+    }
+
+    /// `update_path` and `child_path` are the two halves of one rule - what
+    /// `PATH` the JDK goes on the front of - and they answered an empty one
+    /// differently, which is how the trailing separator survived review.
+    #[test]
+    fn update_path_and_child_path_agree_on_an_empty_path() {
+        let jdk_base = Path::new("/home/u/.jdks");
+        assert_eq!(
+            update_path("/home/u/.jdks/21.0.12/bin", "", jdk_base)
+                .unwrap()
+                .unwrap(),
+            child_path("/home/u/.jdks/21.0.12/bin", "").unwrap()
+        );
     }
 
     #[test]

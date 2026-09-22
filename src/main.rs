@@ -200,7 +200,9 @@ fn cmd_home(
     } else {
         resolve_java_home(client, &store, &java_version)?
     };
-    println!("{}", java_home.to_string_lossy());
+    // The bare path on stdout, for `$(jlo home 21)`. Lossy would hand the
+    // caller a path that does not exist; see `path_str`.
+    println!("{}", path_str(&java_home)?);
     Ok(())
 }
 
@@ -325,33 +327,37 @@ fn cmd_current() -> Result<(), CommandError> {
     };
 
     let store = JdkStore::discover()?;
+
+    // Asked before the listing, because the listing cannot answer it. A
+    // `$JAVA_HOME` inside the store that is simply *gone* is what `jlo
+    // remove` on the live JDK leaves behind, and reporting that as a JDK set
+    // outside jlo would be wrong - the install was ours.
+    //
+    // Existence is the whole of the test, and it has to be asked of
+    // `$JAVA_HOME` itself rather than inferred from the listing, for two
+    // reasons that pull in opposite directions. A directory the listing
+    // cannot name may be perfectly present: a vendor-named entry
+    // (`temurin-21.0.1`), which is what the IDE's own downloads land as,
+    // shares the store by design and is deliberately unlistable - `jlo list
+    // --offline` calls it foreign, and this has to agree. And a version the
+    // listing *can* name may be gone: on macOS `$JAVA_HOME` is the bundle's
+    // `Contents/Home`, and `owns` matches that spelling without asking the
+    // filesystem anything - deliberately, since it is also the guard that
+    // refuses to delete the live JDK and must not be switchable off by a
+    // directory that cannot be stat'd.
+    if is_inside(store.base(), &java_home) && !java_home.exists() {
+        return Err(CommandError::with_hint(
+            anyhow!(
+                "$JAVA_HOME points at a jlo install that is no longer there ({}).",
+                java_home.display()
+            ),
+            ui::NO_ACTIVE_JDK_HINT,
+        ));
+    }
+
     let installed = store.list().context("could not list installed JDKs")?;
 
     let Some(version) = store.active_version(&installed, Some(&java_home)) else {
-        // Inside the store but not among the installs it can list, *and*
-        // gone: the directory went away under a shell that is still pointing
-        // at it, which is what 'jlo remove' on the live JDK leaves behind.
-        // Reporting that as a JDK set outside jlo would be wrong - the
-        // install was ours.
-        //
-        // The existence check is the whole of what separates that from the
-        // other way to be unlistable while inside the store: a vendor-named
-        // directory (`temurin-21.0.1`), which is what IntelliJ's own
-        // downloads land as. Those share the store by design and are
-        // deliberately invisible to the listing, so without this check a JDK
-        // that is sitting right there would be reported as missing - and
-        // `jlo list --offline`, which asks the same question, already calls
-        // it foreign.
-        if is_inside(store.base(), &java_home) && !java_home.exists() {
-            return Err(CommandError::with_hint(
-                anyhow!(
-                    "$JAVA_HOME points at a jlo install that is no longer there ({}).",
-                    java_home.display()
-                ),
-                ui::NO_ACTIVE_JDK_HINT,
-            ));
-        }
-
         // A JDK jlo does not manage. No config is consulted: whatever is
         // pinned, jlo is not what put this here, and the path says that
         // completely.
@@ -471,6 +477,17 @@ fn cmd_remove(versions: &[String], superseded: bool) -> Result<(), CommandError>
         .into());
     }
     Ok(())
+}
+
+/// A path as a `&str`, or an error naming it.
+///
+/// Every path jlo hands out - on stdout, into an `export`, or to `execvp` -
+/// goes through here rather than through `to_string_lossy`, which silently
+/// replaces undecodable bytes and so answers with a path that does not exist.
+/// There is no useful thing jlo can do with a JDK it cannot name.
+fn path_str(path: &Path) -> anyhow::Result<&str> {
+    path.to_str()
+        .with_context(|| format!("path is not valid UTF-8: {}", path.display()))
 }
 
 /// The directory `$JAVA_HOME` currently points at, if the variable is set to
@@ -594,14 +611,18 @@ fn setup(
     let mut exports = Vec::new();
 
     let current_java_home = env::var("JAVA_HOME").unwrap_or_default();
-    if current_java_home != java_home.to_string_lossy() {
-        exports.push(format!(
-            "export JAVA_HOME={}",
-            shell_quote(&java_home.to_string_lossy())
-        ));
+    // `to_string_lossy` is the wrong shape on this path for the same reason
+    // `unwrap_or_default` was wrong for `PATH`: it substitutes U+FFFD for
+    // bytes it cannot decode and hands back a path that does not exist, and
+    // the caller then exports it as `JAVA_HOME`. An undecodable install
+    // directory is unusable, so say so rather than exporting a near miss.
+    let java_home_str = path_str(&java_home)?;
+    if current_java_home != java_home_str {
+        exports.push(format!("export JAVA_HOME={}", shell_quote(java_home_str)));
     }
 
-    let java_bin_path = java_home.join("bin").to_string_lossy().into_owned();
+    let java_bin = java_home.join("bin");
+    let java_bin_path = path_str(&java_bin)?.to_string();
     let current_path = shellenv::current_path()?;
     if let Some(updated_path) = update_path(&java_bin_path, &current_path, store.base())? {
         exports.push(format!("export PATH={}", shell_quote(&updated_path)));
@@ -619,10 +640,29 @@ fn setup(
 /// and CI invoking `jlo-bin` directly do not, and those two must resolve the
 /// same file.
 pub(crate) fn jlo_home_dir() -> anyhow::Result<PathBuf> {
+    // An empty `JLO_HOME` is treated as unset, as `$JAVA_HOME` is: an
+    // exported-but-empty variable is how a shell spells "I did not set this",
+    // and taking it literally roots the whole layout at `/`.
     let path = env::var_os("JLO_HOME")
+        .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .or_else(|| env::home_dir().map(|home| home.join(JLO_HOME_DIR_NAME)))
         .context("could not determine home directory.")?;
+
+    // A relative `JLO_HOME` does not name one directory, it names a different
+    // one from every working directory - and the installed layout is full of
+    // paths that outlive the process that wrote them: the `~/.local/bin/jlo`
+    // symlink target, which a relative path resolves against the *link's*
+    // directory, and the generated stubs, which the user sources from
+    // wherever they happen to be. Refuse it rather than write an install that
+    // works only from the directory it was made in.
+    if !path.is_absolute() {
+        return Err(anyhow!(
+            "JLO_HOME must be an absolute path, but is '{}'",
+            path.display()
+        ));
+    }
+
     Ok(path)
 }
 

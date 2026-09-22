@@ -45,20 +45,34 @@ fn code_lines(source: &str) -> impl Iterator<Item = (usize, &str)> {
 /// to cover the path it sits on.
 #[test]
 fn stdout_is_written_only_by_the_one_machine_output_path() {
+    // The call site is identified by what it is, not by where it sits: a
+    // line number in the expected list makes an unrelated comment two
+    // functions above it fail this test, which teaches the next person to
+    // edit the expectation rather than to read it. The line is still
+    // reported, because a violation is much easier to find with one.
+    const ALLOWED: &str = "println!(\"{}\", path_str(&java_home)?);";
+
     let mut found = Vec::new();
     for (name, source) in sources() {
         for (line, code) in code_lines(&source) {
             if writes_to_stdout(code) {
-                found.push(format!("src/{name}:{line}: {}", code.trim()));
+                found.push((format!("src/{name}:{line}"), code.trim().to_string()));
             }
         }
     }
 
-    assert_eq!(
-        found,
-        ["src/main.rs:203: println!(\"{}\", java_home.to_string_lossy());"],
+    let unexpected: Vec<&(String, String)> =
+        found.iter().filter(|(_, code)| code != ALLOWED).collect();
+
+    assert!(
+        unexpected.is_empty(),
         "unexpected write to stdout - every user-facing message is an eprintln!, \
-         and listing rows go through ui::print_lines (ADR-0001)"
+         and listing rows go through ui::print_lines: {unexpected:?}"
+    );
+    assert_eq!(
+        found.len(),
+        1,
+        "the one allowed stdout writer is `jlo home`'s bare path; found {found:?}"
     );
 }
 

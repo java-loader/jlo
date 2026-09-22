@@ -506,7 +506,7 @@ pub(crate) fn remove_report(report: &crate::store::RemoveReport) {
     // on - not something buried among the notes above it.
     if let Some(version) = &report.skipped_in_use {
         warning!("left {version} alone: JAVA_HOME points at it");
-        hint!("  Switch the shell to another JDK first, e.g. 'jlo env 21', then remove it.");
+        hint!("Switch the shell to another JDK first, e.g. 'jlo env 21', then remove it.");
     }
 }
 

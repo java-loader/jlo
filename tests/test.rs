@@ -1735,6 +1735,55 @@ fn update_leaves_a_major_already_on_its_latest_build_alone() {
 }
 
 /// Naming a major removes every build of it, and says which ones went.
+/// A deletion that could not be made must not exit 0. Both selectors printed
+/// each failure and then a green tick over it - `Removed 0 JDKs` for a named
+/// target, and for `--superseded` the flatly false `Nothing to remove (only
+/// the newest of each major is installed)` about a store still holding every
+/// one of them. A script chaining `jlo remove 21 && ...` reads the status, not
+/// the lines.
+///
+/// The failure is made by taking write permission off the store directory,
+/// which is what an install under a root-owned or read-only prefix looks
+/// like; the permissions go back so the temp directory can be cleaned up.
+#[test]
+fn remove_reports_a_failed_deletion_as_a_failure() {
+    for args in [vec!["remove", "21"], vec!["remove", "--superseded"]] {
+        let home = tempfile::tempdir().unwrap();
+        install_fake_jdk(home.path(), "21.0.11+10");
+        install_fake_jdk(home.path(), "21.0.9+10");
+
+        let store = jdk_store_in(home.path());
+        let restore = std::fs::metadata(&store).unwrap().permissions();
+        let mut readonly = restore.clone();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut readonly, 0o555);
+        std::fs::set_permissions(&store, readonly).unwrap();
+
+        let assertion = Command::cargo_bin("jlo-bin")
+            .unwrap()
+            .args(&args)
+            .env("HOME", home.path())
+            .env("JLO_ADOPTIUM_API_URL", "http://127.0.0.1:1")
+            .env_remove("JAVA_HOME")
+            .assert()
+            .failure()
+            .code(1)
+            .stdout(predicate::str::is_empty())
+            .stderr(predicate::str::contains("could not be removed"));
+
+        // The tick is reserved for a run that did what it was asked, so
+        // neither of the two success lines may appear over a failure.
+        assertion
+            .stderr(predicate::str::contains("Removed").not())
+            .stderr(predicate::str::contains("Nothing to remove").not());
+
+        std::fs::set_permissions(&store, restore).unwrap();
+        assert!(
+            store.join("21.0.9+10").exists(),
+            "{args:?}: nothing was actually deleted"
+        );
+    }
+}
+
 #[test]
 fn remove_deletes_every_build_of_the_major_named() {
     let home = tempfile::tempdir().unwrap();

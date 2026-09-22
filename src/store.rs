@@ -9,7 +9,6 @@ use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs::File;
 use std::path::{Path, PathBuf};
-use tempfile::tempdir;
 
 /// The ownership marker jlo *used* to write, inside the JDK directory.
 ///
@@ -753,8 +752,7 @@ fn install_jdk_inner(
     jdk_metadata: &JdkMetadata,
     ui: &InstallUi,
 ) -> anyhow::Result<PathBuf> {
-    // Download JDK
-    let temp_dir = tempdir().context("could not create temporary directory")?;
+    let temp_dir = staging_dir(store)?;
     let temp_file = temp_dir.path().join(&jdk_metadata.package_name);
     let file = &mut File::create(&temp_file).context("could not create temporary file")?;
     client.download(jdk_metadata, file, ui)?;
@@ -769,6 +767,27 @@ fn install_jdk_inner(
     });
 
     Ok(dest_dir)
+}
+
+/// Where an install is downloaded and unpacked: inside the store, not in
+/// `$TMPDIR`.
+///
+/// The last step of an install is a `rename` into the store, and `rename` is
+/// only atomic - only *possible* - within one filesystem. `$TMPDIR` is a
+/// different one routinely: every distribution that mounts `/tmp` as tmpfs
+/// (Fedora, Arch, Debian 13) turns every install into an `EXDEV` failure
+/// raised after the whole archive has been downloaded and unpacked.
+/// `install.rs::write_atomic` stages beside its target for exactly this
+/// reason; the store had never been given the same treatment.
+///
+/// A sibling of the installs, and one `scan` passes over: its name does not
+/// parse as a version, so an interrupted install leaves a `.tmpXXXXXX` the
+/// listing and both `remove` selectors ignore, rather than a half-moved JDK.
+fn staging_dir(store: &JdkStore) -> anyhow::Result<tempfile::TempDir> {
+    std::fs::create_dir_all(store.base())
+        .with_context(|| format!("could not create {}", store.base().display()))?;
+    tempfile::tempdir_in(store.base())
+        .context("could not create a staging directory in the JDK install directory")
 }
 
 /// JDK install location, matching `IntelliJ` IDEA's layout so both tools see the
@@ -1535,6 +1554,42 @@ mod tests {
         let missing = dir.path().join("never-installed");
 
         assert_eq!(JdkStore::at(&missing).superseded_count().unwrap(), 0);
+    }
+
+    /// The staging directory has to be a sibling of the installs: the install
+    /// ends in a `rename` into the store, and a `rename` out of `$TMPDIR`
+    /// fails with EXDEV wherever `/tmp` is a separate filesystem - which is
+    /// the default on Fedora, Arch and Debian 13. The failure arrives after
+    /// the download, so it costs the user the whole archive.
+    #[test]
+    fn installs_are_staged_inside_the_store_not_in_tmpdir() {
+        let dir = tempdir().unwrap();
+        let base = dir.path().join("never-created-yet");
+        let store = JdkStore::at(&base);
+
+        let staging = staging_dir(&store).expect("the store directory is created if missing");
+
+        assert_eq!(staging.path().parent(), Some(base.as_path()));
+    }
+
+    /// ...and the listing must pass over it, or an interrupted install would
+    /// show up as a JDK.
+    #[test]
+    fn a_staging_directory_is_not_mistaken_for_an_install() {
+        let dir = tempdir().unwrap();
+        let store = JdkStore::at(dir.path());
+        create_jdk_dir(dir.path(), "21.0.3+9", true);
+
+        let staging = staging_dir(&store).unwrap();
+
+        let listed: Vec<String> = store
+            .list()
+            .unwrap()
+            .into_iter()
+            .map(|j| j.version)
+            .collect();
+        assert_eq!(listed, ["21.0.3+9"]);
+        assert!(staging.path().exists(), "the staging directory is real");
     }
 
     // -- prune --

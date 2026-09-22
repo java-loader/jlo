@@ -6,7 +6,11 @@
 jlo() {
   local J arg out
   J="${JLO_HOME-}/bin/jlo-bin"
-  case "$1" in
+  # "${1-}", not "$1": a bare `jlo` under a profile running `set -u` would
+  # otherwise abort the shell on an unbound parameter before the binary is
+  # ever reached - the same rule the autoload hook already follows for
+  # $_JLO_LAST_DIR.
+  case "${1-}" in
     env|use|selfupdate)
       # The branch below *evaluates* stdout, so help and version output - which
       # clap prints to stdout - must never reach it. Scoped to these three verbs

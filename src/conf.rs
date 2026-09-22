@@ -79,13 +79,52 @@ impl Source {
 /// the cascade in `resolve` takes over: the newest installed JDK, then the latest
 /// release. This is stages 1 and 2 of that cascade and nothing more.
 pub(crate) fn find() -> anyhow::Result<Option<Resolved>> {
-    let cwd = std::env::current_dir()
+    let physical = std::env::current_dir()
         .map_err(|e| anyhow!("could not determine the current directory: {e}"))?;
     find_in(
-        &cwd,
+        &logical_cwd(std::env::var_os("PWD").map(PathBuf::from), physical),
         std::env::home_dir().as_deref(),
         &default_jlorc_path()?,
     )
+}
+
+/// The directory to start the walk from: the one the user believes they are
+/// in, not the one `getcwd` reports.
+///
+/// The two differ whenever a symlinked directory was cd'd into, and the
+/// difference is not cosmetic here - it decides which `.jlorc` applies. The
+/// autoload hook walks up from `$PWD`, because that is all a shell has, so a
+/// binary walking up from `getcwd` answers a different question than the hook
+/// that called it: the hook finds `work/.jlorc` under `work/app -> ../elsewhere/app`,
+/// fires `jlo env --offline`, and the binary - standing in `elsewhere/app` -
+/// sees no project config and resolves the user default instead. A JDK the
+/// project did not ask for, exported without a word.
+///
+/// The walk itself is already pinned in both implementations; this is the
+/// other half of the same agreement, and the reason the two halves are needed
+/// is that neither side can cheaply learn the other's answer.
+///
+/// `$PWD` is inherited from an environment jlo does not control, so it is
+/// believed only when it names the directory the process is actually in:
+/// absolute, and canonicalizing to the same place. Anything else - a stale
+/// value, a relative one, a deliberately misleading one - falls back to
+/// `getcwd`, which cannot be wrong. This is what `pwd -L`, direnv and cargo
+/// all do.
+fn logical_cwd(pwd: Option<PathBuf>, physical: PathBuf) -> PathBuf {
+    let Some(pwd) = pwd.filter(|p| p.is_absolute()) else {
+        return physical;
+    };
+
+    let names_the_same_directory = std::fs::canonicalize(&pwd)
+        .ok()
+        .zip(std::fs::canonicalize(&physical).ok())
+        .is_some_and(|(a, b)| a == b);
+
+    if names_the_same_directory {
+        pwd
+    } else {
+        physical
+    }
 }
 
 /// The error reported when the whole cascade runs dry.
@@ -553,6 +592,56 @@ mod tests {
         assert_eq!(
             find_project_config(&project, Some(&home)),
             Some(home.join(".jlorc"))
+        );
+    }
+
+    // -- logical_cwd --
+    //
+    // The shell hook walks up from `$PWD`; this decides that the binary walks
+    // up from the same place. Both halves of one rule, and the Rust compiler
+    // sees neither of them.
+
+    /// The bug this exists for: `work/app -> ../elsewhere/app`. The hook finds
+    /// `work/.jlorc` and calls `jlo env --offline`; without this the binary
+    /// stands in `elsewhere/app`, sees no project config, and exports whatever
+    /// the user default says.
+    #[test]
+    fn logical_cwd_keeps_the_symlinked_path_the_shell_is_standing_in() {
+        let root = canon(tempdir().unwrap().path());
+        let real = root.join("elsewhere").join("app");
+        fs::create_dir_all(&real).unwrap();
+        fs::create_dir_all(root.join("work")).unwrap();
+        let link = root.join("work").join("app");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        assert_eq!(logical_cwd(Some(link.clone()), real), link);
+    }
+
+    /// A `$PWD` naming some other directory is not believed, however
+    /// plausible: it is inherited from an environment jlo does not control,
+    /// and `getcwd` cannot be wrong about where the process is.
+    #[test]
+    fn logical_cwd_refuses_a_pwd_that_names_a_different_directory() {
+        let root = canon(tempdir().unwrap().path());
+        let here = root.join("here");
+        let there = root.join("there");
+        fs::create_dir_all(&here).unwrap();
+        fs::create_dir_all(&there).unwrap();
+
+        assert_eq!(logical_cwd(Some(there), here.clone()), here);
+    }
+
+    /// Unset, relative, or naming nothing at all - each falls back rather than
+    /// failing, because `getcwd` is always available and always correct.
+    #[test]
+    fn logical_cwd_falls_back_when_pwd_is_unusable() {
+        let here = canon(tempdir().unwrap().path());
+
+        assert_eq!(logical_cwd(None, here.clone()), here);
+        assert_eq!(logical_cwd(Some(PathBuf::from("app")), here.clone()), here);
+        assert_eq!(
+            logical_cwd(Some(here.join("gone")), here.clone()),
+            here.clone()
         );
     }
 
