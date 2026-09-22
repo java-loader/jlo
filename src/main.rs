@@ -327,12 +327,35 @@ fn offline_java_home(
     java_version: &str,
     command: &str,
 ) -> Result<PathBuf, CommandError> {
-    store.find_matching(java_version).ok_or_else(|| {
+    let java_home = store.find_matching(java_version).ok_or_else(|| {
         CommandError::with_hint(
             anyhow!("no installed JDK matches Java {java_version}"),
             format!("Run 'jlo {command} {java_version}' without --offline to install it."),
         )
-    })
+    })?;
+
+    // `env --offline` is how the autoload hook runs, on every new shell and
+    // every `cd`, and ADR-0001 keeps that path silent - a line here would
+    // print forever. `home --offline` is a person asking a question and gets
+    // the warning. This is the only thing that tells the two apart, which is
+    // why `command` is threaded down here at all.
+    if command != "env" {
+        warn_legacy_layout(store, &java_home);
+    }
+
+    Ok(java_home)
+}
+
+/// Say so when the JDK just resolved is one `/usr/libexec/java_home` cannot
+/// see, which is every macOS install made before jlo kept the bundle.
+///
+/// At the two resolution funnels rather than in each command, so a verb added
+/// later cannot forget it. Only ever a warning: the install works, and the fix
+/// costs a download, so it is the user's to make.
+fn warn_legacy_layout(store: &JdkStore, java_home: &Path) {
+    if let Some((version, major)) = store.legacy_layout(java_home) {
+        ui::legacy_layout(&version, major);
+    }
 }
 
 /// Diverges on success: `run_exec` replaces the process image. The `Result` is
@@ -949,6 +972,7 @@ fn resolve_java_home(
     java_version: &str,
 ) -> anyhow::Result<PathBuf> {
     if let Some(path) = store.find_matching(java_version) {
+        warn_legacy_layout(store, &path);
         Ok(path)
     } else {
         let metadata = client.fetch_metadata(java_version)?;

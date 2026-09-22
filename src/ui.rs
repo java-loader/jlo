@@ -201,6 +201,20 @@ pub(crate) fn print_hint(args: std::fmt::Arguments) {
     eprintln!("{}", style(args.to_string()).dim().for_stderr());
 }
 
+/// The one thing a pre-bundle macOS install is missing, and how to fix it.
+///
+/// Two lines rather than one because they are different kinds of statement:
+/// the warning is what is wrong, the hint is what to type. `major` drives the
+/// reinstall command because `jlo install` takes a major - the exact build may
+/// no longer be offered, which is also why this asks rather than migrating
+/// anything by itself.
+pub(crate) fn legacy_layout(version: &str, major: i64) {
+    warning!(
+        "{version} predates J'Lo's macOS bundle layout, so '/usr/libexec/java_home' cannot see it."
+    );
+    hint!("Reinstall it to fix that: 'jlo remove {version}' then 'jlo install {major}'.");
+}
+
 pub(crate) fn print_created(args: std::fmt::Arguments) {
     eprintln!("{} {args}", style("✓").green().for_stderr());
 }

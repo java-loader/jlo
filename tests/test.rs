@@ -1384,6 +1384,83 @@ fn env_writes_exports_to_stdout_and_nothing_to_stderr() {
         .stderr(predicate::str::is_empty());
 }
 
+// -- the pre-bundle macOS layout --
+//
+// `store_fixture` builds a flat install carrying the in-directory marker,
+// which is exactly what jlo wrote before it kept the macOS bundle. Both tests
+// pass the same fixture and the same `--offline`, and differ only in the verb:
+// that is the whole of the rule, so they are worth having as a pair.
+
+/// A person asking where a JDK is gets told when that JDK is one
+/// `/usr/libexec/java_home` cannot see. On stderr, so `JH=$(jlo home 25)`
+/// still gets only the path.
+#[test]
+#[serial]
+#[cfg(target_os = "macos")]
+fn home_warns_that_a_pre_bundle_install_is_invisible_to_java_home() {
+    let (home, project) = current_fixture("25.0.4+101");
+
+    Command::cargo_bin("jlo-bin")
+        .unwrap()
+        .args(["home", "--offline", "25"])
+        .current_dir(&project)
+        .env("HOME", home.path())
+        .env("JLO_HOME", home.path().join(".jlo"))
+        .env("JLO_ADOPTIUM_API_URL", "http://127.0.0.1:1")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("25.0.4+101"))
+        .stderr(predicate::str::contains("java_home"))
+        .stderr(predicate::str::contains("jlo install 25"));
+}
+
+/// The other funnel. `home` without `--offline` resolves through
+/// `resolve_java_home`, and an installed JDK is answered before the client is
+/// ever used - which is why a dead API URL is enough here. Without this the
+/// online path could lose the warning with every test still green.
+#[test]
+#[serial]
+#[cfg(target_os = "macos")]
+fn the_online_funnel_warns_about_a_pre_bundle_install_too() {
+    let (home, project) = current_fixture("25.0.4+101");
+
+    Command::cargo_bin("jlo-bin")
+        .unwrap()
+        .args(["home", "25"])
+        .current_dir(&project)
+        .env("HOME", home.path())
+        .env("JLO_HOME", home.path().join(".jlo"))
+        .env("JLO_ADOPTIUM_API_URL", "http://127.0.0.1:1")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("25.0.4+101"))
+        .stderr(predicate::str::contains("java_home"));
+}
+
+/// The same install, the same flag, the other verb - and silence. `env
+/// --offline` is how the autoload hook runs, on every new shell and every
+/// `cd`; a warning there would print forever and train the user to ignore it.
+#[test]
+#[serial]
+#[cfg(target_os = "macos")]
+fn env_offline_stays_silent_about_a_pre_bundle_install() {
+    let (home, project) = current_fixture("25.0.4+101");
+
+    Command::cargo_bin("jlo-bin")
+        .unwrap()
+        .args(["env", "--offline", "25"])
+        .current_dir(&project)
+        .env("HOME", home.path())
+        .env("JLO_HOME", home.path().join(".jlo"))
+        .env_remove("JAVA_HOME")
+        .env("PATH", "/usr/bin")
+        .env("JLO_ADOPTIUM_API_URL", "http://127.0.0.1:1")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("export JAVA_HOME="))
+        .stderr(predicate::str::is_empty());
+}
+
 /// The flag is gone from `env` as well as from `home`, and gone means a usage
 /// error rather than a silently accepted no-op.
 #[test]

@@ -124,7 +124,7 @@ JDK — the `bin`, `lib` and `release` entries. On macOS it may instead be a **J
 `Contents/Home`; J'Lo takes either, and moving the bundle rather than its `Contents/Home` is the better of the two,
 because that is the shape `/usr/libexec/java_home` can see.
 
-Such a JDK is **unmanaged**: it carries no `.jlo-managed` marker, so
+Such a JDK is **unmanaged**: J'Lo wrote no `.jlo-managed` marker beside it, so
 
 - `jlo list --offline` shows it, with `unmanaged` as its status word;
 - `jlo remove` will not delete it, under either selector — remove it by hand when you are done with it;
