@@ -3,6 +3,7 @@ mod cli;
 mod conf;
 mod extract;
 mod install;
+mod request;
 mod resolve;
 mod selfupdate;
 mod shellenv;
@@ -711,7 +712,7 @@ mod tests {
             .expect_err("'nope' is not a major version");
         assert_eq!(
             format!("{:#}", err.error),
-            "unsupported version 'nope': only major versions 8, 11, ... are supported"
+            "unsupported version 'nope': expected a major version (8, 11, 21) or a pre-release stream ('28-ea')"
         );
         assert!(err.hint.is_none(), "{:?}", err.hint);
     }
@@ -725,7 +726,7 @@ mod tests {
             .expect_err("'nope' is not a major version");
         assert_eq!(
             format!("{:#}", err.error),
-            "unsupported version 'nope': only major versions 8, 11, ... are supported"
+            "unsupported version 'nope': expected a major version (8, 11, 21) or a pre-release stream ('28-ea')"
         );
         assert!(err.hint.is_none(), "{:?}", err.hint);
     }

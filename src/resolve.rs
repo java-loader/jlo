@@ -215,9 +215,7 @@ pub(crate) fn assert_java_version(java_version: &str) -> anyhow::Result<()> {
     if conf::is_valid_version(java_version) {
         Ok(())
     } else {
-        Err(anyhow!(
-            "unsupported version '{java_version}': only major versions 8, 11, ... are supported"
-        ))
+        Err(anyhow!(crate::request::Request::rejection(java_version)))
     }
 }
 

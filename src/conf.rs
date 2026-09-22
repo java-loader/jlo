@@ -244,14 +244,10 @@ fn load(path: &Path) -> Result<String, std::io::Error> {
         })?
         .to_string();
 
-    if !is_valid_version(&java_version) {
+    if let Err(e) = crate::request::Request::parse(&java_version) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            format!(
-                "unsupported version '{}' in '{}': only major versions 8, 11, ... are supported",
-                java_version,
-                path.display()
-            ),
+            format!("{e} (in '{}')", path.display()),
         ));
     }
 
@@ -314,12 +310,13 @@ fn init_config(path: &Path, latest_release: &str, force: bool) -> anyhow::Result
     Ok(())
 }
 
+/// Whether `version` is a version J'Lo can address.
+///
+/// One question, one answer: the grammar itself lives in
+/// [`crate::request::Request::parse`], and this is the boolean form the
+/// callers that only need a yes/no still want.
 pub(crate) fn is_valid_version(version: &str) -> bool {
-    if let Ok(ver) = version.parse::<u32>() {
-        ver >= 8
-    } else {
-        false
-    }
+    crate::request::Request::parse(version).is_ok()
 }
 
 #[cfg(test)]
@@ -388,11 +385,10 @@ mod tests {
         fs::write(&file, "7\n").unwrap();
         let err = load(&file).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
-        // Same wording as `assert_java_version` in main.rs: whichever path
-        // rejects the version, the user is told what would be accepted.
+        // Same wording as `Request::rejection`: whichever path rejects the
+        // version, the user is told what would be accepted.
         assert!(
-            err.to_string()
-                .contains("only major versions 8, 11, ... are supported"),
+            err.to_string().contains("expected a major version"),
             "{err}"
         );
     }
