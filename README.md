@@ -104,6 +104,15 @@ Three things are worth knowing before you read any of that:
   and fails if that is nothing. Downloading a JDK and asking whether one is here are otherwise the same command,
   which is no use in a CI step with a short timeout or a network-isolated sandbox.
 
+## How Downloads Are Verified
+
+Every JDK J'Lo downloads is streamed through SHA-256 as it arrives, and the digest is compared against the checksum
+Adoptium publishes for that package. A mismatch, or a package Adoptium lists without a checksum at all, aborts the
+install before anything is unpacked. The checksum comes from Adoptium's own API over TLS — not from a mirror and not
+from a third-party broker. J'Lo does not verify Adoptium's GPG signature, so an attacker who controls or intercepts
+the Adoptium API could serve a substituted binary with a matching checksum; that is outside what J'Lo protects
+against.
+
 ## Using a JDK J'Lo Did Not Install
 
 J'Lo has no command that takes a path, but it does not need one: it finds every JDK in its install directory, whether
