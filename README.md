@@ -87,7 +87,7 @@ of them; `-h` gives the short form of either.
 | `jlo current` | Say which JDK is active in this shell, and why. |
 | `jlo list` | Show what Adoptium offers and what is installed. `jlo ls` is an alias. |
 | `jlo install [VERSION...]` | Download a major version without changing any shell. |
-| `jlo update [VERSION...]` | Bring installed JDKs up to their latest minor release. `--all` for every one. |
+| `jlo update [VERSION...]` | Bring installed JDKs up to their latest minor release. `--all` for every installed release; a pre-release only moves when named. |
 | `jlo remove <VERSION...>` | Delete installed JDKs by name, or `--superseded` to delete them by rule. |
 | `jlo init [VERSION]` | Write a `.jlorc` pinning this project's version. `--global` for the user-wide default. |
 | `jlo selfupdate` | Update J'Lo itself. |
@@ -99,9 +99,9 @@ Three things are worth knowing before you read any of that:
   the nearest `.jlorc` at or above the current directory, then `~/.jlo/default.jlorc`, then the newest JDK already
   installed, then the latest release, which is downloaded. `jlo env --help` spells out the whole cascade and its one
   sharp edge; `jlo current` tells you which step answered.
-- **Only major versions are accepted** wherever a JDK is resolved or downloaded: `21`, not `21.0.5`. The one
-  exception is `jlo remove`, which names an install rather than resolving one and so also takes an exact build
-  (`jlo remove 21.0.5+11`).
+- **A major version (`21`) or a pre-release stream (`28-ea`) is accepted** wherever a JDK is resolved or downloaded,
+  not an exact build: `21`, not `21.0.5`. The one exception is `jlo remove`, which names an install rather than
+  resolving one and so also takes an exact build (`jlo remove 21.0.5+11`).
 - **`--offline` never touches the network.** On `env`, `home` and `list` it answers from what is already installed.
   `env` and `home` fail if that is nothing, since they have no answer to give; `list` says the store is empty and
   exits 0, an empty list being a perfectly good listing. Downloading a JDK and asking whether one is here are

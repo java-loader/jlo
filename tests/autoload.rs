@@ -411,6 +411,24 @@ fn find_walks_up_from_subdirectory() {
     );
 }
 
+/// The hook reacts to the *presence* of a `.jlorc`, never to its contents -
+/// which is why widening the grammar costs nothing on the shell side. A hook
+/// that parsed the value would need this rule in two languages, and this test
+/// is what makes such a change announce itself.
+#[test]
+fn find_does_not_read_the_pinned_value() {
+    assert_lookup(
+        "find_does_not_read_the_pinned_value",
+        |home| {
+            let project = home.join("project");
+            std::fs::create_dir_all(&project).unwrap();
+            std::fs::write(project.join(".jlorc"), "28-ea\n").unwrap();
+            project
+        },
+        true,
+    );
+}
+
 #[test]
 fn find_stops_at_vcs_root() {
     assert_lookup(

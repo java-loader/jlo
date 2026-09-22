@@ -8,7 +8,8 @@
 use clap::{Parser, Subcommand};
 
 const AFTER_HELP: &str = "\
-env, home, exec, install, update and init take a Java major version:
+env, home, exec, install, update and init take a Java major version or a
+pre-release stream (28-ea):
 
   jlo env [VERSION]          jlo install [VERSION...]
   jlo home [VERSION]         jlo update [VERSION...]
@@ -28,7 +29,8 @@ Examples:
   jlo current                      Show which JDK is active, and why
   jlo exec 21 -- ./gradlew build   Run a build on Java 21
   jlo install 25                   Download Java 25 without switching to it
-  jlo update --all                 Bring every installed JDK up to date
+  jlo install 28-ea                Download the early-access build of Java 28
+  jlo update --all                 Bring every installed released JDK up to date
   jlo remove 11 17                 Remove every installed Java 11 and 17
   jlo remove --superseded          Remove every superseded minor release
 
@@ -145,8 +147,9 @@ When VERSION is omitted, it resolves in four steps: the nearest
 then the newest JDK already installed, then the latest release, which
 is downloaded. The third step does not ask Adoptium whether something
 newer exists, so a machine holding only Java 17 resolves to 17.
---offline stops after that step instead of downloading. Only major
-versions are accepted: 21, not 21.0.5.
+--offline stops after that step instead of downloading. A major
+version (21) or a pre-release stream (28-ea) is accepted, not an
+exact build: 21, not 21.0.5.
 
 On success stdout carries the export statements and nothing else.
 Anything else jlo has to say - download progress, a warning - goes to
@@ -155,7 +158,7 @@ is active and where the version came from, run jlo current - it starts
 from the live JAVA_HOME, so it can also say when the two disagree."
     )]
     Env {
-        /// Java major version. Default: .jlorc, the newest installed JDK, then the latest release
+        /// Java version: a major (21) or a pre-release stream (28-ea). Default: .jlorc, the newest installed JDK, then the latest release
         version: Option<String>,
 
         /// Only look at installed JDKs; never download, never touch the network
@@ -179,10 +182,11 @@ either way.
 When VERSION is omitted, it resolves in four steps: the nearest
 .jlorc at or above the current directory, then ~/.jlo/default.jlorc,
 then the newest JDK already installed, then the latest release, which
-is downloaded. Only major versions are accepted: 21, not 21.0.5."
+is downloaded. A major version (21) or a pre-release stream (28-ea)
+is accepted, not an exact build: 21, not 21.0.5."
     )]
     Home {
-        /// Java major version. Default: .jlorc, the newest installed JDK, then the latest release
+        /// Java version: a major (21) or a pre-release stream (28-ea). Default: .jlorc, the newest installed JDK, then the latest release
         version: Option<String>,
 
         /// Only look at installed JDKs; never download, never touch the network
@@ -270,10 +274,11 @@ already on its latest build is reported and left alone.
 When VERSION is omitted, it resolves in four steps: the nearest
 .jlorc at or above the current directory, then ~/.jlo/default.jlorc,
 then the newest JDK already installed, then the latest release, which
-is downloaded. Only major versions are accepted: 21, not 21.0.5."
+is downloaded. A major version (21) or a pre-release stream (28-ea)
+is accepted, not an exact build: 21, not 21.0.5."
     )]
     Install {
-        /// Major versions to install. Default: .jlorc, the newest installed JDK, then the latest release
+        /// Java version: a major (21) or a pre-release stream (28-ea). Default: .jlorc, the newest installed JDK, then the latest release
         versions: Vec<String>,
     },
 
@@ -282,13 +287,13 @@ is downloaded. Only major versions are accepted: 21, not 21.0.5."
     /// With no argument, updates the version resolved in four steps: the
     /// nearest .jlorc at or above the current directory, then
     /// ~/.jlo/default.jlorc, then the newest JDK already installed, then the
-    /// latest release. Pass --all to update every installed major version, or
-    /// list major versions explicitly.
+    /// latest release. Pass --all to update every installed released name, or
+    /// list versions explicitly - a pre-release stream only moves when named.
     Update {
-        /// Major versions to update. Default: .jlorc, the newest installed JDK, then the latest release
+        /// Java version: a major (21) or a pre-release stream (28-ea). Default: .jlorc, the newest installed JDK, then the latest release
         versions: Vec<String>,
 
-        /// Update every installed major version
+        /// Update every installed released name; a pre-release stream only moves when named
         #[arg(short, long, conflicts_with = "versions")]
         all: bool,
     },
@@ -303,9 +308,10 @@ Remove installed JDKs
 
 Name what goes, either way round: by version, or by rule.
 
-Each VERSION is either a major version - jlo remove 17 removes every
-installed 17.x - or the exact version of one install, e.g. 17.0.11+10.
-Name several to remove them in one go:
+Each VERSION is either a name - a major (17) or a pre-release stream
+(28-ea) - or the exact version of one install, e.g. 17.0.11+10. Naming
+one leaves the rest alone: jlo remove 17 removes every installed
+17.x, but leaves 17-ea alone. Name several to remove them in one go:
 
   jlo remove 11 17
 
@@ -314,13 +320,13 @@ still go. There are three such cases: nothing installed matches the
 version, J'Lo did not install it, or JAVA_HOME points at it. Each is an
 error only when it leaves nothing to remove at all.
 
---superseded names them by rule instead: keep the newest minor release
-of every installed major, delete the rest. It takes no VERSION - the
+--superseded names them by rule instead: keep the newest build of
+every installed name, delete the rest. It takes no VERSION - the
 rule is the selector - and, being nobody's explicit request, it leaves
 an install J'Lo did not make alone without calling it an error."
     )]
     Remove {
-        /// Major versions, or exact versions of single installs
+        /// Java version: a major (21) or a pre-release stream (28-ea), or the exact version of a single install
         versions: Vec<String>,
 
         /// Remove every superseded minor release instead of a named version
@@ -334,14 +340,15 @@ an install J'Lo did not make alone without calling it an error."
 
     /// Write .jlorc pinning this project's Java version
     ///
-    /// With no argument, pins the latest version Adoptium offers. Only major
-    /// versions are accepted: 21, not 21.0.5.
+    /// With no argument, pins the latest version Adoptium offers. A major
+    /// version (21) or a pre-release stream (28-ea) is accepted, not an
+    /// exact build: 21, not 21.0.5.
     ///
     /// --global writes ~/.jlo/default.jlorc instead: the version jlo env
     /// falls back to when no .jlorc is found, ahead of the newest JDK
     /// already installed.
     Init {
-        /// Java major version. Default: latest release
+        /// Java version: a major (21) or a pre-release stream (28-ea). Default: latest release
         version: Option<String>,
 
         /// Write ~/.jlo/default.jlorc instead of ./.jlorc
