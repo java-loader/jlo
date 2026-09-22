@@ -39,18 +39,25 @@ pub(crate) fn update_path(
     current_path: &str,
     jdk_base: &Path,
 ) -> anyhow::Result<Option<String>> {
-    // An empty `PATH` is the JDK's `bin` and nothing else, the same answer
-    // `child_path` gives. Going through `split_paths` instead would produce
-    // `<jdk>/bin:`, because the empty string splits into one empty entry - and
-    // an empty `PATH` entry means the working directory, so the shell would
-    // search whatever the user happened to have cd'd into. `env -i` in a CI
-    // step is the ordinary way to arrive here.
-    if current_path.is_empty() {
-        return Ok(Some(java_path.to_string()));
-    }
+    // An empty `PATH` is *no* entries, not one empty entry. `split_paths("")`
+    // yields the latter, which would leave `<jdk>/bin:` - and an empty `PATH`
+    // component means the working directory, so the shell would search
+    // whatever the user happened to have cd'd into. `env -i` in a CI step is
+    // the ordinary way to arrive here.
+    //
+    // Skipping the split rather than the join: `join_paths` is also what
+    // refuses a `java_path` containing a `:`, which would otherwise be handed
+    // to the shell as two entries. That check has to apply whether or not the
+    // caller had a `PATH`.
+    let inherited: Vec<PathBuf> = if current_path.is_empty() {
+        Vec::new()
+    } else {
+        env::split_paths(current_path).collect()
+    };
 
     // Remove JDK bin entries from earlier runs to avoid duplicates
-    let mut path_vector: Vec<_> = env::split_paths(current_path)
+    let mut path_vector: Vec<_> = inherited
+        .into_iter()
         .filter(|p| !p.starts_with(jdk_base))
         .collect();
 
@@ -104,12 +111,12 @@ fn classify_path(looked_up: Result<String, env::VarError>) -> anyhow::Result<Str
 
 /// Build the child `PATH` with the JDK's `bin` directory prepended.
 fn child_path(java_bin: &str, current_path: &str) -> anyhow::Result<String> {
-    if current_path.is_empty() {
-        return Ok(java_bin.to_string());
-    }
-
+    // Empty means no entries, and the join still runs: see `update_path` for
+    // both halves of why.
     let mut paths = vec![PathBuf::from(java_bin)];
-    paths.extend(env::split_paths(current_path));
+    if !current_path.is_empty() {
+        paths.extend(env::split_paths(current_path));
+    }
 
     Ok(env::join_paths(paths)
         .context("could not join PATH components")?
@@ -451,6 +458,24 @@ mod tests {
         let jdk_base = Path::new("/home/u/.jdks");
         let result = update_path("/home/u/.jdks/21.0.12/bin", "", jdk_base).unwrap();
         assert_eq!(result.unwrap(), "/home/u/.jdks/21.0.12/bin");
+    }
+
+    /// A `java_path` carrying a `:` is two `PATH` entries once the shell reads
+    /// it back, and the second of them is relative. `join_paths` refuses it -
+    /// but only if it is reached, and an empty `PATH` used to return before
+    /// the join, so the check applied to some callers and not others.
+    #[test]
+    fn a_colon_in_the_jdk_path_is_refused_whether_or_not_path_is_set() {
+        let jdk_base = Path::new("/home/u/.jdks");
+        let hostile = "/home/u/.jdks/21:evil/bin";
+
+        assert!(update_path(hostile, "", jdk_base).is_err(), "empty PATH");
+        assert!(
+            update_path(hostile, "/usr/bin", jdk_base).is_err(),
+            "populated PATH"
+        );
+        assert!(child_path(hostile, "").is_err(), "empty child PATH");
+        assert!(child_path(hostile, "/usr/bin").is_err(), "populated child");
     }
 
     /// `update_path` and `child_path` are the two halves of one rule - what

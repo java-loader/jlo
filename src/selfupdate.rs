@@ -492,8 +492,12 @@ fn stage(
     }
     result?;
 
-    verify_staged_version(&staged.binary, latest)?;
+    // Executable first, then run it. `make_executable` exists for an archive
+    // that did not carry the x bit, and running the binary is the one step
+    // that needs it - in the other order the repair never got the chance, and
+    // such an archive failed with "could not run the downloaded jlo" instead.
     make_executable(&staged.binary)?;
+    verify_staged_version(&staged.binary, latest)?;
     // The archive was flushed, the file unpacked out of it was not. A rename
     // of contents that are still only in the page cache would publish an
     // empty or truncated binary across a crash - the one failure this whole

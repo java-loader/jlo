@@ -663,6 +663,21 @@ pub(crate) fn jlo_home_dir() -> anyhow::Result<PathBuf> {
         ));
     }
 
+    // Checked once, here, rather than at each of the places that write it
+    // out. `install` spells this path into the generated stubs and into
+    // `install-receipt.json`, and it spells it with `display()`, which
+    // substitutes U+FFFD for bytes it cannot decode: the files would land at
+    // the real path while naming a different one, leaving a wrapper pointing
+    // at a directory that does not exist and a receipt that fails every
+    // later ownership check. There is nothing jlo can do with a home it
+    // cannot write down.
+    if path.to_str().is_none() {
+        return Err(anyhow!(
+            "JLO_HOME is not valid UTF-8, so jlo cannot write it into the shell code it generates: '{}'",
+            path.display()
+        ));
+    }
+
     Ok(path)
 }
 
@@ -775,5 +790,53 @@ mod tests {
         unsafe {
             env::remove_var("JLO_HOME");
         }
+    }
+
+    /// The three values that cannot be a home, refused here rather than at
+    /// each of the places that write the layout out. `install` spells this
+    /// path into the generated stubs, into the `~/.local/bin/jlo` symlink
+    /// target and into `install-receipt.json`, so a value that survives to
+    /// there produces an install that is wrong in a different way for each
+    /// of them.
+    #[test]
+    #[serial_test::serial]
+    fn jlo_home_dir_refuses_a_value_it_could_not_write_down() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        // Empty: a shell spells "unset" this way, and taking it literally
+        // roots the whole layout at `/`.
+        let empty = with_jlo_home(&OsString::new(), jlo_home_dir);
+        assert_eq!(
+            empty.expect("empty falls back to $HOME/.jlo"),
+            env::home_dir().unwrap().join(".jlo")
+        );
+
+        // Relative: a different directory from every working directory.
+        let relative = with_jlo_home(&OsString::from("jlo-home"), jlo_home_dir)
+            .expect_err("a relative home is refused");
+        assert!(relative.to_string().contains("absolute"), "{relative}");
+
+        // Undecodable: written into the stubs as U+FFFD, naming a directory
+        // that does not exist.
+        let undecodable = OsString::from_vec(vec![b'/', b't', b'm', b'p', b'/', 0xff]);
+        let err = with_jlo_home(&undecodable, jlo_home_dir).expect_err("refused");
+        assert!(err.to_string().contains("not valid UTF-8"), "{err}");
+    }
+
+    /// Run `f` with `JLO_HOME` set to `value`, restoring the variable after.
+    fn with_jlo_home<T>(value: &std::ffi::OsStr, f: impl FnOnce() -> T) -> T {
+        let previous = env::var_os("JLO_HOME");
+        unsafe {
+            env::set_var("JLO_HOME", value);
+        }
+        let out = f();
+        unsafe {
+            match previous {
+                Some(previous) => env::set_var("JLO_HOME", previous),
+                None => env::remove_var("JLO_HOME"),
+            }
+        }
+        out
     }
 }

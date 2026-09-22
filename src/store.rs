@@ -405,7 +405,13 @@ impl JdkStore {
             // see at all, and counting it would report "left 1 install alone"
             // about something the listing never mentioned.
             let Some(major) = candidate.major else {
-                crate::ui::warning!("ignoring non-semver directory {path:?}");
+                // A staging directory is jlo's own and is expected to be
+                // here; warning about it would put a line under every
+                // `jlo remove --superseded` for the rest of the machine's
+                // life. It is swept in `staging_dir` instead.
+                if !is_staging_dir(candidate.name.as_deref()) {
+                    crate::ui::warning!("ignoring non-semver directory {path:?}");
+                }
                 continue;
             };
             if !candidate.managed {
@@ -786,8 +792,52 @@ fn install_jdk_inner(
 fn staging_dir(store: &JdkStore) -> anyhow::Result<tempfile::TempDir> {
     std::fs::create_dir_all(store.base())
         .with_context(|| format!("could not create {}", store.base().display()))?;
+
+    // An install killed with Ctrl-C runs no destructor, so its staging
+    // directory survives - holding the tarball and the unpacked JDK, half a
+    // gigabyte of it, in the user's JDK directory rather than in `$TMPDIR`
+    // where the system would eventually clear it. Nothing else will ever
+    // remove it, so the next install does, before adding one of its own.
+    sweep_stale_staging(store.base());
+
     tempfile::tempdir_in(store.base())
         .context("could not create a staging directory in the JDK install directory")
+}
+
+/// The prefix `tempfile` gives the directories [`staging_dir`] makes. A
+/// leading dot is what keeps them out of the listing: `version::parse` refuses
+/// it, so `scan` drops them the way it drops any other non-version name.
+const STAGING_PREFIX: &str = ".tmp";
+
+fn is_staging_dir(name: Option<&str>) -> bool {
+    name.is_some_and(|name| name.starts_with(STAGING_PREFIX))
+}
+
+/// Delete staging directories left by an earlier, interrupted install.
+///
+/// Best effort in both directions: a failure is not worth a word (the install
+/// that follows is what the user asked for, and this is housekeeping), and a
+/// staging directory belonging to an install running *right now* is left
+/// alone - it is in use, so removing its contents would break a command that
+/// is working. There is no pid in the name to test, so "in use" is read as
+/// "modified in the last hour", which is far longer than any install takes.
+fn sweep_stale_staging(base: &Path) {
+    let Ok(entries) = std::fs::read_dir(base) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if !is_staging_dir(entry.file_name().to_str()) {
+            continue;
+        }
+        let recently_touched = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .and_then(|t| t.elapsed().map_err(|_| std::io::ErrorKind::Other.into()))
+            .is_ok_and(|age| age < std::time::Duration::from_hours(1));
+        if !recently_touched {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
 }
 
 /// JDK install location, matching `IntelliJ` IDEA's layout so both tools see the
@@ -1570,6 +1620,61 @@ mod tests {
         let staging = staging_dir(&store).expect("the store directory is created if missing");
 
         assert_eq!(staging.path().parent(), Some(base.as_path()));
+    }
+
+    /// An install killed with Ctrl-C runs no destructor, so its staging
+    /// directory survives - holding the tarball and the unpacked JDK in the
+    /// user's JDK directory rather than in `$TMPDIR`, where the system would
+    /// have cleared it. Nothing else ever will, so the next install does.
+    #[test]
+    fn a_stale_staging_directory_is_swept_by_the_next_install() {
+        let dir = tempdir().unwrap();
+        let store = JdkStore::at(dir.path());
+        let stale = dir.path().join(".tmpLEFTOVER");
+        fs::create_dir_all(stale.join("jdk-21.0.5+11")).unwrap();
+        // Two hours old, i.e. no install could still be using it.
+        let long_ago = std::time::SystemTime::now() - std::time::Duration::from_hours(2);
+        fs::File::options()
+            .read(true)
+            .open(&stale)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(long_ago))
+            .unwrap();
+
+        let fresh = staging_dir(&store).unwrap();
+
+        assert!(!stale.exists(), "the abandoned staging directory is gone");
+        assert!(fresh.path().exists(), "the new one is not");
+    }
+
+    /// ...but one an install running right now is using is left alone.
+    #[test]
+    fn a_staging_directory_in_use_survives_a_sweep() {
+        let dir = tempdir().unwrap();
+        let store = JdkStore::at(dir.path());
+        let in_use = staging_dir(&store).unwrap();
+
+        let second = staging_dir(&store).unwrap();
+
+        assert!(in_use.path().exists(), "a live install was swept out");
+        assert!(second.path().exists());
+    }
+
+    /// The staging directory is expected to be here, so `jlo remove
+    /// --superseded` must not put a line under itself about it - once would
+    /// be noise, and it would be every run for the rest of the machine's
+    /// life. A directory that is genuinely unexpected still gets one.
+    #[test]
+    fn prune_says_nothing_about_a_staging_directory() {
+        let dir = tempdir().unwrap();
+        create_jdk_dir(dir.path(), "21.0.3+9", true);
+        let store = JdkStore::at(dir.path());
+        let staging = staging_dir(&store).unwrap();
+
+        let report = store.prune(None).unwrap();
+
+        assert_eq!(report.skipped_unmanaged, 0);
+        assert!(staging.path().exists(), "prune must not delete it either");
     }
 
     /// ...and the listing must pass over it, or an interrupted install would

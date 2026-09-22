@@ -13,11 +13,17 @@
 # component, hence the "/" fixup.
 jlo_find_jlorc() {
   local dir="$PWD"
+  # "${HOME%/}" so a HOME carrying a trailing slash still stops the walk. The
+  # Rust side compares Paths, which are component-wise and so already ignore
+  # it; a string compare here would never match, and the two halves of one
+  # rule would disagree about where home is - the hook firing on a .jlorc
+  # above HOME that the binary then refuses to read.
+  local home="${HOME%/}"
   while :; do
     if [ -f "$dir/.jlorc" ]; then
       return 0
     fi
-    if [ "$dir" = "$HOME" ] || [ -e "$dir/.git" ] || [ "$dir" = "/" ]; then
+    if [ "$dir" = "$home" ] || [ -e "$dir/.git" ] || [ "$dir" = "/" ]; then
       return 1
     fi
     dir="${dir%/*}"

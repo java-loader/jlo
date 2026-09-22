@@ -477,6 +477,32 @@ fn find_stops_at_home() {
     }
 }
 
+/// The same boundary, with a `HOME` carrying a trailing slash. The Rust side
+/// compares `Path`s, which are component-wise and so already ignore it; a
+/// plain string compare here never matched, so the hook walked past home and
+/// fired `jlo env --offline` on a `.jlorc` the binary would then refuse to
+/// read - the two halves of one rule disagreeing about where home is.
+#[test]
+fn find_stops_at_home_with_a_trailing_slash() {
+    for (sh, dialect) in hook_shells() {
+        if skip_missing("find_stops_at_home_with_a_trailing_slash", &sh) {
+            continue;
+        }
+        let outside = tempdir().unwrap();
+        let outside = canon(outside.path());
+        let home = outside.join("home");
+        let project = home.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(outside.join(".jlorc"), "17\n").unwrap();
+
+        let home_with_slash = std::path::PathBuf::from(format!("{}/", home.display()));
+        assert!(
+            !finds_jlorc(&sh, dialect, &home_with_slash, &project),
+            "{sh} ({dialect}) walked past a $HOME spelled with a trailing slash"
+        );
+    }
+}
+
 #[test]
 fn find_reports_none_when_absent() {
     assert_lookup(
