@@ -1,12 +1,15 @@
-use crate::adoptium::JdkMetadata;
-use crate::ui::InstallUi;
+use crate::adoptium::{AdoptiumClient, JdkMetadata};
+use crate::extract;
+use crate::ui::{self, InstallUi};
 use crate::version::compare;
 use anyhow::{Context, bail};
 use std::cmp::Ordering;
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::env;
+use std::fs::File;
 use std::path::{Path, PathBuf};
+use tempfile::tempdir;
 
 /// The ownership marker jlo *used* to write, inside the JDK directory.
 ///
@@ -636,6 +639,102 @@ impl JdkStore {
         let base = &self.base;
         format!("could not read JDK base directory {base:?}")
     }
+}
+
+/// The one download site behind both `install` and `update`: the two verbs
+/// differ only in how they arrive at this set of majors.
+pub(crate) fn install_each(
+    client: &AdoptiumClient,
+    store: &JdkStore,
+    versions: HashSet<String>,
+) -> anyhow::Result<()> {
+    // Sorted for a stable processing order, rather than whatever order the
+    // hash set happens to iterate in.
+    let mut versions: Vec<_> = versions.into_iter().collect();
+    versions.sort();
+
+    let mut installed_any = false;
+    for java_version in versions {
+        installed_any |= update(client, store, &java_version)?;
+    }
+
+    // A download leaves the superseded minor on disk on purpose - a command
+    // that downloads should not also delete, and the old JDK may still be
+    // wired into an open shell or an IDE. Point at `jlo remove --superseded`
+    // instead of doing it here.
+    if let Some(hint) = ui::superseded_hint(installed_any, count_superseded(store)) {
+        ui::hint!("{hint}");
+    }
+
+    Ok(())
+}
+
+/// How many installs `jlo remove --superseded` would remove, or 0 if that
+/// cannot be determined. A hint is not worth failing an otherwise successful
+/// run, so an unreadable JDK directory just means no hint.
+fn count_superseded(store: &JdkStore) -> usize {
+    store.superseded_count().unwrap_or(0)
+}
+
+/// Returns whether a JDK was installed, so the caller can tell a real update
+/// from an already-current one.
+fn update(client: &AdoptiumClient, store: &JdkStore, java_version: &str) -> anyhow::Result<bool> {
+    let jdk_metadata = client.fetch_metadata(java_version)?;
+
+    if store.find_exact(&jdk_metadata).is_some() {
+        ui::up_to_date(java_version, &jdk_metadata.semver);
+        Ok(false)
+    } else {
+        install_jdk(client, store, &jdk_metadata).context("could not install JDK")?;
+        Ok(true)
+    }
+}
+
+pub(crate) fn install_jdk(
+    client: &AdoptiumClient,
+    store: &JdkStore,
+    jdk_metadata: &JdkMetadata,
+) -> anyhow::Result<PathBuf> {
+    // One progress region spans all three phases, so the terminal shows a
+    // single line that changes rather than three bars stacking up.
+    let ui = InstallUi::new(&jdk_metadata.semver);
+
+    match install_jdk_inner(client, store, jdk_metadata, &ui) {
+        Ok(dest_dir) => {
+            ui.finish(&dest_dir);
+            Ok(dest_dir)
+        }
+        Err(e) => {
+            // Clear the live region first: a half-drawn bar above the error
+            // only gets in the way of reading it.
+            ui.abandon();
+            Err(e)
+        }
+    }
+}
+
+fn install_jdk_inner(
+    client: &AdoptiumClient,
+    store: &JdkStore,
+    jdk_metadata: &JdkMetadata,
+    ui: &InstallUi,
+) -> anyhow::Result<PathBuf> {
+    // Download JDK
+    let temp_dir = tempdir().context("could not create temporary directory")?;
+    let temp_file = temp_dir.path().join(&jdk_metadata.package_name);
+    let file = &mut File::create(&temp_file).context("could not create temporary file")?;
+    client.download(jdk_metadata, file, ui)?;
+
+    // Extract JDK to temp dir
+    extract::extract(&temp_file, temp_dir.path(), ui)?;
+
+    let dest_dir = store.install(jdk_metadata, temp_dir.path(), ui)?;
+
+    temp_dir.close().unwrap_or_else(|err| {
+        ui::warning!("could not delete temporary directory: {err}");
+    });
+
+    Ok(dest_dir)
 }
 
 /// JDK install location, matching `IntelliJ` IDEA's layout so both tools see the
