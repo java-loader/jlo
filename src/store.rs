@@ -1,6 +1,6 @@
 use crate::adoptium::{AdoptiumClient, JdkMetadata};
 use crate::extract;
-use crate::request::Request;
+use crate::request::{Request, Stream};
 use crate::ui::{self, InstallUi};
 use crate::version::compare;
 use anyhow::{Context, bail};
@@ -44,9 +44,11 @@ const BUNDLE_HOME: [&str; 2] = ["Contents", "Home"];
 /// [`JdkStore::prune`] owns only the filesystem work.
 #[derive(Debug, Default)]
 pub(crate) struct PruneReport {
-    /// `(major, removed version names)`, newest major first. Only versions
-    /// actually deleted appear here.
-    pub(crate) removed: Vec<(i64, Vec<String>)>,
+    /// `(name, removed version names)`, newest name first. Only versions
+    /// actually deleted appear here. Keyed on the name rather than the major
+    /// so a pre-release and the release it previews are reported apart, the
+    /// way they are deleted apart.
+    pub(crate) removed: Vec<(Request, Vec<String>)>,
     /// One message per JDK that could not be deleted.
     pub(crate) failures: Vec<String>,
     /// Installs without a `.jlo-managed` marker. Counted rather than listed:
@@ -168,9 +170,23 @@ impl std::fmt::Display for RemoveError {
 pub(crate) struct InstalledJdk {
     pub version: String,
     pub major: i64,
+    /// Which of the major's two streams this build belongs to, read off its
+    /// name: a pre-release is early access, anything else is released.
+    pub stream: Stream,
     /// Whether the JDK carries the `.jlo-managed` marker, i.e. whether
     /// `jlo remove` is allowed to delete it, by either of its selectors.
     pub managed: bool,
+}
+
+impl InstalledJdk {
+    /// The name this install answers to - what every "one build per ..." rule
+    /// groups by.
+    pub(crate) fn request(&self) -> Request {
+        Request {
+            major: self.major,
+            stream: self.stream,
+        }
+    }
 }
 
 /// One directory found in the store, with everything a single walk can say
@@ -180,9 +196,12 @@ struct Candidate {
     path: PathBuf,
     /// The directory name, or `None` when it is not valid UTF-8.
     name: Option<String>,
-    /// The major version the name parses to, or `None` when the name is not
-    /// a semver - see [`is_jdk_version_dir`].
-    major: Option<i64>,
+    /// The name as a *request*: its major and its stream, or `None` when the
+    /// name is not a semver - see [`is_jdk_version_dir`]. This is the key
+    /// every "one build per ..." rule groups by - keyed on the major alone,
+    /// a pre-release would supersede the released build it previews, because
+    /// it sorts above it.
+    request: Option<Request>,
     /// Whether the directory carries the `.jlo-managed` marker.
     managed: bool,
 }
@@ -228,9 +247,11 @@ impl JdkStore {
         Ok(candidates
             .into_iter()
             .filter_map(|candidate| {
+                let request = candidate.request?;
                 Some(InstalledJdk {
                     version: candidate.name?,
-                    major: candidate.major?,
+                    major: request.major,
+                    stream: request.stream,
                     managed: candidate.managed,
                 })
             })
@@ -256,16 +277,18 @@ impl JdkStore {
             .map(|jdk| jdk.version.clone())
     }
 
-    /// The newest installed JDK whose major version is `major`, if any.
+    /// The newest installed JDK answering to `request`, if any.
     ///
-    /// Matched on the parsed major rather than on a name prefix: a prefix
+    /// Matched on the parsed name rather than on a name prefix: a prefix
     /// match makes `1` select `17`, and the only reason that is unreachable
-    /// today is the `>= 8` floor in [`crate::conf::is_valid_version`]. A
-    /// `major` that is not an integer matches nothing.
-    pub(crate) fn find_matching(&self, major: &str) -> Option<PathBuf> {
-        let major: i64 = major.parse().ok()?;
+    /// is the `>= 8` floor in [`Request::parse`], which is also what refuses
+    /// `17.0` before it can ever mean "some 17.0.x". Matching the whole name
+    /// rather than the major is what keeps a pre-release out of the answer to
+    /// a GA request: it sorts above the build it previews, so a major-only
+    /// filter would hand `jlo env 26` a beta.
+    pub(crate) fn find_matching(&self, request: Request) -> Option<PathBuf> {
         let mut matching_versions = self.scan().ok()?;
-        matching_versions.retain(|candidate| candidate.major == Some(major));
+        matching_versions.retain(|candidate| candidate.request == Some(request));
 
         sort_by_semver_desc(&mut matching_versions);
 
@@ -290,10 +313,12 @@ impl JdkStore {
     /// excluded deliberately - jlo did not put them there and cannot offer
     /// `jlo remove` as the fix, and README already says the bundle is the
     /// better shape to drop in by hand.
-    /// Returns the version and its major, the major being what `jlo install`
+    /// Returns the version and its name, the name being what `jlo install`
     /// takes in the advice line - read off the install rather than reparsed
-    /// from the name, which has already been parsed once to get here.
-    pub(crate) fn legacy_layout(&self, java_home: &Path) -> Option<(String, i64)> {
+    /// from the directory name, which has already been parsed once to get
+    /// here. The whole name, not the major: under a flat early-access install
+    /// a major-only hint would advise installing the released stream.
+    pub(crate) fn legacy_layout(&self, java_home: &Path) -> Option<(String, Request)> {
         if env::consts::OS != "macos" || java_home.parent() != Some(self.base.as_path()) {
             return None;
         }
@@ -303,7 +328,10 @@ impl JdkStore {
             .ok()?
             .into_iter()
             .find(|jdk| jdk.version == name && jdk.managed)
-            .map(|jdk| (jdk.version, jdk.major))
+            .map(|jdk| {
+                let request = jdk.request();
+                (jdk.version, request)
+            })
     }
 
     /// The path of the exact build `metadata` describes, if it is installed.
@@ -330,35 +358,36 @@ impl JdkStore {
         self.list().ok()?.first().map(|jdk| jdk.major)
     }
 
-    /// The major versions present in the store, ascending.
-    pub(crate) fn installed_majors(&self) -> anyhow::Result<Vec<i64>> {
-        let major_versions: HashSet<i64> = self
+    /// The version names present in the store, ascending. A major with a
+    /// build of each stream installed contributes both of its names.
+    pub(crate) fn installed_requests(&self) -> anyhow::Result<Vec<Request>> {
+        let requests: HashSet<Request> = self
             .scan_required()?
             .into_iter()
-            .filter_map(|candidate| candidate.major)
+            .filter_map(|candidate| candidate.request)
             .collect();
 
-        let mut major_versions_vec: Vec<i64> = major_versions.into_iter().collect();
-        major_versions_vec.sort_unstable();
-        Ok(major_versions_vec)
+        let mut requests: Vec<Request> = requests.into_iter().collect();
+        requests.sort_unstable();
+        Ok(requests)
     }
 
     /// How many installs `jlo remove --superseded` would remove: every managed JDK that is
-    /// not the newest of its major.
+    /// not the newest of its name.
     ///
     /// The read-only counterpart to [`Self::prune`], so `jlo update` can point
     /// at `jlo remove --superseded` after superseding a minor without deleting anything
     /// itself.
     pub(crate) fn superseded_count(&self) -> anyhow::Result<usize> {
-        let mut newest: HashMap<i64, String> = HashMap::new();
+        let mut newest: HashMap<Request, String> = HashMap::new();
         let mut superseded = 0;
 
-        // `list` yields newest first, so the first managed JDK of a major is
+        // `list` yields newest first, so the first managed JDK of a name is
         // the one `prune` keeps. What follows it is counted only when it is
         // *older* - "not the newest" would over-count, because two names can
         // spell one version and [`Self::prune`] leaves both of those alone.
         for jdk in self.list()?.into_iter().filter(|jdk| jdk.managed) {
-            match newest.entry(jdk.major) {
+            match newest.entry(jdk.request()) {
                 Entry::Vacant(slot) => {
                     slot.insert(jdk.version);
                 }
@@ -373,7 +402,7 @@ impl JdkStore {
         Ok(superseded)
     }
 
-    /// Remove every managed JDK that is not the newest of its major.
+    /// Remove every managed JDK that is not the newest of its name.
     ///
     /// `active_java_home` is the directory `$JAVA_HOME` points at, if any, and
     /// it is skipped by exactly the rule [`Self::remove`] applies to a named
@@ -389,8 +418,10 @@ impl JdkStore {
     /// [`Self::remove`] - so the guard is testable without mutating the
     /// process environment.
     pub(crate) fn prune(&self, active_java_home: Option<&Path>) -> anyhow::Result<PruneReport> {
-        // collector major versions
-        let mut installed_jdks: HashMap<i64, Vec<Candidate>> = HashMap::new();
+        // Grouped by name, not by major: a pre-release sorts above the
+        // release it previews, so a major-keyed group would make the released
+        // build superseded by a beta of the same major.
+        let mut installed_jdks: HashMap<Request, Vec<Candidate>> = HashMap::new();
         let mut report = PruneReport::default();
 
         for candidate in self.scan_required()? {
@@ -399,13 +430,13 @@ impl JdkStore {
                 crate::ui::warning!("ignoring directory with invalid name {path:?}");
                 continue;
             }
-            // The major is parsed before the marker is consulted, so
+            // The name is parsed before the marker is consulted, so
             // `skipped_unmanaged` counts only directories `jlo list` would
             // show. A vendor-named `IntelliJ` download (`temurin-21.0.1`) is not
             // an install jlo declined to touch - it is not an install jlo can
             // see at all, and counting it would report "left 1 install alone"
             // about something the listing never mentioned.
-            let Some(major) = candidate.major else {
+            let Some(request) = candidate.request else {
                 // A staging directory is jlo's own and is expected to be
                 // here; warning about it would put a line under every
                 // `jlo remove --superseded` for the rest of the machine's
@@ -420,17 +451,18 @@ impl JdkStore {
                 report.skipped_unmanaged += 1;
                 continue;
             }
-            installed_jdks.entry(major).or_default().push(candidate);
+            installed_jdks.entry(request).or_default().push(candidate);
         }
 
         // A `HashMap` hands back its keys in an arbitrary order, which made two runs
-        // over the same directory print the majors differently. Sort so the output
-        // is stable and matches `jlo list` (newest major first).
-        let mut majors: Vec<i64> = installed_jdks.keys().copied().collect();
-        majors.sort_unstable_by(|a, b| b.cmp(a));
+        // over the same directory print the names differently. Sort so the output
+        // is stable and matches `jlo list` (newest major first); the derived
+        // `Ord` also orders the two streams of one major stably.
+        let mut requests: Vec<Request> = installed_jdks.keys().copied().collect();
+        requests.sort_unstable_by(|a, b| b.cmp(a));
 
-        for major in majors {
-            let Some(candidates) = installed_jdks.get_mut(&major) else {
+        for request in requests {
+            let Some(candidates) = installed_jdks.get_mut(&request) else {
                 continue;
             };
             sort_by_semver_desc(candidates);
@@ -470,7 +502,7 @@ impl JdkStore {
             }
 
             if !removed.is_empty() {
-                report.removed.push((major, removed));
+                report.removed.push((request, removed));
             }
         }
 
@@ -643,13 +675,19 @@ impl JdkStore {
                     .file_name()
                     .and_then(|name| name.to_str())
                     .map(ToString::to_string);
-                let major = name
+                let parsed = name
                     .as_deref()
-                    .and_then(|name| crate::version::parse(name).ok())
-                    // A major that does not fit an `i64` is not a JDK; the rest
-                    // of the crate counts majors in `i64` because that is what
-                    // the Adoptium API hands back.
+                    .and_then(|name| crate::version::parse(name).ok());
+                // A major that does not fit an `i64` is not a JDK; the rest
+                // of the crate counts majors in `i64` because that is what
+                // the Adoptium API hands back.
+                let major = parsed
+                    .as_ref()
                     .and_then(|semver| i64::try_from(semver.major).ok());
+                let request = parsed.as_ref().zip(major).map(|(semver, major)| Request {
+                    major,
+                    stream: crate::request::stream_of(semver),
+                });
                 // `is_file`, not `exists`: a *directory* named
                 // `21.0.3+9.jlo-managed` is itself a store entry with a
                 // semver-shaped name, and letting it confer ownership on its
@@ -662,7 +700,7 @@ impl JdkStore {
                 Candidate {
                     path,
                     name,
-                    major,
+                    request,
                     managed,
                 }
             })
@@ -682,20 +720,20 @@ impl JdkStore {
 }
 
 /// The one download site behind both `install` and `update`: the two verbs
-/// differ only in how they arrive at this set of majors.
+/// differ only in how they arrive at this set of names.
 pub(crate) fn install_each(
     client: &AdoptiumClient,
     store: &JdkStore,
-    versions: HashSet<String>,
+    requests: HashSet<Request>,
 ) -> anyhow::Result<()> {
     // Sorted for a stable processing order, rather than whatever order the
     // hash set happens to iterate in.
-    let mut versions: Vec<_> = versions.into_iter().collect();
-    versions.sort();
+    let mut requests: Vec<Request> = requests.into_iter().collect();
+    requests.sort_unstable();
 
     let mut installed_any = false;
-    for java_version in versions {
-        installed_any |= update(client, store, &java_version)?;
+    for request in requests {
+        installed_any |= update(client, store, request)?;
     }
 
     // A download leaves the superseded minor on disk on purpose - a command
@@ -718,11 +756,11 @@ fn count_superseded(store: &JdkStore) -> usize {
 
 /// Returns whether a JDK was installed, so the caller can tell a real update
 /// from an already-current one.
-fn update(client: &AdoptiumClient, store: &JdkStore, java_version: &str) -> anyhow::Result<bool> {
-    let jdk_metadata = client.fetch_metadata(Request::parse(java_version)?)?;
+fn update(client: &AdoptiumClient, store: &JdkStore, request: Request) -> anyhow::Result<bool> {
+    let jdk_metadata = client.fetch_metadata(request)?;
 
     if store.find_exact(&jdk_metadata).is_some() {
-        ui::up_to_date(java_version, &jdk_metadata.semver);
+        ui::up_to_date(&request.to_string(), &jdk_metadata.semver);
         Ok(false)
     } else {
         install_jdk(client, store, &jdk_metadata).context("could not install JDK")?;
@@ -851,13 +889,13 @@ fn base_dir_for(os: &str, home: &Path) -> PathBuf {
     }
 }
 
-/// Whether `version` is superseded by `newest`, the build of its major that
+/// Whether `version` is superseded by `newest`, the build of its name that
 /// [`JdkStore::prune`] keeps. The single definition behind both `prune` and
 /// [`JdkStore::superseded_count`], so the hint that offers the deletion and
 /// the deletion itself can never disagree about how many there are.
 ///
 /// A name that does not parse never reaches here: both callers filter on the
-/// parsed major first.
+/// parsed name first.
 fn is_older_than(version: &str, newest: &str) -> bool {
     compare(version, newest).is_ok_and(Ordering::is_lt)
 }
@@ -881,15 +919,17 @@ pub(crate) fn quoted_list(items: &[String]) -> String {
     }
 }
 
-/// Whether `jdk` is what one `jlo remove` target names.
+/// Whether `target` names this install: a version name (`17`, `28-ea`)
+/// selects every build of that name, an exact directory name selects one.
 ///
-/// A bare integer is a major version and selects every build of that major;
-/// anything else has to equal the directory name exactly. Nothing in between
-/// is accepted - `17.0` would have to mean "some 17.0.x", which is a version
-/// range, and ranges are what `.jlorc` deliberately does not have.
+/// The name, not the major: `jlo remove 26` must leave `26-ea` alone, for the
+/// same reason `jlo env 26` must not resolve to it. Anything that is not a
+/// name falls through to the exact spelling, which is how `17.0.11+10` still
+/// works - and why `17.0` still matches nothing, a range being what `.jlorc`
+/// deliberately does not have.
 fn matches_target(jdk: &InstalledJdk, target: &str) -> bool {
-    match target.parse::<i64>() {
-        Ok(major) => jdk.major == major,
+    match Request::parse(target) {
+        Ok(request) => jdk.request() == request,
         Err(_) => jdk.version == target,
     }
 }
@@ -1019,6 +1059,10 @@ mod tests {
     use std::fs;
     use tempfile::tempdir;
 
+    fn request(name: &str) -> Request {
+        Request::parse(name).expect("the fixture names a valid version")
+    }
+
     fn create_jdk_dir(base: &Path, version: &str, managed: bool) {
         let dir = base.join(version);
         fs::create_dir_all(dir.join("bin")).unwrap();
@@ -1111,7 +1155,7 @@ mod tests {
         let verdict = store.legacy_layout(&dir.path().join("21.0.3+9"));
 
         if cfg!(target_os = "macos") {
-            assert_eq!(verdict, Some(("21.0.3+9".to_string(), 21)));
+            assert_eq!(verdict, Some(("21.0.3+9".to_string(), request("21"))));
         } else {
             assert_eq!(verdict, None, "a flat install is the norm off macOS");
         }
@@ -1264,7 +1308,7 @@ mod tests {
         let java_home = create_bundle_jdk_dir(dir.path(), "21.0.3+9", true);
 
         assert_eq!(
-            JdkStore::at(dir.path()).find_matching("21"),
+            JdkStore::at(dir.path()).find_matching(request("21")),
             Some(java_home)
         );
     }
@@ -1278,7 +1322,7 @@ mod tests {
         create_jdk_dir(dir.path(), "21.0.3+9", true);
 
         assert_eq!(
-            JdkStore::at(dir.path()).find_matching("21"),
+            JdkStore::at(dir.path()).find_matching(request("21")),
             Some(dir.path().join("21.0.3+9"))
         );
     }
@@ -1293,7 +1337,7 @@ mod tests {
         fs::create_dir_all(dir.path().join("21.0.3+9/Contents/Home")).unwrap();
 
         assert_eq!(
-            JdkStore::at(dir.path()).find_matching("21"),
+            JdkStore::at(dir.path()).find_matching(request("21")),
             Some(dir.path().join("21.0.3+9"))
         );
     }
@@ -1400,7 +1444,7 @@ mod tests {
         create_jdk_dir(dir.path(), "21.0.3+9", true);
         create_jdk_dir(dir.path(), "17.0.2+8", true);
 
-        let result = JdkStore::at(dir.path()).find_matching("21");
+        let result = JdkStore::at(dir.path()).find_matching(request("21"));
         assert_eq!(
             result.unwrap().file_name().unwrap().to_str().unwrap(),
             "21.0.3+9"
@@ -1412,37 +1456,63 @@ mod tests {
         let dir = tempdir().unwrap();
         create_jdk_dir(dir.path(), "17.0.2+8", true);
 
-        assert!(JdkStore::at(dir.path()).find_matching("21").is_none());
+        assert!(
+            JdkStore::at(dir.path())
+                .find_matching(request("21"))
+                .is_none()
+        );
     }
 
     #[test]
     fn find_matching_empty_dir() {
         let dir = tempdir().unwrap();
-        assert!(JdkStore::at(dir.path()).find_matching("21").is_none());
+        assert!(
+            JdkStore::at(dir.path())
+                .find_matching(request("21"))
+                .is_none()
+        );
     }
 
+    /// The rule the whole design rests on: `26` and `26-ea` are two names, so
+    /// an installed pre-release is invisible to a GA request.
+    #[test]
+    fn find_matching_never_crosses_streams() {
+        let dir = tempdir().unwrap();
+        create_jdk_dir(dir.path(), "26.0.1+9", true);
+        create_jdk_dir(dir.path(), "26.0.2-beta+101.0.ea", true);
+        let store = JdkStore::at(dir.path());
+
+        assert_eq!(
+            store.find_matching(Request {
+                major: 26,
+                stream: Stream::Ga
+            }),
+            Some(dir.path().join("26.0.1+9")),
+            "a GA request must not be answered with the higher-sorting beta"
+        );
+        assert_eq!(
+            store.find_matching(Request {
+                major: 26,
+                stream: Stream::Ea
+            }),
+            Some(dir.path().join("26.0.2-beta+101.0.ea"))
+        );
+    }
+
+    /// A prefix match would let `17` select `1.8.0+402` as readily as
+    /// `17.0.2+8`. The major is parsed, so it does not. The two spellings a
+    /// prefix match would also have let through - `1` and `17.0` - cannot
+    /// reach here at all now: `Request::parse` refuses both, which is where
+    /// that rule is pinned.
     #[test]
     fn find_matching_respects_version_boundaries() {
         let dir = tempdir().unwrap();
         create_jdk_dir(dir.path(), "17.0.2+8", true);
         create_jdk_dir(dir.path(), "1.8.0+402", true);
 
-        let store = JdkStore::at(dir.path());
-        // The boundary case a prefix match got wrong: "1" is a prefix of both
-        // "17.0.2+8" and "1.8.0+402", but only the latter is major 1.
         assert_eq!(
-            store
-                .find_matching("1")
-                .unwrap()
-                .file_name()
-                .unwrap()
-                .to_str()
-                .unwrap(),
-            "1.8.0+402"
-        );
-        assert_eq!(
-            store
-                .find_matching("17")
+            JdkStore::at(dir.path())
+                .find_matching(request("17"))
                 .unwrap()
                 .file_name()
                 .unwrap()
@@ -1450,9 +1520,6 @@ mod tests {
                 .unwrap(),
             "17.0.2+8"
         );
-        // A major that is not an integer selects nothing rather than whatever
-        // happens to share its leading characters.
-        assert!(store.find_matching("17.0").is_none());
     }
 
     // -- find_exact --
@@ -1480,46 +1547,72 @@ mod tests {
         );
     }
 
-    // -- installed_majors --
+    // -- installed_requests --
 
     #[test]
-    fn installed_majors_discovers_majors() {
+    fn installed_requests_discovers_names() {
         let dir = tempdir().unwrap();
         create_jdk_dir(dir.path(), "21.0.1+12", true);
         create_jdk_dir(dir.path(), "21.0.3+9", true);
         create_jdk_dir(dir.path(), "17.0.2+8", true);
         create_jdk_dir(dir.path(), "11.0.1+13", true);
 
-        let versions = JdkStore::at(dir.path()).installed_majors().unwrap();
-        assert_eq!(versions, vec![11, 17, 21]);
+        let versions = JdkStore::at(dir.path()).installed_requests().unwrap();
+        assert_eq!(versions, vec![request("11"), request("17"), request("21")]);
     }
 
     #[test]
-    fn installed_majors_ignores_non_dirs() {
+    fn installed_requests_ignores_non_dirs() {
         let dir = tempdir().unwrap();
         create_jdk_dir(dir.path(), "21.0.1+12", true);
         // Plain file should be skipped
         fs::write(dir.path().join("some-file.txt"), "").unwrap();
 
-        let versions = JdkStore::at(dir.path()).installed_majors().unwrap();
-        assert_eq!(versions, vec![21]);
+        let versions = JdkStore::at(dir.path()).installed_requests().unwrap();
+        assert_eq!(versions, vec![request("21")]);
     }
 
     #[test]
-    fn installed_majors_empty_dir() {
+    fn installed_requests_empty_dir() {
         let dir = tempdir().unwrap();
-        let versions = JdkStore::at(dir.path()).installed_majors().unwrap();
+        let versions = JdkStore::at(dir.path()).installed_requests().unwrap();
         assert!(versions.is_empty());
+    }
+
+    /// What `jlo update --all` iterates over. EA names are installed names
+    /// too, so they appear here; the *skipping* is the caller's rule, decided
+    /// by the command that has to explain it.
+    #[test]
+    fn installed_requests_names_both_streams() {
+        let dir = tempdir().unwrap();
+        create_jdk_dir(dir.path(), "21.0.5+11", true);
+        create_jdk_dir(dir.path(), "28.0.0-beta+16.0.ea", true);
+
+        let requests = JdkStore::at(dir.path()).installed_requests().unwrap();
+
+        assert_eq!(
+            requests,
+            vec![
+                Request {
+                    major: 21,
+                    stream: Stream::Ga
+                },
+                Request {
+                    major: 28,
+                    stream: Stream::Ea
+                },
+            ]
+        );
     }
 
     /// `jlo update --all` reports an unreadable install directory rather than
     /// quietly finding nothing to update.
     #[test]
-    fn installed_majors_missing_base_dir_is_an_error() {
+    fn installed_requests_missing_base_dir_is_an_error() {
         let dir = tempdir().unwrap();
         let missing = dir.path().join("nothing-installed-here");
 
-        let err = JdkStore::at(&missing).installed_majors().unwrap_err();
+        let err = JdkStore::at(&missing).installed_requests().unwrap_err();
         assert!(
             format!("{err:#}").contains("could not read JDK base directory"),
             "{err:#}"
@@ -1814,7 +1907,7 @@ mod tests {
 
             assert_eq!(
                 report.removed,
-                vec![(21, vec!["21.0.11+9.0.LTS".to_string()])]
+                vec![(request("21"), vec!["21.0.11+9.0.LTS".to_string()])]
             );
             assert!(dir.path().join("21.0.11+10.0.LTS").exists());
             assert!(!dir.path().join("21.0.11+9.0.LTS").exists());
@@ -1854,10 +1947,52 @@ mod tests {
         assert_eq!(store.prune(None).unwrap().removed_count(), before);
     }
 
+    /// `remove --superseded` keeps the newest of each *name*. Without the
+    /// stream in the key, the beta - which sorts above the GA build it
+    /// previews - would make the released build superseded.
+    #[test]
+    fn superseded_counts_within_a_stream_only() {
+        let dir = tempdir().unwrap();
+        create_jdk_dir(dir.path(), "26.0.1+9", true);
+        create_jdk_dir(dir.path(), "26.0.2-beta+101.0.ea", true);
+        let store = JdkStore::at(dir.path());
+
+        assert_eq!(
+            store.superseded_count().unwrap(),
+            0,
+            "one build of each stream supersedes nothing"
+        );
+
+        create_jdk_dir(dir.path(), "26.0.3-beta+102.0.ea", true);
+        assert_eq!(
+            store.superseded_count().unwrap(),
+            1,
+            "the older beta is superseded by the newer beta, and only by it"
+        );
+    }
+
+    #[test]
+    fn prune_keeps_the_newest_of_each_stream() {
+        let dir = tempdir().unwrap();
+        create_jdk_dir(dir.path(), "26.0.1+9", true);
+        create_jdk_dir(dir.path(), "26.0.2-beta+101.0.ea", true);
+        create_jdk_dir(dir.path(), "26.0.3-beta+102.0.ea", true);
+
+        let report = JdkStore::at(dir.path()).prune(None).unwrap();
+
+        assert_eq!(report.removed_count(), 1);
+        assert!(dir.path().join("26.0.1+9").exists(), "the GA build stays");
+        assert!(
+            dir.path().join("26.0.3-beta+102.0.ea").exists(),
+            "the newest beta stays"
+        );
+        assert!(!dir.path().join("26.0.2-beta+101.0.ea").exists());
+    }
+
     /// A `HashMap` yields its keys in an arbitrary order, so the majors used to
     /// print differently from one run to the next over the same directory.
     #[test]
-    fn prune_reports_majors_newest_first() {
+    fn prune_reports_names_newest_first() {
         let dir = tempdir().unwrap();
         for version in [
             "17.0.1+1",
@@ -1872,8 +2007,8 @@ mod tests {
 
         let report = JdkStore::at(dir.path()).prune(None).unwrap();
 
-        let majors: Vec<i64> = report.removed.iter().map(|(major, _)| *major).collect();
-        assert_eq!(majors, vec![25, 21, 17]);
+        let names: Vec<Request> = report.removed.iter().map(|(name, _)| *name).collect();
+        assert_eq!(names, vec![request("25"), request("21"), request("17")]);
         assert_eq!(report.removed_count(), 3);
         assert_eq!(report.removed[0].1, vec!["25.0.1+1"]);
         assert!(report.failures.is_empty());
@@ -2304,11 +2439,39 @@ mod tests {
 
     // -- matches_target --
 
+    /// `jlo remove 26` must not take the beta with it, and `jlo remove 26-ea`
+    /// must reach the beta - the selector is the *name*, like every other rule
+    /// here. Exact-build targets are untouched by that: they name one
+    /// directory and always did.
+    #[test]
+    fn matches_target_selects_by_name_not_by_major() {
+        let ga = InstalledJdk {
+            version: "26.0.1+9".to_string(),
+            major: 26,
+            stream: Stream::Ga,
+            managed: true,
+        };
+        let ea = InstalledJdk {
+            version: "26.0.2-beta+101.0.ea".to_string(),
+            major: 26,
+            stream: Stream::Ea,
+            managed: true,
+        };
+
+        assert!(matches_target(&ga, "26"));
+        assert!(!matches_target(&ea, "26"));
+        assert!(matches_target(&ea, "26-ea"));
+        assert!(!matches_target(&ga, "26-ea"));
+        // The exact build still names exactly one install.
+        assert!(matches_target(&ea, "26.0.2-beta+101.0.ea"));
+    }
+
     #[test]
     fn matches_target_reads_a_bare_integer_as_a_major() {
         let jdk = InstalledJdk {
             version: "17.0.2+8".to_string(),
             major: 17,
+            stream: Stream::Ga,
             managed: true,
         };
 

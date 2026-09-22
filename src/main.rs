@@ -12,12 +12,13 @@ mod ui;
 mod version;
 
 use crate::adoptium::AdoptiumClient;
+use crate::request::Request;
 use crate::resolve::{
     assert_java_version, offline_java_home, requested_versions, resolve_java_home,
     resolve_java_version_from,
 };
 use crate::shellenv::{parse_exec_args, restore_leading_separator, shell_quote, update_path};
-use crate::store::{JdkStore, RemoveError};
+use crate::store::{InstalledJdk, JdkStore, RemoveError};
 use anyhow::{Context, anyhow};
 use clap::Parser;
 use std::collections::HashSet;
@@ -176,14 +177,14 @@ fn cmd_env(
 ) -> Result<(), CommandError> {
     let store = JdkStore::discover()?;
     let resolved = resolve_java_version_from(version, &store, client, offline)?;
-    setup(client, &store, &resolved.version, offline)?;
+    setup(client, &store, resolved.request, offline)?;
 
     // The exports on stdout are the whole effect of this command. If stdout is
     // a terminal nothing captured them, so the exit code says success while
     // nothing happened - the failure shape that sends a CI step, a Makefile
     // recipe or an agent looking for the problem somewhere else entirely.
     if std::io::stdout().is_terminal() {
-        ui::hint!("{}", ui::unsourced_env_hint(&resolved.version));
+        ui::hint!("{}", ui::unsourced_env_hint(&resolved.request.to_string()));
     }
 
     Ok(())
@@ -195,11 +196,11 @@ fn cmd_home(
     offline: bool,
 ) -> Result<(), CommandError> {
     let store = JdkStore::discover()?;
-    let java_version = resolve_java_version_from(version, &store, client, offline)?.version;
+    let request = resolve_java_version_from(version, &store, client, offline)?.request;
     let java_home = if offline {
-        offline_java_home(&store, &java_version, "home")?
+        offline_java_home(&store, request, "home")?
     } else {
-        resolve_java_home(client, &store, &java_version)?
+        resolve_java_home(client, &store, request)?
     };
     // The bare path on stdout, for `$(jlo home 21)`. Lossy would hand the
     // caller a path that does not exist; see `path_str`.
@@ -255,7 +256,7 @@ fn run_exec(client: &AdoptiumClient, version: Option<String>, command: &[String]
     let java_home = JdkStore::discover()
         .and_then(|store| {
             let resolved = resolve_java_version_from(version, &store, client, false)?;
-            resolve_java_home(client, &store, &resolved.version)
+            resolve_java_home(client, &store, resolved.request)
         })
         .unwrap_or_else(|e| {
             ui::error!("{e:#}");
@@ -365,7 +366,7 @@ fn cmd_current() -> Result<(), CommandError> {
         ui::print_lines([ui::provenance_line(&ui::Active {
             path: java_home,
             version: None,
-            major: None,
+            request: None,
             source: Some(conf::Source::Foreign),
             pinned_elsewhere: None,
         })]);
@@ -386,10 +387,10 @@ fn cmd_current() -> Result<(), CommandError> {
     });
 
     let mut active = ui::Active {
-        major: installed
+        request: installed
             .iter()
             .find(|jdk| jdk.version == version)
-            .map(|jdk| jdk.major),
+            .map(InstalledJdk::request),
         path: java_home,
         version: Some(version),
         source: None,
@@ -404,7 +405,9 @@ fn cmd_current() -> Result<(), CommandError> {
     // A config that fails to load is still a failure: it is a file the user
     // wrote and meant, and answering around it would hide the mistake.
     if let Some(configured) = conf::find()? {
-        if configured.version.parse::<i64>().ok() == active.major {
+        // The whole name, so a `.jlorc` pinning `28-ea` is a mismatch on a
+        // shell holding the GA build of 28.
+        if Some(configured.request) == active.request {
             active.source = Some(configured.source);
         } else {
             active.pinned_elsewhere = Some(configured);
@@ -562,11 +565,10 @@ fn cmd_update(
     // `--all` and explicit versions are mutually exclusive (clap enforces it),
     // so these two arms are the whole input space.
     let versions_to_install = if all {
-        let installed: HashSet<String> = store
-            .installed_majors()
+        let installed: HashSet<Request> = store
+            .installed_requests()
             .context("could not determine installed JDK versions")?
             .into_iter()
-            .map(|v| v.to_string())
             .collect();
 
         if installed.is_empty() {
@@ -596,13 +598,13 @@ fn cmd_update(
 fn setup(
     client: &AdoptiumClient,
     store: &JdkStore,
-    java_version: &str,
+    request: Request,
     offline: bool,
 ) -> Result<(), CommandError> {
     let java_home = if offline {
-        offline_java_home(store, java_version, "env")?
+        offline_java_home(store, request, "env")?
     } else {
-        resolve_java_home(client, store, java_version)?
+        resolve_java_home(client, store, request)?
     };
 
     // Collected rather than printed as they are decided: both lines are one

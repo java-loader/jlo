@@ -1,4 +1,5 @@
 use crate::jlo_home_dir;
+use crate::request::Request;
 use anyhow::anyhow;
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -13,8 +14,8 @@ const JLO_DEFAULT_CONFIG_FILE: &str = "default.jlorc";
 /// forgets it the moment the walk finishes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Resolved {
-    /// The Java major version, e.g. "21".
-    pub version: String,
+    /// The version name in play, e.g. `21` or `28-ea`.
+    pub request: Request,
     pub source: Source,
 }
 
@@ -153,14 +154,18 @@ fn find_in(
     if let Some(path) = find_project_config(cwd, home) {
         let version = load(&path).map_err(|e| anyhow!("could not load configuration: {e}"))?;
         return Ok(Some(Resolved {
-            version,
+            // `load` has already run the contents through the same grammar,
+            // so this cannot fail in practice - but it is a parse, and a parse
+            // that reports its own failure beats one that panics on a rule
+            // change here.
+            request: Request::parse(&version)?,
             source: Source::ProjectConfig(shorten_against(&path, cwd)),
         }));
     }
 
     match load(default_path) {
         Ok(version) => Ok(Some(Resolved {
-            version,
+            request: Request::parse(&version)?,
             source: Source::DefaultConfig(default_path.to_path_buf()),
         })),
         // Neither file exists. Whether that is a problem is the caller's call.
@@ -244,7 +249,7 @@ fn load(path: &Path) -> Result<String, std::io::Error> {
         })?
         .to_string();
 
-    if let Err(e) = crate::request::Request::parse(&java_version) {
+    if let Err(e) = Request::parse(&java_version) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             format!("{e} (in '{}')", path.display()),
@@ -316,7 +321,7 @@ fn init_config(path: &Path, latest_release: &str, force: bool) -> anyhow::Result
 /// [`crate::request::Request::parse`], and this is the boolean form the
 /// callers that only need a yes/no still want.
 pub(crate) fn is_valid_version(version: &str) -> bool {
-    crate::request::Request::parse(version).is_ok()
+    Request::parse(version).is_ok()
 }
 
 #[cfg(test)]
@@ -659,7 +664,7 @@ mod tests {
         let resolved = find_in(&project, Some(&home), &default)
             .unwrap()
             .expect("the project .jlorc answers");
-        assert_eq!(resolved.version, "21");
+        assert_eq!(resolved.request.to_string(), "21");
         // Shortened against the cwd, so a status line reads `./.jlorc`
         // rather than an absolute path the user never typed.
         assert_eq!(
@@ -681,7 +686,7 @@ mod tests {
         let default = home.join("missing").join("default.jlorc");
 
         let resolved = find_in(&deep, Some(&home), &default).unwrap().unwrap();
-        assert_eq!(resolved.version, "17");
+        assert_eq!(resolved.request.to_string(), "17");
         assert_eq!(
             resolved.source,
             Source::ProjectConfig(project.join(".jlorc"))
@@ -699,7 +704,7 @@ mod tests {
         fs::write(&default, "25\n").unwrap();
 
         let resolved = find_in(&project, Some(&home), &default).unwrap().unwrap();
-        assert_eq!(resolved.version, "25");
+        assert_eq!(resolved.request.to_string(), "25");
         assert_eq!(resolved.source, Source::DefaultConfig(default));
     }
 

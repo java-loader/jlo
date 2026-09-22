@@ -92,6 +92,18 @@ impl Request {
     }
 }
 
+/// Which stream a parsed build version belongs to.
+///
+/// The prerelease field is the whole test: Adoptium spells every early-access
+/// build with one (`-beta`), and no released build carries one.
+pub(crate) fn stream_of(version: &semver::Version) -> Stream {
+    if version.pre.is_empty() {
+        Stream::Ga
+    } else {
+        Stream::Ea
+    }
+}
+
 impl fmt::Display for Request {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.major)?;

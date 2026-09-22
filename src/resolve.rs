@@ -27,20 +27,17 @@ pub(crate) fn resolve_java_version_from(
     client: &AdoptiumClient,
     offline: bool,
 ) -> anyhow::Result<conf::Resolved> {
-    let resolved = match explicit {
-        Some(version) => conf::Resolved {
-            version,
+    match explicit {
+        Some(version) => Ok(conf::Resolved {
+            request: Request::parse(&version)?,
             source: conf::Source::Argument,
-        },
+        }),
         None => cascade(conf::find()?, newest_installed(store), offline, || {
             client
                 .latest_major()
                 .context("could not fetch latest JDK version")
-        })?,
-    };
-
-    assert_java_version(&resolved.version)?;
-    Ok(resolved)
+        }),
+    }
 }
 
 /// The version-resolution cascade, once the explicit argument is out of the
@@ -82,7 +79,10 @@ fn cascade(
     }
 
     Ok(conf::Resolved {
-        version: latest_release()?,
+        // Adoptium's `available_releases` holds majors that have shipped, so
+        // this is a GA name by construction; parsing it rather than assuming
+        // so keeps the one grammar in one place.
+        request: Request::parse(&latest_release()?)?,
         source: conf::Source::LatestRelease,
     })
 }
@@ -102,11 +102,11 @@ fn cascade(
 fn newest_installed(store: &JdkStore) -> Option<conf::Resolved> {
     store
         .newest_major()
-        .map(|major| conf::Resolved {
-            version: major.to_string(),
+        .and_then(|major| Request::parse(&major.to_string()).ok())
+        .map(|request| conf::Resolved {
+            request,
             source: conf::Source::NewestInstalled,
         })
-        .filter(|resolved| conf::is_valid_version(&resolved.version))
 }
 
 /// `--offline`: answer from the store alone.
@@ -122,13 +122,13 @@ fn newest_installed(store: &JdkStore) -> Option<conf::Resolved> {
 /// send the reader to `home` (and vice versa).
 pub(crate) fn offline_java_home(
     store: &JdkStore,
-    java_version: &str,
+    request: Request,
     command: &str,
 ) -> Result<PathBuf, CommandError> {
-    let java_home = store.find_matching(java_version).ok_or_else(|| {
+    let java_home = store.find_matching(request).ok_or_else(|| {
         CommandError::with_hint(
-            anyhow!("no installed JDK matches Java {java_version}"),
-            format!("Run 'jlo {command} {java_version}' without --offline to install it."),
+            anyhow!("no installed JDK matches Java {request}"),
+            format!("Run 'jlo {command} {request}' without --offline to install it."),
         )
     })?;
 
@@ -151,12 +151,12 @@ pub(crate) fn offline_java_home(
 /// later cannot forget it. Only ever a warning: the install works, and the fix
 /// costs a download, so it is the user's to make.
 fn warn_legacy_layout(store: &JdkStore, java_home: &Path) {
-    if let Some((version, major)) = store.legacy_layout(java_home) {
-        ui::legacy_layout(&version, major);
+    if let Some((version, request)) = store.legacy_layout(java_home) {
+        ui::legacy_layout(&version, request);
     }
 }
 
-/// The majors an explicit run should download: the list given, or the version
+/// The version names an explicit run should download: the list given, or the version
 /// the cascade resolves when the list is empty - the same resolution `env`,
 /// `home` and `exec` do, so a bare `jlo install` means the same version they
 /// would pick.
@@ -173,18 +173,22 @@ pub(crate) fn requested_versions(
     verb: &str,
     store: &JdkStore,
     client: &AdoptiumClient,
-) -> Result<HashSet<String>, CommandError> {
+) -> Result<HashSet<Request>, CommandError> {
     if versions.is_empty() {
         let resolved = resolve_java_version_from(None, store, client, false)?;
-        return Ok(HashSet::from([resolved.version]));
+        return Ok(HashSet::from([resolved.request]));
     }
 
     let mut requested = HashSet::new();
     for v in versions {
-        if conf::is_valid_version(&v) {
-            requested.insert(v);
-        } else {
-            ui::warning!("skipping invalid version '{v}'");
+        match Request::parse(&v) {
+            Ok(request) => {
+                requested.insert(request);
+            }
+            // The grammar's own wording, not a second one: this is the only
+            // path on which a typo in a version list is reported, and "what
+            // is accepted?" is the only question it raises.
+            Err(e) => ui::warning!("skipping {e:#}"),
         }
     }
 
@@ -195,19 +199,19 @@ pub(crate) fn requested_versions(
     Ok(requested)
 }
 
-/// Resolve the `JAVA_HOME` for the requested major version, installing the JDK on
+/// Resolve the `JAVA_HOME` for the requested version name, installing the JDK on
 /// demand if it is not already present. Diagnostics go to stderr; this returns
 /// the path so callers decide what (if anything) to print to stdout.
 pub(crate) fn resolve_java_home(
     client: &AdoptiumClient,
     store: &JdkStore,
-    java_version: &str,
+    request: Request,
 ) -> anyhow::Result<PathBuf> {
-    if let Some(path) = store.find_matching(java_version) {
+    if let Some(path) = store.find_matching(request) {
         warn_legacy_layout(store, &path);
         Ok(path)
     } else {
-        let metadata = client.fetch_metadata(Request::parse(java_version)?)?;
+        let metadata = client.fetch_metadata(request)?;
         store::install_jdk(client, store, &metadata)
     }
 }
@@ -247,7 +251,7 @@ mod tests {
     #[test]
     fn offline_java_home_names_the_calling_command_in_its_hint() {
         let store = JdkStore::at(tempdir().unwrap().path());
-        let err = offline_java_home(&store, "99", "env").expect_err("the store is empty");
+        let err = offline_java_home(&store, request("99"), "env").expect_err("the store is empty");
         assert_eq!(
             format!("{:#}", err.error),
             "no installed JDK matches Java 99"
@@ -265,16 +269,20 @@ mod tests {
     // half of them: stage 4 is a several-hundred-megabyte download, and the
     // cases below are exactly the ones in which it must not be reached.
 
+    fn request(version: &str) -> Request {
+        Request::parse(version).expect("the fixture names a valid version")
+    }
+
     fn configured(version: &str) -> conf::Resolved {
         conf::Resolved {
-            version: version.to_string(),
+            request: request(version),
             source: conf::Source::DefaultConfig(PathBuf::from("/home/u/.jlo/default.jlorc")),
         }
     }
 
     fn installed(version: &str) -> conf::Resolved {
         conf::Resolved {
-            version: version.to_string(),
+            request: request(version),
             source: conf::Source::NewestInstalled,
         }
     }
@@ -298,7 +306,7 @@ mod tests {
         )
         .expect("the default config answers");
 
-        assert_eq!(resolved.version, "21");
+        assert_eq!(resolved.request, request("21"));
         assert!(matches!(resolved.source, conf::Source::DefaultConfig(_)));
     }
 
@@ -309,7 +317,7 @@ mod tests {
         let resolved = cascade(None, Some(installed("25")), false, refuse_network)
             .expect("the installed JDK answers");
 
-        assert_eq!(resolved.version, "25");
+        assert_eq!(resolved.request, request("25"));
         assert_eq!(resolved.source, conf::Source::NewestInstalled);
     }
 
@@ -322,7 +330,7 @@ mod tests {
         let resolved = cascade(None, Some(installed("17")), false, refuse_network)
             .expect("the outdated install still answers");
 
-        assert_eq!(resolved.version, "17");
+        assert_eq!(resolved.request, request("17"));
         assert_eq!(resolved.source, conf::Source::NewestInstalled);
     }
 
@@ -333,7 +341,7 @@ mod tests {
         let resolved = cascade(None, None, false, || Ok("26".to_string()))
             .expect("the latest release answers");
 
-        assert_eq!(resolved.version, "26");
+        assert_eq!(resolved.request, request("26"));
         assert_eq!(resolved.source, conf::Source::LatestRelease);
     }
 
@@ -356,7 +364,7 @@ mod tests {
         let resolved = cascade(None, Some(installed("21")), true, refuse_network)
             .expect("the installed JDK needs no network");
 
-        assert_eq!(resolved.version, "21");
+        assert_eq!(resolved.request, request("21"));
         assert_eq!(resolved.source, conf::Source::NewestInstalled);
     }
 
@@ -389,10 +397,7 @@ mod tests {
             &offline_client(),
         )
         .expect("two of the three are valid");
-        assert_eq!(
-            requested,
-            HashSet::from(["21".to_string(), "25".to_string()])
-        );
+        assert_eq!(requested, HashSet::from([request("21"), request("25")]));
     }
 
     /// A major named twice is one download, not two: the set is what reaches
@@ -406,7 +411,7 @@ mod tests {
             &offline_client(),
         )
         .expect("21 is a valid major");
-        assert_eq!(requested, HashSet::from(["21".to_string()]));
+        assert_eq!(requested, HashSet::from([request("21")]));
     }
 
     // -- offline_java_home --
@@ -431,7 +436,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let store = store_with(dir.path(), "21.0.3+9");
 
-        let path = offline_java_home(&store, "21", "home").expect("21 is installed");
+        let path = offline_java_home(&store, request("21"), "home").expect("21 is installed");
         assert_eq!(path, dir.path().join("21.0.3+9"));
     }
 
@@ -443,7 +448,8 @@ mod tests {
         let dir = tempdir().unwrap();
         let store = store_with(dir.path(), "21.0.3+9");
 
-        let err = offline_java_home(&store, "17", "home").expect_err("17 is not installed");
+        let err =
+            offline_java_home(&store, request("17"), "home").expect_err("17 is not installed");
         assert_eq!(
             format!("{:#}", err.error),
             "no installed JDK matches Java 17"

@@ -204,15 +204,16 @@ pub(crate) fn print_hint(args: std::fmt::Arguments) {
 /// The one thing a pre-bundle macOS install is missing, and how to fix it.
 ///
 /// Two lines rather than one because they are different kinds of statement:
-/// the warning is what is wrong, the hint is what to type. `major` drives the
-/// reinstall command because `jlo install` takes a major - the exact build may
-/// no longer be offered, which is also why this asks rather than migrating
-/// anything by itself.
-pub(crate) fn legacy_layout(version: &str, major: i64) {
+/// the warning is what is wrong, the hint is what to type. `request` drives
+/// the reinstall command because `jlo install` takes a version name - the
+/// exact build may no longer be offered, which is also why this asks rather
+/// than migrating anything by itself. The whole name, so a flat early-access
+/// install is not told to reinstall the released stream.
+pub(crate) fn legacy_layout(version: &str, request: crate::request::Request) {
     warning!(
         "{version} predates J'Lo's macOS bundle layout, so '/usr/libexec/java_home' cannot see it."
     );
-    hint!("Reinstall it to fix that: 'jlo remove {version}' then 'jlo install {major}'.");
+    hint!("Reinstall it to fix that: 'jlo remove {version}' then 'jlo install {request}'.");
 }
 
 pub(crate) fn print_created(args: std::fmt::Arguments) {
@@ -351,17 +352,21 @@ fn partial_line(removed: usize, failures: usize) -> String {
 pub(crate) fn prune_report(report: &crate::store::PruneReport) {
     // Styling adds invisible escape bytes, so pad the plain number first and
     // style the padded string - the same rule the `jlo list` columns follow.
+    // `Display for Request` writes straight to the formatter and so ignores a
+    // width; render first, pad second.
     let width = report
         .removed
         .iter()
-        .map(|(major, _)| major.to_string().len())
+        .map(|(request, _)| request.to_string().len())
         .max()
         .unwrap_or(0);
 
-    for (major, versions) in &report.removed {
+    for (request, versions) in &report.removed {
         eprintln!(
             "{}  {} {}",
-            style(format!("{major:<width$}")).dim().for_stderr(),
+            style(format!("{:<width$}", request.to_string()))
+                .dim()
+                .for_stderr(),
             style("removed").dim().for_stderr(),
             versions.join(", ")
         );
@@ -587,13 +592,14 @@ pub(crate) struct Active {
     /// The install's version, e.g. `25.0.4+101`. `None` when the JDK is not
     /// one of jlo's, which is the one case that reports a path instead.
     pub version: Option<String>,
-    /// The major version of `version`.
-    pub major: Option<i64>,
+    /// The version name of `version` - its major and its stream, so a GA
+    /// build and a pre-release of one major are told apart here too.
+    pub request: Option<crate::request::Request>,
     /// Where the active JDK came from. `None` when it is one of jlo's but
     /// nothing accounts for it - either nothing is pinned, or what is pinned
-    /// is a different major, which `pinned_elsewhere` distinguishes.
+    /// is a different name, which `pinned_elsewhere` distinguishes.
     pub source: Option<crate::conf::Source>,
-    /// A config that pins a *different* major than the one active. Set only
+    /// A config that pins a *different* name than the one active. Set only
     /// when the two disagree; that disagreement is the whole reason this
     /// command answers "and why" rather than just "what".
     pub pinned_elsewhere: Option<crate::conf::Resolved>,
@@ -634,7 +640,7 @@ pub(crate) fn pin_mismatch(pinned: &crate::conf::Resolved) {
     warning!(
         "{} pins Java {}; run 'jlo env' to switch.",
         pinned.source.label(),
-        pinned.version
+        pinned.request
     );
 }
 
@@ -1089,11 +1095,15 @@ mod tests {
     // have no answer to print - so they are covered by the integration
     // suite's exit codes instead.
 
+    fn request(name: &str) -> crate::request::Request {
+        crate::request::Request::parse(name).expect("the fixture names a valid version")
+    }
+
     fn active(version: &str, major: i64) -> Active {
         Active {
             path: PathBuf::from("/jdks").join(version),
             version: Some(version.to_string()),
-            major: Some(major),
+            request: Some(request(&major.to_string())),
             source: None,
             pinned_elsewhere: None,
         }
@@ -1101,7 +1111,7 @@ mod tests {
 
     fn pinned(version: &str, file: &str) -> crate::conf::Resolved {
         crate::conf::Resolved {
-            version: version.to_string(),
+            request: request(version),
             source: crate::conf::Source::ProjectConfig(PathBuf::from(file)),
         }
     }
@@ -1142,7 +1152,7 @@ mod tests {
         let a = Active {
             path: PathBuf::from("/opt/jdk-21"),
             version: None,
-            major: None,
+            request: None,
             source: Some(crate::conf::Source::Foreign),
             pinned_elsewhere: None,
         };
@@ -1212,6 +1222,7 @@ mod tests {
         InstalledJdk {
             version: version.to_string(),
             major,
+            stream: crate::request::Stream::Ga,
             managed: true,
         }
     }
@@ -1325,6 +1336,7 @@ mod tests {
         InstalledJdk {
             version: version.to_string(),
             major,
+            stream: crate::request::Stream::Ga,
             managed: false,
         }
     }
