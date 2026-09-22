@@ -87,8 +87,8 @@ fn cascade(
     })
 }
 
-/// Stage 3 of the cascade: the newest JDK already on disk, whatever major it
-/// is.
+/// Stage 3 of the cascade: the newest released JDK already on disk, whatever
+/// major it is.
 ///
 /// Deliberately no comparison against Adoptium. Asking whether the newest
 /// installed JDK is also the newest release would put a network round trip on
@@ -97,16 +97,14 @@ fn cascade(
 /// resolves to 17 and downloads nothing; stage 4 is reached only when no JDK
 /// is installed at all.
 ///
-/// A store holding nothing but pre-8 JDKs falls through rather than resolving
-/// to a version the rest of jlo would then reject.
+/// Which build counts - released only, at or above the version floor - is
+/// [`store::newest_ga`]'s rule, so `jlo current` and the cascade cannot
+/// disagree about it.
 fn newest_installed(store: &JdkStore) -> Option<conf::Resolved> {
-    store
-        .newest_major()
-        .and_then(|major| Request::parse(&major.to_string()).ok())
-        .map(|request| conf::Resolved {
-            request,
-            source: conf::Source::NewestInstalled,
-        })
+    store.newest_ga_request().map(|request| conf::Resolved {
+        request,
+        source: conf::Source::NewestInstalled,
+    })
 }
 
 /// `--offline`: answer from the store alone.
@@ -216,17 +214,10 @@ pub(crate) fn resolve_java_home(
     }
 }
 
-pub(crate) fn assert_java_version(java_version: &str) -> anyhow::Result<()> {
-    if conf::is_valid_version(java_version) {
-        Ok(())
-    } else {
-        Err(anyhow!(crate::request::Request::rejection(java_version)))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::request::Stream;
     use tempfile::tempdir;
 
     fn owned(items: &[&str]) -> Vec<String> {
@@ -384,6 +375,44 @@ mod tests {
     #[test]
     fn newest_installed_is_none_for_an_empty_store() {
         assert_eq!(newest_installed(&empty_store()), None);
+    }
+
+    /// Stage 3 of the cascade answers from the store, and a pre-release is
+    /// never the answer: `jlo env` with nothing configured must not start
+    /// handing out betas because someone once tried one.
+    #[test]
+    fn the_cascade_never_falls_back_to_a_pre_release() {
+        let dir = tempdir().unwrap();
+        let store = store_with(dir.path(), "28.0.0-beta+16.0.ea");
+
+        let resolved = cascade(None, newest_installed(&store), false, || {
+            Ok("27".to_string())
+        })
+        .expect("stage 4 answers when stage 3 declines");
+
+        assert_eq!(
+            resolved.request,
+            Request {
+                major: 27,
+                stream: Stream::Ga
+            }
+        );
+        assert_eq!(resolved.source, conf::Source::LatestRelease);
+    }
+
+    /// The same store, offline: stage 4 is refused, so this must fail rather
+    /// than quietly resolving to the beta.
+    #[test]
+    fn offline_declines_rather_than_resolving_to_a_pre_release() {
+        let dir = tempdir().unwrap();
+        let store = store_with(dir.path(), "28.0.0-beta+16.0.ea");
+
+        assert!(
+            cascade(None, newest_installed(&store), true, || Err(anyhow!(
+                "no network"
+            )))
+            .is_err()
+        );
     }
 
     // -- requested_versions --

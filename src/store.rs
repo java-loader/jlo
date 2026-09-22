@@ -189,6 +189,24 @@ impl InstalledJdk {
     }
 }
 
+/// The install cascade stage 3 picks: the newest *released* build at or above
+/// the version floor.
+///
+/// GA only, because nobody asked for a pre-release: a machine that once tried
+/// `28-ea` must not start answering a bare `jlo env` with a beta. The floor is
+/// the grammar's own - a store of nothing but pre-8 JDKs is one every other
+/// part of jlo would reject, so stage 3 walks past it rather than resolving to
+/// a version that cannot be asked for.
+///
+/// Takes the list rather than reading the store, because `jlo current` has it
+/// already and must not answer this question differently from the cascade.
+/// `installed` is newest first, as [`JdkStore::list`] leaves it.
+pub(crate) fn newest_ga(installed: &[InstalledJdk]) -> Option<&InstalledJdk> {
+    installed
+        .iter()
+        .find(|jdk| jdk.stream == Stream::Ga && Request::parse(&jdk.major.to_string()).is_ok())
+}
+
 /// One directory found in the store, with everything a single walk can say
 /// about it. Each caller applies its own notion of what counts as a JDK here,
 /// which is why nothing is filtered out yet.
@@ -344,8 +362,8 @@ impl JdkStore {
         }
     }
 
-    /// The major version of the newest JDK in the store, or `None` when
-    /// nothing is installed.
+    /// The name of the newest *released* JDK in the store, or `None` when
+    /// nothing released is installed.
     ///
     /// Stage 3 of `resolve`'s version cascade: what a bare `jlo env` resolves to
     /// when no config anywhere names a version. "Newest" is by semver across
@@ -354,8 +372,8 @@ impl JdkStore {
     /// An unreadable store reads as "nothing installed", matching
     /// [`Self::find_matching`]: both answer "is there one here", and neither
     /// is the place to fail over a directory that cannot be read.
-    pub(crate) fn newest_major(&self) -> Option<i64> {
-        self.list().ok()?.first().map(|jdk| jdk.major)
+    pub(crate) fn newest_ga_request(&self) -> Option<Request> {
+        newest_ga(&self.list().ok()?).map(InstalledJdk::request)
     }
 
     /// The version names present in the store, ascending. A major with a
@@ -1545,6 +1563,43 @@ mod tests {
                 .find_exact(&metadata("21.0.3+9", ""))
                 .is_none()
         );
+    }
+
+    // -- newest_ga_request --
+
+    /// Cascade stage 3's input. A machine that once tried a pre-release must
+    /// not have that build become the answer to a bare `jlo env`.
+    #[test]
+    fn newest_ga_request_ignores_pre_releases() {
+        let dir = tempdir().unwrap();
+        create_jdk_dir(dir.path(), "21.0.5+11", true);
+        create_jdk_dir(dir.path(), "28.0.0-beta+16.0.ea", true);
+
+        assert_eq!(
+            JdkStore::at(dir.path()).newest_ga_request(),
+            Some(Request {
+                major: 21,
+                stream: Stream::Ga
+            })
+        );
+    }
+
+    #[test]
+    fn newest_ga_request_is_none_when_only_pre_releases_are_installed() {
+        let dir = tempdir().unwrap();
+        create_jdk_dir(dir.path(), "28.0.0-beta+16.0.ea", true);
+
+        assert_eq!(JdkStore::at(dir.path()).newest_ga_request(), None);
+    }
+
+    /// The floor the old `newest_installed` filter applied, now inside the
+    /// selector so `jlo current` cannot answer differently from the cascade.
+    #[test]
+    fn newest_ga_request_skips_a_store_below_the_floor() {
+        let dir = tempdir().unwrap();
+        create_jdk_dir(dir.path(), "7.0.4+101", true);
+
+        assert_eq!(JdkStore::at(dir.path()).newest_ga_request(), None);
     }
 
     // -- installed_requests --

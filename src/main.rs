@@ -14,14 +14,12 @@ mod version;
 use crate::adoptium::AdoptiumClient;
 use crate::request::Request;
 use crate::resolve::{
-    assert_java_version, offline_java_home, requested_versions, resolve_java_home,
-    resolve_java_version_from,
+    offline_java_home, requested_versions, resolve_java_home, resolve_java_version_from,
 };
 use crate::shellenv::{parse_exec_args, restore_leading_separator, shell_quote, update_path};
 use crate::store::{InstalledJdk, JdkStore, RemoveError};
 use anyhow::{Context, anyhow};
 use clap::Parser;
-use std::collections::HashSet;
 use std::env;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
@@ -374,17 +372,18 @@ fn cmd_current() -> Result<(), CommandError> {
     };
 
     // Whether the active JDK is the *exact* install stage 3 of the cascade
-    // would pick, not merely one of its major. `list` yields newest first, so
-    // that is its head. The distinction matters because the cascade resolves
-    // a major and `jlo env` then takes the newest build of it: a shell on
-    // 21.0.5 with 21.0.6 sitting beside it agrees on the major but is not
-    // what a bare `jlo env` would hand back, so calling it "the newest
-    // installed JDK" would claim more than is true. The version floor is
-    // checked here for the same reason it is checked in `newest_installed`: a
-    // store of nothing but pre-8 JDKs is one the cascade walks straight past.
-    let is_newest_install = installed.first().is_some_and(|newest| {
-        newest.version == version && conf::is_valid_version(&newest.major.to_string())
-    });
+    // would pick, not merely one of its name. The distinction matters because
+    // the cascade resolves a name and `jlo env` then takes the newest build of
+    // it: a shell on 21.0.5 with 21.0.6 sitting beside it agrees on the name
+    // but is not what a bare `jlo env` would hand back, so calling it "the
+    // newest installed JDK" would claim more than is true. Asked of the
+    // selector rather than re-derived, so this says "from the newest installed
+    // JDK" exactly when a bare `jlo env` would hand back this build - which
+    // puts both of the selector's rules here too: a shell on a pre-release
+    // with a released build installed is not the cascade's answer, and a shell
+    // below the version floor never was.
+    let is_newest_install =
+        store::newest_ga(&installed).is_some_and(|newest| newest.version == version);
 
     let mut active = ui::Active {
         request: installed
@@ -519,7 +518,11 @@ fn cmd_init(
             .context("could not fetch latest JDK version")?,
     };
 
-    assert_java_version(&java_version)?;
+    // Parsed rather than merely checked, so what lands in the file is the
+    // name jlo itself would print: `jlo init 28-ea` writes `28-ea`, and
+    // `jlo init 28-EA` fails before anything is written.
+    let request = Request::parse(&java_version)?;
+    let java_version = request.to_string();
 
     let result = if global {
         conf::init_default_config(&java_version, force)
@@ -555,6 +558,18 @@ fn cmd_install(client: &AdoptiumClient, versions: Vec<String>) -> Result<(), Com
     Ok(store::install_each(client, &store, versions)?)
 }
 
+/// The names `--all` moves: the installed ones, minus the pre-release
+/// streams.
+///
+/// EA builds appear weekly, so `--all` including them would make a routine
+/// update a ~200 MB subscription - and a pre-release is something the user
+/// chose deliberately, so moving it is something they ask for by name.
+fn updatable(installed: impl IntoIterator<Item = Request>) -> Vec<Request> {
+    let mut names: Vec<Request> = installed.into_iter().filter(|r| !r.is_ea()).collect();
+    names.sort();
+    names
+}
+
 fn cmd_update(
     client: &AdoptiumClient,
     versions: Vec<String>,
@@ -565,16 +580,26 @@ fn cmd_update(
     // `--all` and explicit versions are mutually exclusive (clap enforces it),
     // so these two arms are the whole input space.
     let versions_to_install = if all {
-        let installed: HashSet<Request> = store
+        let installed = store
             .installed_requests()
-            .context("could not determine installed JDK versions")?
-            .into_iter()
-            .collect();
+            .context("could not determine installed JDK versions")?;
+        let empty_store = installed.is_empty();
+        let names = updatable(installed);
 
-        if installed.is_empty() {
-            return Err(anyhow!("no installed JDKs to update").into());
+        if names.is_empty() {
+            // Two states, two sentences: "nothing installed" and "nothing
+            // installed that --all moves" are different facts, and the second
+            // one has to name the way out.
+            return Err(if empty_store {
+                anyhow!("no installed JDKs to update").into()
+            } else {
+                anyhow!(
+                    "no released JDKs to update; run 'jlo update <major>-ea' to move a pre-release"
+                )
+                .into()
+            });
         }
-        installed
+        names.into_iter().collect()
     } else {
         requested_versions(versions, "update", &store, client)?
     };
@@ -690,6 +715,7 @@ pub(crate) fn jlo_home_dir() -> anyhow::Result<PathBuf> {
 #[allow(unsafe_code)]
 mod tests {
     use super::*;
+    use crate::request::Stream;
     use tempfile::tempdir;
 
     fn owned(items: &[&str]) -> Vec<String> {
@@ -740,6 +766,31 @@ mod tests {
         assert_eq!(
             format!("{:#}", err.error),
             "no valid Java versions provided to update"
+        );
+    }
+
+    /// `jlo update --all` moves released builds only. EA builds appear weekly,
+    /// so including them would turn --all into a standing subscription; the
+    /// user names the stream when they want it moved.
+    #[test]
+    fn update_all_selects_ga_names_only() {
+        let installed = vec![
+            Request {
+                major: 21,
+                stream: Stream::Ga,
+            },
+            Request {
+                major: 28,
+                stream: Stream::Ea,
+            },
+        ];
+
+        assert_eq!(
+            updatable(installed),
+            vec![Request {
+                major: 21,
+                stream: Stream::Ga
+            }]
         );
     }
 

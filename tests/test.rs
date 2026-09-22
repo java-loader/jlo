@@ -1675,6 +1675,20 @@ fn exec_resolves_the_newest_installed_jdk_for_the_child() {
     .stdout(installed_path(home.path(), "21.0.5+11"));
 }
 
+/// The whole of decision B, from the outside: a store holding only a
+/// pre-release answers a bare `jlo env --offline` with a failure, not with the
+/// beta.
+#[test]
+#[serial]
+fn bare_env_offline_ignores_an_ea_install() {
+    let (home, project) = store_fixture(&["28.0.0-beta+16.0.ea"]);
+
+    cascade_cmd(home.path(), &project, &["env", "--offline"])
+        .assert()
+        .failure()
+        .stdout("");
+}
+
 /// `update` and `install` resolve through the same cascade, and both then ask
 /// Adoptium about whatever it produced. With the network wired to fail, the
 /// version named in the failure is the assertion: reaching Adoptium at all

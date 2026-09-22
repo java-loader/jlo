@@ -315,39 +315,11 @@ fn init_config(path: &Path, latest_release: &str, force: bool) -> anyhow::Result
     Ok(())
 }
 
-/// Whether `version` is a version J'Lo can address.
-///
-/// One question, one answer: the grammar itself lives in
-/// [`crate::request::Request::parse`], and this is the boolean form the
-/// callers that only need a yes/no still want.
-pub(crate) fn is_valid_version(version: &str) -> bool {
-    Request::parse(version).is_ok()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
     use tempfile::tempdir;
-
-    #[test]
-    fn valid_versions() {
-        assert!(is_valid_version("8"));
-        assert!(is_valid_version("11"));
-        assert!(is_valid_version("17"));
-        assert!(is_valid_version("21"));
-        assert!(is_valid_version("25"));
-    }
-
-    #[test]
-    fn invalid_versions() {
-        assert!(!is_valid_version("7"));
-        assert!(!is_valid_version("0"));
-        assert!(!is_valid_version(""));
-        assert!(!is_valid_version("abc"));
-        assert!(!is_valid_version("-1"));
-        assert!(!is_valid_version("8.0"));
-    }
 
     #[test]
     fn load_valid_version() {
