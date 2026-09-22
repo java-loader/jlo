@@ -152,11 +152,11 @@ impl InstallUi {
 
 /// `jlo update` exists to answer "is anything newer available?", so the answer
 /// is its output - unlike `jlo env`, where silence is the answer.
-pub(crate) fn up_to_date(major: &str, version: &str) {
+pub(crate) fn up_to_date(name: &str, version: &str) {
     eprintln!(
         "{} JDK {} is up to date {}",
         style("✓").green().for_stderr(),
-        major,
+        name,
         style(format!("({version})")).dim().for_stderr()
     );
 }
@@ -403,7 +403,7 @@ pub(crate) fn prune_report(report: &crate::store::PruneReport) {
             } else {
                 format!(
                     " {}",
-                    style("(only the newest of each major is installed)")
+                    style("(only the newest build of each name is installed)")
                         .dim()
                         .for_stderr()
                 )
@@ -919,7 +919,7 @@ fn local_status(jdk: &InstalledJdk, installed: &[InstalledJdk]) -> Status {
 }
 
 /// Render the rows as aligned columns: active gutter, major, version, LTS tag,
-/// status.
+/// EA tag, status.
 ///
 /// The gutter is emitted on every line whether or not anything is active, so
 /// the columns sit in the same place from one run to the next - a listing that

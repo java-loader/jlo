@@ -16,7 +16,6 @@ const USER_AGENT: &str = concat!("J'Lo/", env!("CARGO_PKG_VERSION"));
 #[derive(Debug)]
 pub(crate) struct JdkMetadata {
     pub semver: String,
-    pub release_name: String,
     pub package_name: String,
     pub download_link: String,
     pub checksum: String,
@@ -29,7 +28,6 @@ pub(crate) const ADOPTIUM_API_URL: &str = "https://api.adoptium.net";
 #[derive(serde::Deserialize)]
 struct Asset {
     version: AssetVersion,
-    release_name: String,
     binary: AssetBinary,
 }
 
@@ -56,24 +54,21 @@ impl TryFrom<Asset> for JdkMetadata {
     fn try_from(asset: Asset) -> anyhow::Result<Self> {
         let metadata = JdkMetadata {
             semver: asset.version.semver,
-            release_name: asset.release_name,
             package_name: asset.binary.package.name,
             download_link: asset.binary.package.link,
             checksum: asset.binary.package.checksum,
         };
         if metadata.semver.is_empty()
-            || metadata.release_name.is_empty()
             || metadata.package_name.is_empty()
             || metadata.download_link.is_empty()
             || metadata.checksum.is_empty()
         {
             bail!("incomplete metadata received from the Adoptium API");
         }
-        // Three of these name a file or a directory jlo creates. Checked here,
+        // Both of these name a file or a directory jlo creates. Checked here,
         // at the edge, so no caller has to remember which fields are safe to
         // join onto a path.
         plain_name(&metadata.semver, "version.semver")?;
-        plain_name(&metadata.release_name, "release_name")?;
         plain_name(&metadata.package_name, "package name")?;
         Ok(metadata)
     }
@@ -102,12 +97,8 @@ fn plain_name(value: &str, field: &str) -> anyhow::Result<()> {
 /// the array to this OS and architecture rather than the response shape doing
 /// it.
 #[derive(serde::Deserialize)]
-// `release_name` mirrors the API's own field name; renaming it would make the
-// struct definition harder to check against the response it deserialises.
-#[allow(clippy::struct_field_names)]
 struct Release {
     version_data: AssetVersion,
-    release_name: String,
     binaries: Vec<AssetBinary>,
 }
 
@@ -120,7 +111,6 @@ impl TryFrom<Release> for JdkMetadata {
         )?;
         Asset {
             version: release.version_data,
-            release_name: release.release_name,
             binary,
         }
         .try_into()
@@ -468,12 +458,11 @@ mod tests {
 
     // -- metadata validation --
 
-    fn asset(semver: &str, release_name: &str, package_name: &str) -> Asset {
+    fn asset(semver: &str, package_name: &str) -> Asset {
         Asset {
             version: AssetVersion {
                 semver: semver.to_string(),
             },
-            release_name: release_name.to_string(),
             binary: AssetBinary {
                 package: AssetPackage {
                     name: package_name.to_string(),
@@ -486,17 +475,16 @@ mod tests {
 
     #[test]
     fn ordinary_metadata_is_accepted() {
-        let metadata: JdkMetadata = asset("21.0.5+11", "jdk-21.0.5+11", "OpenJDK21U.tar.gz")
+        let metadata: JdkMetadata = asset("21.0.5+11", "OpenJDK21U.tar.gz")
             .try_into()
             .expect("a normal Adoptium response must pass");
         assert_eq!(metadata.semver, "21.0.5+11");
     }
 
-    /// Each of these is joined onto a path: `package name` names the temp file
-    /// the download is written to, `version.semver` the install directory, and
-    /// `release_name` the extracted directory that gets moved into it. A value
-    /// that walks out of the directory it is joined onto has to be refused
-    /// before the join, not noticed after it. A leading `./` goes with them:
+    /// Both of these are joined onto a path: `package name` names the temp
+    /// file the download is written to, and `version.semver` the install
+    /// directory. A value that walks out of the directory it is joined onto
+    /// has to be refused before the join, not noticed after it. A leading `./` goes with them:
     /// `Path::components` keeps it, Adoptium never sends it, and a check that
     /// refuses it is the one that is easy to read.
     #[test]
@@ -510,12 +498,8 @@ mod tests {
             ".",
             "./jdk.tar.gz",
         ] {
-            for (semver, release_name, package_name) in [
-                (escape, "jdk-21", "jdk.tar.gz"),
-                ("21.0.5+11", escape, "jdk.tar.gz"),
-                ("21.0.5+11", "jdk-21", escape),
-            ] {
-                let err = JdkMetadata::try_from(asset(semver, release_name, package_name))
+            for (semver, package_name) in [(escape, "jdk.tar.gz"), ("21.0.5+11", escape)] {
+                let err = JdkMetadata::try_from(asset(semver, package_name))
                     .expect_err("an escaping field must be refused");
                 assert!(
                     format!("{err:#}").contains("unusable"),
@@ -573,7 +557,6 @@ mod client_tests {
     fn fake_metadata(download_link: String, checksum: &str) -> JdkMetadata {
         JdkMetadata {
             semver: "21.0.11+10.0.LTS".to_string(),
-            release_name: "jdk-21.0.11+10".to_string(),
             package_name: "fake.tar.gz".to_string(),
             download_link,
             checksum: checksum.to_string(),
@@ -594,7 +577,6 @@ mod client_tests {
             .unwrap();
 
         assert_eq!(metadata.semver, "21.0.11+10.0.LTS");
-        assert_eq!(metadata.release_name, "jdk-21.0.11+10");
         assert_eq!(
             metadata.package_name,
             "OpenJDK21U-jdk_aarch64_mac_hotspot_21.0.11_10.tar.gz"

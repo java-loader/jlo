@@ -15,7 +15,7 @@ use anyhow::{Context, anyhow};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-/// Determine the requested major version: the explicit CLI argument if
+/// Determine the requested version name: the explicit CLI argument if
 /// present, otherwise the fallback cascade below.
 ///
 /// Returns where the version came from as well as what it is, because

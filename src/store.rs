@@ -528,7 +528,7 @@ impl JdkStore {
     }
 
     /// Delete the JDKs `targets` name: for each one, every installed build of
-    /// a major version (`17`), or the one exact build (`17.0.11+10`).
+    /// a version name (`17`, `28-ea`), or the one exact build (`17.0.11+10`).
     ///
     /// The explicit counterpart to [`Self::prune`] - the targets the user
     /// named, rather than a set derived from a rule.
@@ -653,7 +653,6 @@ impl JdkStore {
     ) -> anyhow::Result<PathBuf> {
         let dest_dir = self.base.join(&metadata.semver);
 
-        // Validate extracted path
         let extracted_jdk_path =
             find_jdk_path(source_dir).context("could not find the extracted JDK directory")?;
 
@@ -1106,11 +1105,10 @@ mod tests {
         }
     }
 
-    /// A `JdkMetadata` carrying only the two fields the store looks at.
-    fn metadata(semver: &str, release_name: &str) -> JdkMetadata {
+    /// A `JdkMetadata` carrying only the field the store looks at.
+    fn metadata(semver: &str) -> JdkMetadata {
         JdkMetadata {
             semver: semver.to_string(),
-            release_name: release_name.to_string(),
             package_name: String::new(),
             download_link: String::new(),
             checksum: String::new(),
@@ -1532,29 +1530,6 @@ mod tests {
         );
     }
 
-    /// A prefix match would let `17` select `1.8.0+402` as readily as
-    /// `17.0.2+8`. The major is parsed, so it does not. The two spellings a
-    /// prefix match would also have let through - `1` and `17.0` - cannot
-    /// reach here at all now: `Request::parse` refuses both, which is where
-    /// that rule is pinned.
-    #[test]
-    fn find_matching_respects_version_boundaries() {
-        let dir = tempdir().unwrap();
-        create_jdk_dir(dir.path(), "17.0.2+8", true);
-        create_jdk_dir(dir.path(), "1.8.0+402", true);
-
-        assert_eq!(
-            JdkStore::at(dir.path())
-                .find_matching(request("17"))
-                .unwrap()
-                .file_name()
-                .unwrap()
-                .to_str()
-                .unwrap(),
-            "17.0.2+8"
-        );
-    }
-
     // -- find_exact --
 
     #[test]
@@ -1564,7 +1539,7 @@ mod tests {
 
         assert!(
             JdkStore::at(dir.path())
-                .find_exact(&metadata("21.0.3+9", ""))
+                .find_exact(&metadata("21.0.3+9"))
                 .is_some()
         );
     }
@@ -1575,7 +1550,7 @@ mod tests {
 
         assert!(
             JdkStore::at(dir.path())
-                .find_exact(&metadata("21.0.3+9", ""))
+                .find_exact(&metadata("21.0.3+9"))
                 .is_none()
         );
     }
@@ -2610,7 +2585,7 @@ mod tests {
 
         let returned = JdkStore::at(dest_parent)
             .install(
-                &metadata("21.0.3+9", release),
+                &metadata("21.0.3+9"),
                 source_dir.path(),
                 &InstallUi::hidden("test"),
             )

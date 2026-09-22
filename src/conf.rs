@@ -8,10 +8,10 @@ use std::path::{Path, PathBuf};
 const JLO_CONFIG_FILE: &str = ".jlorc";
 const JLO_DEFAULT_CONFIG_FILE: &str = "default.jlorc";
 
-/// A resolved Java major version, and where it came from.
+/// A resolved Java version name, and where it came from.
 ///
-/// The provenance is the point: `jlo current` reports it, and a bare `String`
-/// forgets it the moment the walk finishes.
+/// The provenance is the point: `jlo current` reports it, and a bare
+/// [`Request`] forgets it the moment the walk finishes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Resolved {
     /// The version name in play, e.g. `21` or `28-ea`.

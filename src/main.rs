@@ -555,14 +555,14 @@ fn cmd_init(
     })
 }
 
-/// Download the latest build of each major named, without touching the
+/// Download the latest build of each name given, without touching the
 /// current shell.
 ///
 /// Deliberately a second verb rather than an alias for `update`: "make sure
-/// this major is here" and "bring what is here up to date" are different
+/// this name is here" and "bring what is here up to date" are different
 /// questions, and they coincide only because jlo keeps exactly one build per
-/// major. Hence no `--all` here - there is no such thing as installing every
-/// major - while `update` keeps its own meaning and wording.
+/// name. Hence no `--all` here - there is no such thing as installing every
+/// name - while `update` keeps its own meaning and wording.
 fn cmd_install(client: &AdoptiumClient, versions: Vec<String>) -> Result<(), CommandError> {
     let store = JdkStore::discover()?;
     let versions = requested_versions(versions, "install", &store, client)?;
