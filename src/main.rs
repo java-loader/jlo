@@ -328,11 +328,21 @@ fn cmd_current() -> Result<(), CommandError> {
     let installed = store.list().context("could not list installed JDKs")?;
 
     let Some(version) = store.active_version(&installed, Some(&java_home)) else {
-        // Inside the store but not among the installs it can list: the
-        // directory went away under a shell that is still pointing at it,
-        // which is what 'jlo remove' on the live JDK leaves behind. Reporting
-        // that as a JDK set outside jlo would be wrong - the install was ours.
-        if is_inside(store.base(), &java_home) {
+        // Inside the store but not among the installs it can list, *and*
+        // gone: the directory went away under a shell that is still pointing
+        // at it, which is what 'jlo remove' on the live JDK leaves behind.
+        // Reporting that as a JDK set outside jlo would be wrong - the
+        // install was ours.
+        //
+        // The existence check is the whole of what separates that from the
+        // other way to be unlistable while inside the store: a vendor-named
+        // directory (`temurin-21.0.1`), which is what IntelliJ's own
+        // downloads land as. Those share the store by design and are
+        // deliberately invisible to the listing, so without this check a JDK
+        // that is sitting right there would be reported as missing - and
+        // `jlo list --offline`, which asks the same question, already calls
+        // it foreign.
+        if is_inside(store.base(), &java_home) && !java_home.exists() {
             return Err(CommandError::with_hint(
                 anyhow!(
                     "$JAVA_HOME points at a jlo install that is no longer there ({}).",
@@ -434,12 +444,31 @@ fn is_inside(base: &Path, path: &Path) -> bool {
 /// the rule skips it, a name refuses.
 fn cmd_remove(versions: &[String], superseded: bool) -> Result<(), CommandError> {
     let store = JdkStore::discover()?;
-    if superseded {
-        let report = store.prune().context("could not remove superseded JDKs")?;
+    let active = active_java_home();
+
+    // Both selectors report what they did and then fail on the same
+    // condition. A deletion that could not be made is the one outcome that
+    // must not exit 0: the report has already named each failure, but a
+    // script chaining `jlo remove ... && ...` reads the status, not the
+    // lines, and would go on believing the store had been reduced.
+    let failures = if superseded {
+        let report = store
+            .prune(active.as_deref())
+            .context("could not remove superseded JDKs")?;
         ui::prune_report(&report);
+        report.failures.len()
     } else {
-        let report = store.remove(versions, active_java_home().as_deref())?;
+        let report = store.remove(versions, active.as_deref())?;
         ui::remove_report(&report);
+        report.failures.len()
+    };
+
+    if failures > 0 {
+        return Err(anyhow!(
+            "{failures} JDK{} could not be removed",
+            if failures == 1 { "" } else { "s" }
+        )
+        .into());
     }
     Ok(())
 }
@@ -573,7 +602,7 @@ fn setup(
     }
 
     let java_bin_path = java_home.join("bin").to_string_lossy().into_owned();
-    let current_path = env::var("PATH").unwrap_or_default();
+    let current_path = shellenv::current_path()?;
     if let Some(updated_path) = update_path(&java_bin_path, &current_path, store.base())? {
         exports.push(format!("export PATH={}", shell_quote(&updated_path)));
     }

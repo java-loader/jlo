@@ -1216,11 +1216,14 @@ fn tilde(path: &Path, home: Option<&Path>) -> String {
     }
 }
 
-/// POSIX single-quoting. An apostrophe closes the quote, so it is emitted as
-/// the standard escape - close, escaped apostrophe, reopen.
-fn sq(s: &str) -> String {
-    format!("'{}'", s.replace('\'', r"'\''"))
-}
+/// POSIX single-quoting, as the one implementation of it.
+///
+/// Every value this module writes into generated shell code goes through
+/// here, for the same reason `jlo env`'s exports do: the line is executed, so
+/// a `$`, a backtick or a quote in a `JLO_HOME` path is code rather than
+/// data. A second copy of the rule is a second thing to get wrong, so this is
+/// a rename of `shellenv::shell_quote` and nothing more.
+use crate::shellenv::shell_quote as sq;
 
 fn display(path: &Path) -> String {
     path.to_string_lossy().into_owned()

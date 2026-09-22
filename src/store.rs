@@ -53,6 +53,12 @@ pub(crate) struct PruneReport {
     /// on a machine that also uses sdkman or Homebrew this is every other JDK,
     /// and a line each would bury the removals.
     pub(crate) skipped_unmanaged: usize,
+    /// The superseded build left alone because `$JAVA_HOME` points at it. At
+    /// most one, there being only one `$JAVA_HOME`. Named rather than counted
+    /// for the same reason as [`RemoveReport::skipped_in_use`]: it is the one
+    /// skip the user can act on, by switching shells and running the command
+    /// again.
+    pub(crate) skipped_in_use: Option<String>,
 }
 
 impl PruneReport {
@@ -313,7 +319,7 @@ impl JdkStore {
     /// The major version of the newest JDK in the store, or `None` when
     /// nothing is installed.
     ///
-    /// Stage 3 of `main`'s version cascade: what a bare `jlo env` resolves to
+    /// Stage 3 of `resolve`'s version cascade: what a bare `jlo env` resolves to
     /// when no config anywhere names a version. "Newest" is by semver across
     /// every major, so a store holding 17.0.11 and 21.0.5 answers 21.
     ///
@@ -368,7 +374,21 @@ impl JdkStore {
     }
 
     /// Remove every managed JDK that is not the newest of its major.
-    pub(crate) fn prune(&self) -> anyhow::Result<PruneReport> {
+    ///
+    /// `active_java_home` is the directory `$JAVA_HOME` points at, if any, and
+    /// it is skipped by exactly the rule [`Self::remove`] applies to a named
+    /// target: deleting the JDK the calling shell is on leaves that shell
+    /// pointing at a path that no longer exists - the hazard that killed `jlo
+    /// update --clean`. The two selectors of one verb must not disagree about
+    /// it, and `jlo update` steers the user straight here, printing the `jlo
+    /// remove --superseded` hint into the same shell it just superseded a
+    /// build in.
+    ///
+    /// A skip, not a refusal: the other superseded builds still go. It is
+    /// passed in rather than read here for the same reason as in
+    /// [`Self::remove`] - so the guard is testable without mutating the
+    /// process environment.
+    pub(crate) fn prune(&self, active_java_home: Option<&Path>) -> anyhow::Result<PruneReport> {
         // collector major versions
         let mut installed_jdks: HashMap<i64, Vec<Candidate>> = HashMap::new();
         let mut report = PruneReport::default();
@@ -379,15 +399,21 @@ impl JdkStore {
                 crate::ui::warning!("ignoring directory with invalid name {path:?}");
                 continue;
             }
+            // The major is parsed before the marker is consulted, so
+            // `skipped_unmanaged` counts only directories `jlo list` would
+            // show. A vendor-named `IntelliJ` download (`temurin-21.0.1`) is not
+            // an install jlo declined to touch - it is not an install jlo can
+            // see at all, and counting it would report "left 1 install alone"
+            // about something the listing never mentioned.
+            let Some(major) = candidate.major else {
+                crate::ui::warning!("ignoring non-semver directory {path:?}");
+                continue;
+            };
             if !candidate.managed {
                 // skip directories not managed by jlo
                 report.skipped_unmanaged += 1;
                 continue;
             }
-            let Some(major) = candidate.major else {
-                crate::ui::warning!("ignoring non-semver directory {path:?}");
-                continue;
-            };
             installed_jdks.entry(major).or_default().push(candidate);
         }
 
@@ -421,6 +447,14 @@ impl JdkStore {
             {
                 let name = old_jdk.name.as_deref().unwrap_or("unknown").to_string();
                 let path = &old_jdk.path;
+                // Both spellings of the entry are compared, as in
+                // `Self::remove`: `owns` is deliberately not `java_home_in`,
+                // so a bundle whose `Contents/Home` has gone unreadable is
+                // still protected.
+                if active_java_home.is_some_and(|active| owns(&self.base.join(&name), active)) {
+                    report.skipped_in_use = Some(name);
+                    continue;
+                }
                 match remove_install(&self.base, &name) {
                     Ok(()) => removed.push(name),
                     Err(e) => report
@@ -1094,7 +1128,7 @@ mod tests {
         create_jdk_dir(dir.path(), "21.0.1+12", true);
         create_jdk_dir(dir.path(), "21.0.3+9", true);
 
-        let report = JdkStore::at(dir.path()).prune().unwrap();
+        let report = JdkStore::at(dir.path()).prune(None).unwrap();
 
         assert_eq!(report.removed_count(), 1);
         assert!(!sibling_marker(dir.path(), "21.0.1+12").exists());
@@ -1512,12 +1546,79 @@ mod tests {
         create_jdk_dir(dir.path(), "21.0.3+9", true);
         create_jdk_dir(dir.path(), "17.0.2+8", true);
 
-        JdkStore::at(dir.path()).prune().unwrap();
+        JdkStore::at(dir.path()).prune(None).unwrap();
 
         // 21.0.3+9 kept, 21.0.1+12 removed, 17.0.2+8 kept (only version for major 17)
         assert!(dir.path().join("21.0.3+9").exists());
         assert!(!dir.path().join("21.0.1+12").exists());
         assert!(dir.path().join("17.0.2+8").exists());
+    }
+
+    /// The guard `jlo remove <version>` applies to a named target, applied by
+    /// the other selector of the same verb. `jlo update` prints the `jlo
+    /// remove --superseded` hint into the shell it just superseded a build
+    /// in, so this is the ordinary flow, not a corner: without it the next
+    /// command in that shell runs against a `$JAVA_HOME` that no longer
+    /// exists.
+    #[test]
+    fn prune_leaves_the_jdk_java_home_points_at_alone() {
+        let dir = tempdir().unwrap();
+        create_jdk_dir(dir.path(), "21.0.1+12", true);
+        create_jdk_dir(dir.path(), "21.0.3+9", true);
+
+        let active = dir.path().join("21.0.1+12");
+        let report = JdkStore::at(dir.path()).prune(Some(&active)).unwrap();
+
+        assert!(active.exists(), "the live JDK must survive");
+        assert_eq!(report.skipped_in_use.as_deref(), Some("21.0.1+12"));
+        assert_eq!(report.removed_count(), 0);
+    }
+
+    /// `$JAVA_HOME` on a macOS bundle names `<version>/Contents/Home`, not the
+    /// store entry, so a guard comparing only the entry would protect nothing
+    /// on the platform the bundle exists for.
+    #[test]
+    fn prune_recognises_the_bundle_spelling_of_the_live_jdk() {
+        let dir = tempdir().unwrap();
+        let active = create_bundle_jdk_dir(dir.path(), "21.0.1+12", true);
+        create_bundle_jdk_dir(dir.path(), "21.0.3+9", true);
+
+        let report = JdkStore::at(dir.path()).prune(Some(&active)).unwrap();
+
+        assert!(dir.path().join("21.0.1+12").exists());
+        assert_eq!(report.skipped_in_use.as_deref(), Some("21.0.1+12"));
+    }
+
+    /// A skip, not a refusal: the live JDK stays and every other superseded
+    /// build still goes.
+    #[test]
+    fn prune_removes_the_other_superseded_builds_around_the_live_one() {
+        let dir = tempdir().unwrap();
+        create_jdk_dir(dir.path(), "21.0.1+12", true);
+        create_jdk_dir(dir.path(), "21.0.3+9", true);
+        create_jdk_dir(dir.path(), "17.0.2+8", true);
+        create_jdk_dir(dir.path(), "17.0.9+9", true);
+
+        let active = dir.path().join("21.0.1+12");
+        JdkStore::at(dir.path()).prune(Some(&active)).unwrap();
+
+        assert!(active.exists());
+        assert!(!dir.path().join("17.0.2+8").exists(), "17.0.2+8 still goes");
+    }
+
+    /// A vendor-named `IntelliJ` download is not an install jlo declined to
+    /// touch - it is one jlo cannot see. Counting it would make
+    /// `jlo remove --superseded` report "left 1 install alone" about
+    /// something `jlo list` never mentioned.
+    #[test]
+    fn prune_does_not_count_a_vendor_named_directory_as_an_unmanaged_install() {
+        let dir = tempdir().unwrap();
+        create_jdk_dir(dir.path(), "21.0.3+9", true);
+        std::fs::create_dir_all(dir.path().join("temurin-17.0.9")).unwrap();
+
+        let report = JdkStore::at(dir.path()).prune(None).unwrap();
+
+        assert_eq!(report.skipped_unmanaged, 0);
     }
 
     #[test]
@@ -1526,7 +1627,7 @@ mod tests {
         create_jdk_dir(dir.path(), "21.0.1+12", false); // no marker
         create_jdk_dir(dir.path(), "21.0.3+9", true);
 
-        JdkStore::at(dir.path()).prune().unwrap();
+        JdkStore::at(dir.path()).prune(None).unwrap();
 
         // Unmanaged dir should not be touched
         assert!(dir.path().join("21.0.1+12").exists());
@@ -1548,7 +1649,7 @@ mod tests {
                 create_jdk_dir(dir.path(), version, true);
             }
 
-            let report = JdkStore::at(dir.path()).prune().unwrap();
+            let report = JdkStore::at(dir.path()).prune(None).unwrap();
 
             assert_eq!(
                 report.removed,
@@ -1569,7 +1670,7 @@ mod tests {
         create_jdk_dir(dir.path(), "21.0.11+9", true);
         create_jdk_dir(dir.path(), "v21.0.11+9", true);
 
-        let report = JdkStore::at(dir.path()).prune().unwrap();
+        let report = JdkStore::at(dir.path()).prune(None).unwrap();
 
         assert_eq!(report.removed_count(), 0);
         assert!(dir.path().join("21.0.11+9").exists());
@@ -1589,7 +1690,7 @@ mod tests {
         let store = JdkStore::at(dir.path());
         let before = store.superseded_count().unwrap();
         assert_eq!(before, 1);
-        assert_eq!(store.prune().unwrap().removed_count(), before);
+        assert_eq!(store.prune(None).unwrap().removed_count(), before);
     }
 
     /// A `HashMap` yields its keys in an arbitrary order, so the majors used to
@@ -1608,7 +1709,7 @@ mod tests {
             create_jdk_dir(dir.path(), version, true);
         }
 
-        let report = JdkStore::at(dir.path()).prune().unwrap();
+        let report = JdkStore::at(dir.path()).prune(None).unwrap();
 
         let majors: Vec<i64> = report.removed.iter().map(|(major, _)| *major).collect();
         assert_eq!(majors, vec![25, 21, 17]);
@@ -1624,7 +1725,7 @@ mod tests {
         create_jdk_dir(dir.path(), "21.0.3+9", false);
         create_jdk_dir(dir.path(), "17.0.2+8", true);
 
-        let report = JdkStore::at(dir.path()).prune().unwrap();
+        let report = JdkStore::at(dir.path()).prune(None).unwrap();
 
         assert_eq!(report.skipped_unmanaged, 2);
         assert_eq!(report.removed_count(), 0);
@@ -1636,7 +1737,7 @@ mod tests {
         let dir = tempdir().unwrap();
         create_jdk_dir(dir.path(), "21.0.3+9", true);
 
-        JdkStore::at(dir.path()).prune().unwrap();
+        JdkStore::at(dir.path()).prune(None).unwrap();
         assert!(dir.path().join("21.0.3+9").exists());
     }
 
@@ -1647,7 +1748,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let missing = dir.path().join("never-installed");
 
-        let err = JdkStore::at(&missing).prune().unwrap_err();
+        let err = JdkStore::at(&missing).prune(None).unwrap_err();
         assert!(
             format!("{err:#}").contains("could not read JDK base directory"),
             "{err:#}"

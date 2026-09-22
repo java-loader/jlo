@@ -7,7 +7,7 @@
 //! which subcommand asked.
 
 use crate::ui;
-use anyhow::Context;
+use anyhow::{Context, anyhow};
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process::exit;
@@ -59,6 +59,36 @@ pub(crate) fn update_path(
         Ok(None)
     } else {
         Ok(Some(new_path))
+    }
+}
+
+/// The caller's `PATH`, or an error when it is not valid UTF-8.
+///
+/// `env::var(..).unwrap_or_default()` is the wrong shape here, and quietly so:
+/// it maps a non-UTF-8 `PATH` to the empty string, and the empty string is a
+/// legitimate value meaning "nothing on PATH". The JDK's `bin` would then be
+/// the only entry `jlo env` emits - the user's whole `PATH` replaced, with a
+/// trailing empty component that makes the shell search the working
+/// directory. Unset really does mean empty; undecodable does not, and is the
+/// one case that has to stop before anything reaches stdout.
+///
+/// This is also what makes the `PATH contains non-UTF-8 characters` context
+/// below reachable in principle; by the time a `&str` has been taken, the
+/// question has already been answered.
+pub(crate) fn current_path() -> anyhow::Result<String> {
+    classify_path(env::var("PATH"))
+}
+
+/// The decision behind [`current_path`], taking the lookup's result rather
+/// than making it, so the three arms are testable without mutating the
+/// process environment.
+fn classify_path(looked_up: Result<String, env::VarError>) -> anyhow::Result<String> {
+    match looked_up {
+        Ok(path) => Ok(path),
+        Err(env::VarError::NotPresent) => Ok(String::new()),
+        Err(env::VarError::NotUnicode(_)) => Err(anyhow!(
+            "PATH is not valid UTF-8, so jlo cannot rewrite it without losing entries"
+        )),
     }
 }
 
@@ -147,14 +177,12 @@ pub(crate) fn exec_command(java_home: &Path, command: &[String]) -> ! {
         .expect("command is non-empty (checked in parse_exec_args)");
 
     let java_bin = java_home.join("bin");
-    let new_path = child_path(
-        &java_bin.to_string_lossy(),
-        &env::var("PATH").unwrap_or_default(),
-    )
-    .unwrap_or_else(|e| {
-        ui::error!("{e:#}");
-        exit(1);
-    });
+    let new_path = current_path()
+        .and_then(|current| child_path(&java_bin.to_string_lossy(), &current))
+        .unwrap_or_else(|e| {
+            ui::error!("{e:#}");
+            exit(1);
+        });
 
     // `exec` only returns if it failed to launch the program.
     let err = Command::new(program)
@@ -359,6 +387,30 @@ mod tests {
     #[test]
     fn child_path_handles_empty_path() {
         assert_eq!(child_path("/jdk/21/bin", "").unwrap(), "/jdk/21/bin");
+    }
+
+    /// `env::var(..).unwrap_or_default()` used to sit where `current_path`
+    /// does, and it maps an undecodable `PATH` to the empty string - which
+    /// `update_path` reads as "nothing on PATH". `jlo env` then emitted
+    /// `export PATH='<jdk>/bin:'`: the user's whole PATH gone, and a trailing
+    /// empty component that makes the shell search the working directory.
+    /// Neither the compiler nor clippy sees the difference between the two
+    /// `VarError` arms, which is the whole reason this is pinned.
+    #[test]
+    fn an_empty_path_is_not_the_same_as_an_undecodable_one() {
+        // Unset is genuinely empty, and the JDK's bin is the whole answer.
+        assert_eq!(child_path("/jdk/21/bin", "").unwrap(), "/jdk/21/bin");
+
+        // Undecodable has to stop instead, because there is no correct
+        // rewrite of a PATH jlo cannot read.
+        let err = classify_path(Err(env::VarError::NotUnicode(std::ffi::OsString::new())))
+            .expect_err("an undecodable PATH has no safe rewrite");
+        assert!(err.to_string().contains("not valid UTF-8"), "{err}");
+
+        assert_eq!(
+            classify_path(Err(env::VarError::NotPresent)).unwrap(),
+            String::new()
+        );
     }
 
     #[test]

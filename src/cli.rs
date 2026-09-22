@@ -148,10 +148,11 @@ newer exists, so a machine holding only Java 17 resolves to 17.
 --offline stops after that step instead of downloading. Only major
 versions are accepted: 21, not 21.0.5.
 
-On success this writes export statements to stdout and nothing
-anywhere else. To see which JDK is active and where the version came
-from, run jlo current - it starts from the live JAVA_HOME, so it can
-also say when the two disagree."
+On success stdout carries the export statements and nothing else.
+Anything else jlo has to say - download progress, a warning - goes to
+stderr, where the shell will not try to execute it. To see which JDK
+is active and where the version came from, run jlo current - it starts
+from the live JAVA_HOME, so it can also say when the two disagree."
     )]
     Env {
         /// Java major version. Default: .jlorc, the newest installed JDK, then the latest release
@@ -366,7 +367,10 @@ Print a shell completion script
 The installer writes these to $JLO_HOME/completions. To load one
 directly:
 
-  source <(jlo completions bash)"
+  eval \"$(jlo completions bash)\"
+
+Not 'source <(...)': process substitution silently sources nothing
+under the bash 3.2 macOS ships, and still exits 0."
     )]
     Completions {
         /// Shell to generate completions for

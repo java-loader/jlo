@@ -1340,6 +1340,29 @@ fn current_reports_a_removed_install_rather_than_calling_it_foreign() {
         .stderr(predicate::str::contains("jlo env"));
 }
 
+/// The other way to be inside the store and absent from the listing, and the
+/// one the test above must not swallow: a vendor-named directory, which is
+/// what the IDE's own JDK downloads land as. The store is shared with
+/// `IntelliJ` by design, and `is_jdk_version_dir` deliberately keeps a
+/// non-semver name out of `jlo list` - so "unlistable" alone cannot mean
+/// "gone", and only an existence check tells the two apart.
+/// `jlo list --offline` already calls this JDK foreign, and `jlo current` has
+/// to agree with it.
+#[test]
+fn current_calls_a_vendor_named_jdk_in_the_store_foreign_rather_than_missing() {
+    let (home, project) = current_fixture("25.0.4+101");
+    let vendor = store_base(home.path()).join("temurin-17.0.9");
+    std::fs::create_dir_all(vendor.join("bin")).unwrap();
+
+    current_cmd(home.path(), &project)
+        .env("JAVA_HOME", &vendor)
+        .assert()
+        .success()
+        .code(0)
+        .stdout(predicate::str::contains("($JAVA_HOME, set outside jlo)"))
+        .stderr(predicate::str::is_empty());
+}
+
 /// The command answers from disk and the environment alone. The API URL points
 /// at a port nothing listens on, so a request would surface as a connection
 /// error instead of the answer.

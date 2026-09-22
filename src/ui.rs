@@ -333,6 +333,17 @@ macro_rules! created {
 
 pub(crate) use {created, error, hint, warning};
 
+/// The line that replaces the green tick when some deletions went and others
+/// failed: what did go, so the `!` lines above are read as the remainder
+/// rather than as the whole run.
+fn partial_line(removed: usize, failures: usize) -> String {
+    format!(
+        "  removed {removed} JDK{} before the failure{}",
+        if removed == 1 { "" } else { "s" },
+        if failures == 1 { "" } else { "s" }
+    )
+}
+
 /// Report a `jlo remove --superseded` run.
 ///
 /// Deletion is the one thing jlo does that cannot be undone, so unlike `jlo
@@ -360,14 +371,38 @@ pub(crate) fn prune_report(report: &crate::store::PruneReport) {
         eprintln!("{} {}", style("!").red().for_stderr(), failure);
     }
 
+    // The green tick is reserved for a run that did what it was asked, so a
+    // run whose deletions all failed gets neither it nor "Nothing to remove" -
+    // that line would be a false claim about a store still holding every one
+    // of them. The caller turns the same condition into a non-zero exit.
     let count = report.removed_count();
-    if count == 0 {
+    if !report.failures.is_empty() {
+        if count > 0 {
+            eprintln!(
+                "{}",
+                style(partial_line(count, report.failures.len()))
+                    .dim()
+                    .for_stderr()
+            );
+        }
+    } else if count == 0 {
+        // The parenthetical is the *reason* nothing went, so it cannot be
+        // printed when the reason was the skip below - the store is then
+        // holding a superseded build, and saying otherwise would contradict
+        // the warning two lines later.
         eprintln!(
-            "{} Nothing to remove {}",
+            "{} Nothing to remove{}",
             style("✓").green().for_stderr(),
-            style("(only the newest of each major is installed)")
-                .dim()
-                .for_stderr()
+            if report.skipped_in_use.is_some() {
+                String::new()
+            } else {
+                format!(
+                    " {}",
+                    style("(only the newest of each major is installed)")
+                        .dim()
+                        .for_stderr()
+                )
+            }
         );
     } else {
         eprintln!(
@@ -376,6 +411,14 @@ pub(crate) fn prune_report(report: &crate::store::PruneReport) {
             count,
             if count == 1 { "" } else { "s" }
         );
+    }
+
+    // Warned rather than noted, unlike `skipped_unmanaged`: this is the one
+    // skip the user can act on, and the rule behind it is the same one
+    // `jlo remove` applies to a target it was given by name.
+    if let Some(version) = &report.skipped_in_use {
+        warning!("left {version} alone: JAVA_HOME points at it");
+        hint!("Switch the shell to another JDK first, e.g. 'jlo env 21', then run it again.");
     }
 
     if report.skipped_unmanaged > 0 {
@@ -412,13 +455,25 @@ pub(crate) fn remove_report(report: &crate::store::RemoveReport) {
         eprintln!("{} {}", style("!").red().for_stderr(), failure);
     }
 
+    // As in `prune_report`: the tick means the run did what it was asked, so
+    // a failed deletion does not get one, and the caller exits non-zero on
+    // the same condition.
     let count = report.removed.len();
-    eprintln!(
-        "{} Removed {} JDK{}",
-        style("✓").green().for_stderr(),
-        count,
-        if count == 1 { "" } else { "s" }
-    );
+    if report.failures.is_empty() {
+        eprintln!(
+            "{} Removed {} JDK{}",
+            style("✓").green().for_stderr(),
+            count,
+            if count == 1 { "" } else { "s" }
+        );
+    } else if count > 0 {
+        eprintln!(
+            "{}",
+            style(partial_line(count, report.failures.len()))
+                .dim()
+                .for_stderr()
+        );
+    }
 
     // Listed, not counted: the user named these, so anything they expected
     // to go and which did not is worth a line of its own.
@@ -600,10 +655,12 @@ pub(crate) const NO_ACTIVE_JDK_HINT: &str = "Run 'jlo env' to activate a JDK in 
 /// The line `jlo env` ends on when its exports went nowhere.
 ///
 /// Keyed on stdout being a terminal, which is a reliable enough negative: the
-/// `jlo` shell function sources the exports out of a process substitution
-/// (`. <(jlo-bin env ...)`), and the autoload hook calls that same function, so
-/// on the sourced path stdout is a pipe and this never fires - not even on the
-/// `cd` hook that runs on every directory change.
+/// `jlo` shell function captures the exports in a command substitution and
+/// evals them (`out="$(jlo-bin env ...)"; eval "$out"` - deliberately not a
+/// process substitution, which is a silent no-op under bash 3.2 and discards
+/// the exit status everywhere), and the autoload hook calls that same
+/// function, so on the sourced path stdout is a pipe and this never fires -
+/// not even on the `cd` hook that runs on every directory change.
 /// `jlo-bin env 21 > file` stays silent too - an accepted gap, since the case
 /// that actually misleads is the interactive/agent one.
 pub(crate) fn unsourced_env_hint(java_version: &str) -> String {
@@ -770,7 +827,13 @@ fn local_status(jdk: &InstalledJdk, installed: &[InstalledJdk]) -> Status {
     if !jdk.managed {
         return Status::Unmanaged;
     }
-    let superseded = installed.iter().any(|other| {
+    // Only managed builds are compared, because only managed builds are what
+    // `jlo remove --superseded` sorts: it filters on the marker before it
+    // picks the newest of a major. An unmanaged 21.0.3 beside a managed
+    // 21.0.1 would otherwise mark the managed one superseded and recommend a
+    // command that removes nothing, the managed build still being the newest
+    // of the set pruning actually looks at.
+    let superseded = installed.iter().filter(|other| other.managed).any(|other| {
         other.major == jdk.major
             && crate::version::compare(&other.version, &jdk.version)
                 .is_ok_and(|ord| ord == Ordering::Greater)
@@ -1280,6 +1343,27 @@ mod tests {
             vec![
                 row(17, "17.0.20+101", Status::Installed),
                 row(17, "17.0.11+10", Status::Unmanaged),
+            ]
+        );
+    }
+
+    /// The mirror of the test above, on the other side of the comparison: an
+    /// unmanaged *newer* build must not mark a managed one superseded.
+    /// `jlo remove --superseded` filters on the marker before it picks the
+    /// newest of a major, so the managed build is still the one it keeps -
+    /// and a `superseded` row here recommends a command that removes nothing.
+    #[test]
+    fn build_rows_does_not_call_a_build_superseded_by_an_unmanaged_one() {
+        let rows = build_rows(
+            &[],
+            &[unmanaged("21.0.3+9", 21), local("21.0.1+12", 21)],
+            None,
+        );
+        assert_eq!(
+            rows,
+            vec![
+                row(21, "21.0.3+9", Status::Unmanaged),
+                row(21, "21.0.1+12", Status::Installed),
             ]
         );
     }

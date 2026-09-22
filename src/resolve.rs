@@ -50,7 +50,7 @@ pub(crate) fn resolve_java_version_from(
 /// 3. the newest JDK already installed,
 /// 4. the latest release Adoptium offers, downloaded.
 ///
-/// It lives in `main` rather than in `conf` deliberately. `conf` knows about
+/// It lives here rather than in `conf` deliberately. `conf` knows about
 /// config files and nothing else - not where JDKs are installed, not how to
 /// reach Adoptium - and moving the cascade there would hand it both, so the
 /// module that answers "what does this file say" would start answering "what

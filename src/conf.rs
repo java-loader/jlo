@@ -28,9 +28,9 @@ pub(crate) struct Resolved {
 /// change, not a refactor.
 ///
 /// The last two were added with the fallback cascade and are the reason this
-/// enum was left open: `main` resolves a version through four stages, and only
-/// the first two are this module's to answer. The cascade itself lives in
-/// `main` for the same reason - see the comment on `cascade` there.
+/// enum was left open: `resolve` resolves a version through four stages, and
+/// only the first two are this module's to answer. The cascade itself lives in
+/// `resolve` for the same reason - see the comment on `resolve::cascade`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Source {
     /// An explicit CLI argument: `jlo env 21`.
@@ -76,7 +76,7 @@ impl Source {
 /// The configured Java version, or `Ok(None)` when nothing is configured.
 ///
 /// `None` is an ordinary state rather than a failure, because absence is where
-/// the cascade in `main` takes over: the newest installed JDK, then the latest
+/// the cascade in `resolve` takes over: the newest installed JDK, then the latest
 /// release. This is stages 1 and 2 of that cascade and nothing more.
 pub(crate) fn find() -> anyhow::Result<Option<Resolved>> {
     let cwd = std::env::current_dir()
