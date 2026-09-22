@@ -4,11 +4,13 @@ mod conf;
 mod extract;
 mod install;
 mod selfupdate;
+mod shellenv;
 mod store;
 mod ui;
 mod version;
 
 use crate::adoptium::{AdoptiumClient, JdkMetadata};
+use crate::shellenv::{parse_exec_args, restore_leading_separator, shell_quote, update_path};
 use crate::store::{JdkStore, RemoveError};
 use crate::ui::InstallUi;
 use anyhow::{Context, anyhow};
@@ -376,90 +378,6 @@ fn cmd_exec(client: &AdoptiumClient, args: &[String]) -> Result<(), CommandError
     run_exec(client, version, &command);
 }
 
-/// Whether the real, unparsed command line has a literal `--` as the token
-/// immediately following `exec`, i.e. no version was given before it.
-fn separator_immediately_follows_exec(mut raw_args: impl Iterator<Item = String>) -> bool {
-    raw_args
-        .find(|a| a == "exec")
-        .and_then(|_| raw_args.next())
-        .is_some_and(|a| a == "--")
-}
-
-/// clap's `trailing_var_arg` treats a literal `--` as the options/positional
-/// boundary rather than a value whenever it is the very first token handed to
-/// the subcommand - which is exactly `jlo exec -- <command>` (version
-/// omitted). It gets consumed before reaching us, so `args` arrives here
-/// without the separator `parse_exec_args` requires.
-///
-/// This is unambiguous precisely because it only ever happens to the
-/// *first* token: once any value (a version, or the reinstated `--` itself)
-/// has bound to the positional, every later token - including a second,
-/// user-typed `--` that is genuinely part of the command - survives
-/// untouched. So `args` here never already contains the eaten separator;
-/// any `--` already present in it is a distinct, later token that must be
-/// left exactly where it is, not mistaken for "already restored".
-fn restore_leading_separator(args: &[String]) -> Vec<String> {
-    if !separator_immediately_follows_exec(env::args()) {
-        return args.to_vec();
-    }
-
-    let mut restored = Vec::with_capacity(args.len() + 1);
-    restored.push("--".to_string());
-    restored.extend_from_slice(args);
-    restored
-}
-
-#[cfg(test)]
-mod exec_arg_recovery_tests {
-    use super::separator_immediately_follows_exec;
-
-    fn raw(tokens: &[&str]) -> impl Iterator<Item = String> {
-        tokens
-            .iter()
-            .map(|s| (*s).to_string())
-            .collect::<Vec<_>>()
-            .into_iter()
-    }
-
-    #[test]
-    fn detects_separator_right_after_exec() {
-        // `jlo exec -- java -version`: clap eats this `--` before `cmd_exec`
-        // ever sees it.
-        assert!(separator_immediately_follows_exec(raw(&[
-            "jlo-bin", "exec", "--", "java", "-version"
-        ])));
-    }
-
-    #[test]
-    fn does_not_trigger_when_a_version_precedes_it() {
-        // `jlo exec 21 -- java -version`: the version binds first, so clap
-        // never touches this `--`.
-        assert!(!separator_immediately_follows_exec(raw(&[
-            "jlo-bin", "exec", "21", "--", "java", "-version"
-        ])));
-    }
-
-    #[test]
-    fn still_detects_it_when_the_command_has_its_own_dash_dash() {
-        // `jlo exec -- -- echo hi`: the first `--` is still the one clap
-        // eats, even though a second, user-typed `--` (part of the command)
-        // immediately follows it. (Regression for the bug where
-        // `args.first() == "--"` was used as a stand-in for "already
-        // restored": that second `--` would land at `args[0]` after clap's
-        // parse and get mistaken for the already-restored separator.)
-        assert!(separator_immediately_follows_exec(raw(&[
-            "jlo-bin", "exec", "--", "--", "echo", "hi"
-        ])));
-    }
-
-    #[test]
-    fn does_not_trigger_without_any_separator() {
-        assert!(!separator_immediately_follows_exec(raw(&[
-            "jlo-bin", "exec", "java", "-version"
-        ])));
-    }
-}
-
 /// Resolve the JDK (installing on demand) and replace the current process with
 /// the command. On non-Unix targets `exec` is unsupported, so bail out *before*
 /// downloading anything.
@@ -480,7 +398,7 @@ fn run_exec(client: &AdoptiumClient, version: Option<String>, command: &[String]
             exit(1);
         });
 
-    exec_command(&java_home, command);
+    shellenv::exec_command(&java_home, command);
 }
 
 // A real `execvp` is Unix-only. A native Windows build would replace this with a
@@ -489,87 +407,6 @@ fn run_exec(client: &AdoptiumClient, version: Option<String>, command: &[String]
 fn run_exec(_client: &AdoptiumClient, _version: Option<String>, _command: &[String]) -> ! {
     ui::error!("'jlo exec' is not supported on this platform");
     exit(1);
-}
-
-/// Split the arguments following `exec` into an optional version and the command
-/// to run. The literal `--` separates them; everything before it is the version
-/// (zero or one token), everything after is the command.
-fn parse_exec_args(args: &[String]) -> Result<(Option<String>, Vec<String>), String> {
-    let sep = args
-        .iter()
-        .position(|a| a == "--")
-        .ok_or("expected '--' before the command, e.g. jlo exec 21 -- java -version")?;
-
-    let version = match &args[..sep] {
-        [] => None,
-        [v] => Some(v.clone()),
-        _ => return Err("only one version may be given before '--'".to_string()),
-    };
-
-    let command = args[sep + 1..].to_vec();
-    if command.is_empty() {
-        return Err("no command given after '--'".to_string());
-    }
-
-    Ok((version, command))
-}
-
-/// Build the child `PATH` with the JDK's `bin` directory prepended.
-fn child_path(java_bin: &str, current_path: &str) -> anyhow::Result<String> {
-    if current_path.is_empty() {
-        return Ok(java_bin.to_string());
-    }
-
-    let mut paths = vec![PathBuf::from(java_bin)];
-    paths.extend(env::split_paths(current_path));
-
-    Ok(env::join_paths(paths)
-        .context("could not join PATH components")?
-        .to_str()
-        .context("PATH contains non-UTF-8 characters")?
-        .to_string())
-}
-
-/// Replace the current process with `command`, having set `JAVA_HOME` and
-/// prepended the JDK's `bin` to `PATH`. On Unix this is a real `execvp`, so the
-/// child's exit code and signals propagate transparently.
-#[cfg(unix)]
-fn exec_command(java_home: &Path, command: &[String]) -> ! {
-    use std::os::unix::process::CommandExt;
-    use std::process::Command;
-
-    let (program, args) = command
-        .split_first()
-        .expect("command is non-empty (checked in parse_exec_args)");
-
-    let java_bin = java_home.join("bin");
-    let new_path = child_path(
-        &java_bin.to_string_lossy(),
-        &env::var("PATH").unwrap_or_default(),
-    )
-    .unwrap_or_else(|e| {
-        ui::error!("{e:#}");
-        exit(1);
-    });
-
-    // `exec` only returns if it failed to launch the program.
-    let err = Command::new(program)
-        .args(args)
-        .env("JAVA_HOME", java_home)
-        .env("PATH", new_path)
-        .exec();
-
-    ui::error!("could not execute '{program}': {err}");
-    exit(exec_failure_code(err.kind()));
-}
-
-/// Map a launch failure to a shell-conventional exit code: 126 for a command
-/// that exists but can't be run (e.g. not executable), 127 otherwise.
-fn exec_failure_code(kind: std::io::ErrorKind) -> i32 {
-    match kind {
-        std::io::ErrorKind::PermissionDenied => 126,
-        _ => 127,
-    }
 }
 
 /// Print the JDKs Adoptium offers for this machine, newest first, annotated
@@ -940,24 +777,6 @@ fn resolve_java_home(
     }
 }
 
-/// Quote a value so the shell assigns it rather than interpreting it.
-///
-/// stdout is the environment channel: the `jlo` shell function evaluates what
-/// arrives there, so a value carrying `$`, a backtick, a backslash or a double
-/// quote would be expanded - or executed - instead of stored. `PATH` is the
-/// sharp case: it is echoed back from the caller's own environment, so a
-/// `$(...)` anywhere in it would run in the user's shell.
-///
-/// The hazard belongs to the channel, not to these two variables: anything
-/// else this function's callers ever print must go through here too.
-///
-/// Single quotes suppress every expansion. The one character they cannot hold
-/// is a single quote, which is spliced in as `'\''`: close, backslash-escaped
-/// quote, reopen.
-fn shell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', r"'\''"))
-}
-
 /// Emit the `export` lines for the requested version.
 ///
 /// Nothing is written to stderr on this path, even when the environment does
@@ -1069,38 +888,6 @@ pub(crate) fn jlo_home_dir() -> anyhow::Result<PathBuf> {
     Ok(path)
 }
 
-/// Prepend `java_path` to `current_path`, dropping any entry already under
-/// `jdk_base`. `jdk_base` must be the JDK install directory ([`JdkStore::base`]) —
-/// the only tree whose PATH entries J'Lo owns. Passing a broader directory (the
-/// home directory, say) would strip unrelated user entries.
-fn update_path(
-    java_path: &str,
-    current_path: &str,
-    jdk_base: &Path,
-) -> anyhow::Result<Option<String>> {
-    // Remove JDK bin entries from earlier runs to avoid duplicates
-    let mut path_vector: Vec<_> = env::split_paths(current_path)
-        .filter(|p| !p.starts_with(jdk_base))
-        .collect();
-
-    // Insert the new path at the beginning
-    path_vector.insert(0, java_path.into());
-
-    // Join paths back into a single string
-    let new_path = env::join_paths(path_vector)
-        .context("could not join PATH components")?
-        .to_str()
-        .context("PATH contains non-UTF-8 characters")?
-        .to_string();
-
-    // Only return if the path has changed
-    if new_path == current_path {
-        Ok(None)
-    } else {
-        Ok(Some(new_path))
-    }
-}
-
 fn assert_java_version(java_version: &str) -> anyhow::Result<()> {
     if conf::is_valid_version(java_version) {
         Ok(())
@@ -1134,63 +921,6 @@ mod tests {
     /// JDKs. Enough for the tests that never reach stage 3 of the cascade.
     fn empty_store() -> JdkStore {
         JdkStore::at("/nonexistent/jlo-test-store")
-    }
-
-    // -- shell_quote --
-
-    /// A plain path needs no escaping, but is still quoted: an unquoted value
-    /// would word-split on a space.
-    #[test]
-    fn shell_quote_wraps_a_plain_value() {
-        assert_eq!(shell_quote("/opt/jdk-21"), "'/opt/jdk-21'");
-        assert_eq!(shell_quote("/opt/My JDK"), "'/opt/My JDK'");
-    }
-
-    /// The characters that stay live inside double quotes - which is what this
-    /// function replaced - must all come back out verbatim.
-    #[test]
-    fn shell_quote_neutralises_expansion_characters() {
-        for raw in [
-            "/opt/$(touch pwned)",
-            "/opt/`touch pwned`",
-            "/opt/${HOME}",
-            "/opt/a\\b",
-            "/opt/a\"b",
-        ] {
-            let quoted = shell_quote(raw);
-            assert_eq!(
-                strip_single_quotes(&quoted),
-                raw,
-                "round trip failed for {raw:?} (quoted as {quoted:?})"
-            );
-        }
-    }
-
-    /// A single quote cannot appear inside single quotes, so it is spliced in
-    /// as `'\''`. This is the case a naive implementation gets wrong, and
-    /// getting it wrong is an injection, not a cosmetic bug.
-    #[test]
-    fn shell_quote_splices_embedded_single_quotes() {
-        assert_eq!(shell_quote("it's"), r"'it'\''s'");
-        assert_eq!(
-            strip_single_quotes(&shell_quote("/opt/'; touch pwned; '")),
-            "/opt/'; touch pwned; '"
-        );
-    }
-
-    #[test]
-    fn shell_quote_handles_an_empty_value() {
-        assert_eq!(shell_quote(""), "''");
-    }
-
-    /// Undo `shell_quote` the way a shell would, so the tests above assert a
-    /// real round trip rather than a hand-copied expected string.
-    fn strip_single_quotes(quoted: &str) -> String {
-        let body = quoted
-            .strip_prefix('\'')
-            .and_then(|q| q.strip_suffix('\''))
-            .expect("shell_quote must wrap its output in single quotes");
-        body.replace(r"'\''", "'")
     }
 
     // -- cmd_* error paths --
@@ -1474,156 +1204,6 @@ mod tests {
         assert!(
             !dir.path().join("17").exists(),
             "--offline must not create anything"
-        );
-    }
-
-    #[test]
-    fn parse_exec_args_version_and_command() {
-        let (version, command) =
-            parse_exec_args(&owned(&["21", "--", "java", "-version"])).unwrap();
-        assert_eq!(version, Some("21".to_string()));
-        assert_eq!(command, owned(&["java", "-version"]));
-    }
-
-    #[test]
-    fn parse_exec_args_no_version_uses_none() {
-        let (version, command) = parse_exec_args(&owned(&["--", "java", "-version"])).unwrap();
-        assert_eq!(version, None);
-        assert_eq!(command, owned(&["java", "-version"]));
-    }
-
-    #[test]
-    fn parse_exec_args_missing_separator_errors() {
-        assert!(parse_exec_args(&owned(&["21", "java", "-version"])).is_err());
-    }
-
-    #[test]
-    fn parse_exec_args_empty_command_errors() {
-        assert!(parse_exec_args(&owned(&["21", "--"])).is_err());
-    }
-
-    #[test]
-    fn parse_exec_args_multiple_versions_error() {
-        assert!(parse_exec_args(&owned(&["21", "25", "--", "java"])).is_err());
-    }
-
-    #[test]
-    fn exec_failure_code_distinguishes_not_found_and_not_executable() {
-        use std::io::ErrorKind;
-        assert_eq!(exec_failure_code(ErrorKind::NotFound), 127);
-        assert_eq!(exec_failure_code(ErrorKind::PermissionDenied), 126);
-        assert_eq!(exec_failure_code(ErrorKind::Other), 127);
-    }
-
-    #[test]
-    fn parse_exec_args_no_args_errors() {
-        assert!(parse_exec_args(&owned(&[])).is_err());
-    }
-
-    #[test]
-    fn parse_exec_args_only_separator_errors() {
-        // "--" alone: no version, no command
-        assert!(parse_exec_args(&owned(&["--"])).is_err());
-    }
-
-    #[test]
-    fn parse_exec_args_double_dash_in_command_is_preserved() {
-        // only the first "--" separates; later ones belong to the command
-        let (version, command) =
-            parse_exec_args(&owned(&["21", "--", "sh", "-c", "--", "x"])).unwrap();
-        assert_eq!(version, Some("21".to_string()));
-        assert_eq!(command, owned(&["sh", "-c", "--", "x"]));
-    }
-
-    #[test]
-    fn child_path_prepends_java_bin() {
-        assert_eq!(
-            child_path("/jdk/21/bin", "/usr/bin:/bin").unwrap(),
-            "/jdk/21/bin:/usr/bin:/bin"
-        );
-    }
-
-    #[test]
-    fn child_path_handles_empty_path() {
-        assert_eq!(child_path("/jdk/21/bin", "").unwrap(), "/jdk/21/bin");
-    }
-
-    #[test]
-    fn update_path_inserts_at_front() {
-        let jdk_base = Path::new("/home/u/.jdks");
-        let result = update_path(
-            "/home/u/.jdks/21.0.12/bin",
-            "/usr/bin:/usr/local/bin",
-            jdk_base,
-        )
-        .unwrap();
-        assert_eq!(
-            result.unwrap(),
-            "/home/u/.jdks/21.0.12/bin:/usr/bin:/usr/local/bin"
-        );
-    }
-
-    #[test]
-    fn update_path_handles_empty_path() {
-        let jdk_base = Path::new("/home/u/.jdks");
-        let result = update_path("/home/u/.jdks/21.0.12/bin", "", jdk_base).unwrap();
-        assert_eq!(result.unwrap(), "/home/u/.jdks/21.0.12/bin:");
-    }
-
-    #[test]
-    fn update_path_removes_stale_jdk_entries() {
-        let jdk_base = Path::new("/home/u/.jdks");
-        let result = update_path(
-            "/home/u/.jdks/17.0.13/bin",
-            "/home/u/.jdks/21.0.12/bin:/usr/bin",
-            jdk_base,
-        )
-        .unwrap();
-        assert_eq!(
-            result.as_deref(),
-            Some("/home/u/.jdks/17.0.13/bin:/usr/bin")
-        );
-    }
-
-    #[test]
-    fn update_path_keeps_unrelated_home_entries() {
-        let jdk_base = Path::new("/home/u/.jdks");
-        let result = update_path(
-            "/home/u/.jdks/17.0.13/bin",
-            "/home/u/.cargo/bin:/home/u/bin:/usr/bin",
-            jdk_base,
-        )
-        .unwrap();
-        assert_eq!(
-            result.as_deref(),
-            Some("/home/u/.jdks/17.0.13/bin:/home/u/.cargo/bin:/home/u/bin:/usr/bin")
-        );
-    }
-
-    #[test]
-    fn update_path_is_idempotent_for_the_same_jdk() {
-        let jdk_base = Path::new("/home/u/.jdks");
-        let result = update_path(
-            "/home/u/.jdks/17.0.13/bin",
-            "/home/u/.jdks/17.0.13/bin:/usr/bin",
-            jdk_base,
-        )
-        .unwrap();
-        assert_eq!(result, None);
-    }
-
-    #[test]
-    fn update_path_does_not_match_sibling_directories_by_prefix() {
-        let jdk_base = Path::new("/home/u/.jdks");
-        let result = update_path(
-            "/home/u/.jdks/17.0.13/bin",
-            "/home/u/.jdks-backup/bin:/usr/bin",
-            jdk_base,
-        )
-        .unwrap();
-        assert_eq!(
-            result.as_deref(),
-            Some("/home/u/.jdks/17.0.13/bin:/home/u/.jdks-backup/bin:/usr/bin")
         );
     }
 
