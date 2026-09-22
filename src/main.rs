@@ -12,7 +12,7 @@ mod ui;
 mod version;
 
 use crate::adoptium::AdoptiumClient;
-use crate::request::Request;
+use crate::request::{Request, Stream};
 use crate::resolve::{
     offline_java_home, requested_versions, resolve_java_home, resolve_java_version_from,
 };
@@ -287,13 +287,24 @@ fn cmd_list(client: &AdoptiumClient, offline: bool) -> Result<(), CommandError> 
     if offline {
         ui::offline_list(&installed, active.as_deref(), &store);
     } else {
-        let available = client.available_jdks().map_err(|e| {
+        let catalogue = client.available_jdks().map_err(|e| {
             CommandError::with_hint(
                 e,
                 "Use 'jlo list --offline' to list the JDKs already installed.",
             )
         })?;
-        ui::remote_list(&available, &installed, active.as_deref());
+        ui::remote_list(&catalogue.jdks, &installed, active.as_deref());
+
+        // Read off the release list the catalogue already carries, not off the
+        // rows: a major with no build for this OS, or one whose lookup failed,
+        // has no row and would read as "not released" on exactly the machines
+        // least able to notice. No extra request either way.
+        let ea_names: Vec<Request> = installed
+            .iter()
+            .filter(|jdk| jdk.stream == Stream::Ea)
+            .map(InstalledJdk::request)
+            .collect();
+        ui::announce_released_ea(&ea_names, &catalogue.released_majors);
     }
 
     // After the listing, so it reads as a footnote to the missing gutter mark

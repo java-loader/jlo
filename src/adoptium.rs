@@ -135,6 +135,18 @@ struct AvailableReleases {
     available_lts_releases: Vec<i64>,
 }
 
+/// The catalogue as one answer: the builds on offer for this machine, and the
+/// majors Adoptium has released.
+///
+/// The two are not the same list. A major with no build for this OS, or one
+/// whose lookup failed, has no row here but is still released - so "has 26
+/// shipped?" has to be asked of `released_majors`, not of the rows.
+#[derive(Debug)]
+pub(crate) struct Catalogue {
+    pub jdks: Vec<RemoteJdk>,
+    pub released_majors: Vec<i64>,
+}
+
 /// A JDK release Adoptium offers for *this* OS and architecture.
 #[derive(Debug)]
 pub(crate) struct RemoteJdk {
@@ -276,7 +288,7 @@ impl AdoptiumClient {
     /// Costs one request for the major-version list plus one per major. Done
     /// serially that is ~4s, so the per-major lookups are fanned out across
     /// threads sharing the pooled client.
-    pub(crate) fn available_jdks(&self) -> anyhow::Result<Vec<RemoteJdk>> {
+    pub(crate) fn available_jdks(&self) -> anyhow::Result<Catalogue> {
         let releases = self.fetch_available_releases()?;
         let lts: std::collections::HashSet<i64> =
             releases.available_lts_releases.into_iter().collect();
@@ -315,7 +327,10 @@ impl AdoptiumClient {
         }
 
         jdks.sort_by(|a, b| compare(&b.version, &a.version).unwrap_or(Ordering::Equal));
-        Ok(jdks)
+        Ok(Catalogue {
+            jdks,
+            released_majors: releases.available_releases,
+        })
     }
 
     fn latest_version(&self, major: i64) -> anyhow::Result<Option<String>> {
@@ -343,6 +358,15 @@ impl AdoptiumClient {
             .body_mut()
             .read_json()
             .context("could not parse the Adoptium API response")
+    }
+
+    /// The majors Adoptium has shipped a GA build of.
+    ///
+    /// One small JSON document, the same one `latest_major` reads. Fetched at
+    /// most once per command, and only when a pre-release name is in play, so
+    /// an ordinary `jlo update` makes exactly the requests it made before.
+    pub(crate) fn released_majors(&self) -> anyhow::Result<Vec<i64>> {
+        Ok(self.fetch_available_releases()?.available_releases)
     }
 
     pub(crate) fn latest_major(&self) -> anyhow::Result<String> {
@@ -723,7 +747,7 @@ mod client_tests {
         let _a25 = major_mock(&mut server, 25, 200, &asset_body("25.0.4+101.0.LTS"));
 
         let client = AdoptiumClient::new(server.url());
-        let jdks = client.available_jdks().unwrap();
+        let jdks = client.available_jdks().unwrap().jdks;
 
         let rows: Vec<_> = jdks
             .iter()
@@ -752,7 +776,7 @@ mod client_tests {
         let _a21 = major_mock(&mut server, 21, 200, &asset_body("21.0.12+101.0.LTS"));
 
         let client = AdoptiumClient::new(server.url());
-        let jdks = client.available_jdks().unwrap();
+        let jdks = client.available_jdks().unwrap().jdks;
 
         assert_eq!(jdks.len(), 1);
         assert_eq!(jdks[0].version, "21.0.12+101.0.LTS");
@@ -769,7 +793,7 @@ mod client_tests {
         let _a21 = major_mock(&mut server, 21, 200, &asset_body("21.0.12+101.0.LTS"));
 
         let client = AdoptiumClient::new(server.url());
-        let jdks = client.available_jdks().unwrap();
+        let jdks = client.available_jdks().unwrap().jdks;
 
         assert_eq!(jdks.len(), 1);
         assert_eq!(jdks[0].version, "21.0.12+101.0.LTS");
@@ -800,10 +824,29 @@ mod client_tests {
         let _a21 = major_mock(&mut server, 21, 200, &asset_body("21.0.12+101.0.LTS"));
 
         let client = AdoptiumClient::new(server.url());
-        let jdks = client.available_jdks().unwrap();
+        let jdks = client.available_jdks().unwrap().jdks;
 
         assert_eq!(jdks.len(), 1);
         assert!(!jdks[0].lts);
+    }
+
+    // -- released_majors --
+
+    /// The notice a `-ea` pin earns is keyed on this list, so it has to be the
+    /// released majors themselves rather than anything derived from them.
+    #[test]
+    fn released_majors_reads_the_available_releases_list() {
+        let mut server = mockito::Server::new();
+        let _mock = server
+            .mock("GET", "/v3/info/available_releases")
+            .with_status(200)
+            .with_body(RELEASES_FIXTURE)
+            .create();
+
+        let released = AdoptiumClient::new(server.url()).released_majors().unwrap();
+
+        assert!(released.contains(&21), "21 is a released major");
+        assert!(!released.contains(&99), "99 is not");
     }
 
     #[test]

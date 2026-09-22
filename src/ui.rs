@@ -695,6 +695,48 @@ pub(crate) fn superseded_hint(installed_any: bool, superseded: usize) -> Option<
     ))
 }
 
+/// Said after a pre-release install whose major has since shipped.
+///
+/// `-ea` is literal: it asks for the unreleased stream, and Adoptium keeps one
+/// running after a major goes GA - so the pin keeps delivering previews of the
+/// *next patch*. That is deliberately not changed under the user's feet; it is
+/// announced instead.
+pub(crate) fn ea_is_now_released(request: crate::request::Request) -> String {
+    format!(
+        "{request} still tracks pre-release builds; Java {major} has since been released. \
+         Pin '{major}' to follow the released builds instead.",
+        major = request.major
+    )
+}
+
+/// The pre-release names among `requests` whose major has since shipped,
+/// deduplicated and in the order given.
+///
+/// Split out from the printing so the rule is testable without a server: it is
+/// the *selection* that is easy to get wrong, not the sentence.
+fn released_ea_names(
+    requests: &[crate::request::Request],
+    released: &[i64],
+) -> Vec<crate::request::Request> {
+    let mut names: Vec<crate::request::Request> = Vec::new();
+    for request in requests.iter().filter(|r| r.is_ea()) {
+        if released.contains(&request.major) && !names.contains(request) {
+            names.push(*request);
+        }
+    }
+    names
+}
+
+/// Say, once per name, that a pre-release pin is still a pre-release pin.
+///
+/// Pure: the caller supplies the released majors from whatever it already
+/// holds, so neither emit site owes this an extra request.
+pub(crate) fn announce_released_ea(requests: &[crate::request::Request], released: &[i64]) {
+    for request in released_ea_names(requests, released) {
+        hint!("{}", ea_is_now_released(request));
+    }
+}
+
 /// `println!` panics when the reader goes away, and this output is meant to be
 /// piped (`jlo list | head`), so treat a closed pipe as a normal end of output.
 pub(crate) fn print_lines(lines: impl IntoIterator<Item = String>) {
@@ -1075,6 +1117,67 @@ fn tilde(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- ea_is_now_released --
+
+    /// One notice per EA name whose major has shipped, and none for the rest.
+    /// `21-ea` on a released 21 is the case the notice exists for; `28-ea` on
+    /// an unreleased 28 is the ordinary case and must stay silent.
+    #[test]
+    fn only_a_released_major_earns_the_notice() {
+        use crate::request::{Request, Stream};
+
+        let ea = |major| Request {
+            major,
+            stream: Stream::Ea,
+        };
+        assert_eq!(released_ea_names(&[ea(21), ea(28)], &[21]), vec![ea(21)]);
+        assert_eq!(
+            released_ea_names(
+                &[Request {
+                    major: 21,
+                    stream: Stream::Ga
+                }],
+                &[21]
+            ),
+            vec![],
+            "a GA name is not a pin on the unreleased stream"
+        );
+    }
+
+    /// The same name twice - two installs of one pin, or a request set that
+    /// repeats it - is still one thing to say.
+    #[test]
+    fn a_repeated_name_is_announced_once() {
+        use crate::request::{Request, Stream};
+
+        let ea = Request {
+            major: 21,
+            stream: Stream::Ea,
+        };
+        assert_eq!(released_ea_names(&[ea, ea], &[21]), vec![ea]);
+    }
+
+    /// -ea means "unreleased", not "newest", so the pin keeps delivering
+    /// betas after the major ships. That is the intended behaviour and
+    /// therefore a note, not a warning - but it must name the way out.
+    #[test]
+    fn the_notice_names_the_major_and_the_plain_name() {
+        use crate::request::{Request, Stream};
+
+        let notice = ea_is_now_released(Request {
+            major: 28,
+            stream: Stream::Ea,
+        });
+        assert!(
+            notice.contains("28-ea"),
+            "names what was asked for: {notice}"
+        );
+        assert!(
+            notice.contains("Pin '28'"),
+            "names the plain major: {notice}"
+        );
+    }
 
     // -- unsourced_env_hint --
 

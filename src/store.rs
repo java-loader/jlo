@@ -750,8 +750,17 @@ pub(crate) fn install_each(
     requests.sort_unstable();
 
     let mut installed_any = false;
-    for request in requests {
+    for &request in &requests {
         installed_any |= update(client, store, request)?;
+    }
+
+    // Only when a pre-release name is in play, and then once for the whole
+    // run: it is one document, the same for every major. A failed lookup is
+    // swallowed for the reason `count_superseded` swallows its own - a note is
+    // not worth failing an otherwise successful command over.
+    if requests.iter().any(|request| request.is_ea()) {
+        let released = client.released_majors().unwrap_or_default();
+        ui::announce_released_ea(&requests, &released);
     }
 
     // A download leaves the superseded minor on disk on purpose - a command
