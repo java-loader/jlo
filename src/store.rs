@@ -891,6 +891,52 @@ mod tests {
         assert_eq!(base_dir_for("linux", home), home.join(".jdks"));
     }
 
+    // -- legacy_layout --
+
+    /// The platform guard, which is load-bearing in a way the expression does
+    /// not show. On Linux *every* install is flat and its parent *is* the
+    /// store, so the second condition never rejects anything: drop or reorder
+    /// the `macos` check and every Linux user gets the warning on every `jlo
+    /// home`, for a layout that is correct there. Asserted per platform rather
+    /// than on a `cfg!` constant - the behaviour is what must not change.
+    #[test]
+    fn only_macos_calls_a_flat_install_a_legacy_layout() {
+        let dir = tempdir().unwrap();
+        create_jdk_dir(dir.path(), "21.0.3+9", true);
+        let store = JdkStore::at(dir.path());
+
+        let verdict = store.legacy_layout(&dir.path().join("21.0.3+9"));
+
+        if cfg!(target_os = "macos") {
+            assert_eq!(verdict, Some(("21.0.3+9".to_string(), 21)));
+        } else {
+            assert_eq!(verdict, None, "a flat install is the norm off macOS");
+        }
+    }
+
+    /// An install jlo did not make is not one jlo can offer to reinstall, so
+    /// it is left alone. README already says the bundle is the better shape
+    /// to drop in by hand.
+    #[test]
+    fn an_unmanaged_flat_install_is_not_warned_about() {
+        let dir = tempdir().unwrap();
+        create_jdk_dir(dir.path(), "21.0.3+9", false);
+
+        let verdict = JdkStore::at(dir.path()).legacy_layout(&dir.path().join("21.0.3+9"));
+        assert_eq!(verdict, None);
+    }
+
+    /// A bundle is the current layout, so it is never the thing being warned
+    /// about - its java home is one level in, and the guard turns on exactly
+    /// that difference.
+    #[test]
+    fn a_bundle_is_not_a_legacy_layout() {
+        let dir = tempdir().unwrap();
+        let java_home = create_bundle_jdk_dir(dir.path(), "21.0.3+9", true);
+
+        assert_eq!(JdkStore::at(dir.path()).legacy_layout(&java_home), None);
+    }
+
     // -- the two marker spellings --
 
     /// An install made before the marker moved out of the JDK directory is
