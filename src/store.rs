@@ -1,5 +1,6 @@
 use crate::adoptium::{AdoptiumClient, JdkMetadata};
 use crate::extract;
+use crate::request::Request;
 use crate::ui::{self, InstallUi};
 use crate::version::compare;
 use anyhow::{Context, bail};
@@ -718,7 +719,7 @@ fn count_superseded(store: &JdkStore) -> usize {
 /// Returns whether a JDK was installed, so the caller can tell a real update
 /// from an already-current one.
 fn update(client: &AdoptiumClient, store: &JdkStore, java_version: &str) -> anyhow::Result<bool> {
-    let jdk_metadata = client.fetch_metadata(java_version)?;
+    let jdk_metadata = client.fetch_metadata(Request::parse(java_version)?)?;
 
     if store.find_exact(&jdk_metadata).is_some() {
         ui::up_to_date(java_version, &jdk_metadata.semver);

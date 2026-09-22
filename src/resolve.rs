@@ -8,6 +8,7 @@
 
 use crate::adoptium::AdoptiumClient;
 use crate::conf;
+use crate::request::Request;
 use crate::store::{self, JdkStore};
 use crate::{CommandError, ui};
 use anyhow::{Context, anyhow};
@@ -206,7 +207,7 @@ pub(crate) fn resolve_java_home(
         warn_legacy_layout(store, &path);
         Ok(path)
     } else {
-        let metadata = client.fetch_metadata(java_version)?;
+        let metadata = client.fetch_metadata(Request::parse(java_version)?)?;
         store::install_jdk(client, store, &metadata)
     }
 }

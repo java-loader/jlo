@@ -1,0 +1,60 @@
+[
+    {
+        "binaries": [
+            {
+                "architecture": "aarch64",
+                "download_count": 21,
+                "heap_size": "normal",
+                "image_type": "jdk",
+                "installer": {
+                    "checksum": "101152cb2b5df4f739be0f8927e34bfe260397a0456a5021d4305f19b1f6af9b",
+                    "checksum_link": "https://github.com/adoptium/temurin28-binaries/releases/download/jdk-28%2B16-ea-beta/OpenJDK-jdk_aarch64_mac_hotspot_28_16-ea.pkg.sha256.txt",
+                    "download_count": 12,
+                    "link": "https://github.com/adoptium/temurin28-binaries/releases/download/jdk-28%2B16-ea-beta/OpenJDK-jdk_aarch64_mac_hotspot_28_16-ea.pkg",
+                    "metadata_link": "https://github.com/adoptium/temurin28-binaries/releases/download/jdk-28%2B16-ea-beta/OpenJDK-jdk_aarch64_mac_hotspot_28_16-ea.pkg.json",
+                    "name": "OpenJDK-jdk_aarch64_mac_hotspot_28_16-ea.pkg",
+                    "signature_link": "https://github.com/adoptium/temurin28-binaries/releases/download/jdk-28%2B16-ea-beta/OpenJDK-jdk_aarch64_mac_hotspot_28_16-ea.pkg.sig",
+                    "size": 156388230
+                },
+                "jvm_impl": "hotspot",
+                "os": "mac",
+                "package": {
+                    "checksum": "d7bdb2612ec6fec31ad231eaa8605551fd3436e2b418f564076a476c0e3538a3",
+                    "checksum_link": "https://github.com/adoptium/temurin28-binaries/releases/download/jdk-28%2B16-ea-beta/OpenJDK-jdk_aarch64_mac_hotspot_28_16-ea.tar.gz.sha256.txt",
+                    "download_count": 9,
+                    "link": "https://github.com/adoptium/temurin28-binaries/releases/download/jdk-28%2B16-ea-beta/OpenJDK-jdk_aarch64_mac_hotspot_28_16-ea.tar.gz",
+                    "metadata_link": "https://github.com/adoptium/temurin28-binaries/releases/download/jdk-28%2B16-ea-beta/OpenJDK-jdk_aarch64_mac_hotspot_28_16-ea.tar.gz.json",
+                    "name": "OpenJDK-jdk_aarch64_mac_hotspot_28_16-ea.tar.gz",
+                    "signature_link": "https://github.com/adoptium/temurin28-binaries/releases/download/jdk-28%2B16-ea-beta/OpenJDK-jdk_aarch64_mac_hotspot_28_16-ea.tar.gz.sig",
+                    "size": 155507694
+                },
+                "project": "jdk",
+                "scm_ref": "jdk-28+16_adopt",
+                "updated_at": "2026-09-20T00:57:02Z"
+            }
+        ],
+        "download_count": 411,
+        "id": "RE_kwDOS4frJ84XUSkK.l+G9eTz9z1PRjg==",
+        "release_link": "https://github.com/adoptium/temurin28-binaries/releases/tag/jdk-28%2B16-ea-beta",
+        "release_name": "jdk-28+16-ea-beta",
+        "release_type": "ea",
+        "source": {
+            "link": "https://github.com/adoptium/temurin28-binaries/releases/download/jdk-28%2B16-ea-beta/OpenJDK-jdk-sources_28_16-ea.tar.gz",
+            "name": "OpenJDK-jdk-sources_28_16-ea.tar.gz",
+            "size": 120903784
+        },
+        "timestamp": "2026-09-18T03:27:00Z",
+        "updated_at": "2026-09-20T00:57:58Z",
+        "vendor": "eclipse",
+        "version_data": {
+            "build": 16,
+            "major": 28,
+            "minor": 0,
+            "openjdk_version": "28-beta+16-ea",
+            "optional": "ea",
+            "pre": "beta",
+            "security": 0,
+            "semver": "28.0.0-beta+16.0.ea"
+        }
+    }
+]

@@ -1,3 +1,4 @@
+use crate::request::{Request, Stream};
 use crate::ui::InstallUi;
 use crate::version::compare;
 use anyhow::{Context, bail};
@@ -94,6 +95,38 @@ fn plain_name(value: &str, field: &str) -> anyhow::Result<()> {
     }
 }
 
+/// One entry of the response from `/v3/assets/feature_releases/{major}/ea`.
+///
+/// A different shape from [`Asset`] on purpose: that endpoint answers with a
+/// *release*, which carries every binary of that build, and the query narrows
+/// the array to this OS and architecture rather than the response shape doing
+/// it.
+#[derive(serde::Deserialize)]
+// `release_name` mirrors the API's own field name; renaming it would make the
+// struct definition harder to check against the response it deserialises.
+#[allow(clippy::struct_field_names)]
+struct Release {
+    version_data: AssetVersion,
+    release_name: String,
+    binaries: Vec<AssetBinary>,
+}
+
+impl TryFrom<Release> for JdkMetadata {
+    type Error = anyhow::Error;
+
+    fn try_from(release: Release) -> anyhow::Result<Self> {
+        let binary = release.binaries.into_iter().next().context(
+            "the Adoptium API returned a release with no binary for this OS and architecture",
+        )?;
+        Asset {
+            version: release.version_data,
+            release_name: release.release_name,
+            binary,
+        }
+        .try_into()
+    }
+}
+
 /// The shape of `/v3/info/available_releases`.
 #[derive(serde::Deserialize)]
 struct AvailableReleases {
@@ -144,16 +177,64 @@ impl AdoptiumClient {
         }
     }
 
-    pub(crate) fn fetch_metadata(&self, java_version: &str) -> anyhow::Result<JdkMetadata> {
-        let api_url = self.latest_asset_url(java_version)?;
+    pub(crate) fn fetch_metadata(&self, request: Request) -> anyhow::Result<JdkMetadata> {
+        match request.stream {
+            Stream::Ga => {
+                let api_url = self.latest_asset_url(&request.major.to_string())?;
+                let asset = self.fetch_latest_asset(&api_url)?.with_context(|| {
+                    format!(
+                        "No matching JDK found for the specified version and system architecture.\nTried to fetch metadata from: {api_url}"
+                    )
+                })?;
+                asset.try_into()
+            }
+            Stream::Ea => {
+                let api_url = self.ea_release_url(request.major)?;
+                let release = self.fetch_first_release(&api_url)?.with_context(|| {
+                    format!(
+                        "Adoptium offers no {request} build for this OS and architecture.\nTried to fetch metadata from: {api_url}"
+                    )
+                })?;
+                release.try_into()
+            }
+        }
+    }
 
-        let asset = self.fetch_latest_asset(&api_url)?.with_context(|| {
-            format!(
-                "No matching JDK found for the specified version and system architecture.\nTried to fetch metadata from: {api_url}"
-            )
-        })?;
+    /// `sort_order=DESC` with `page_size=1` asks the API for the newest
+    /// pre-release and nothing else: the stream is paged, and every page after
+    /// the first is a build J'Lo would discard.
+    fn ea_release_url(&self, major: i64) -> anyhow::Result<String> {
+        Ok(format!(
+            "{base_url}/v3/assets/feature_releases/{major}/ea?architecture={arch}&image_type=jdk&os={os}&vendor=eclipse&page_size=1&sort_order=DESC",
+            base_url = self.base_url,
+            arch = jdk_arch()?,
+            os = jdk_os()?
+        ))
+    }
 
-        asset.try_into()
+    /// Like [`Self::fetch_latest_asset`], for the release-shaped endpoint. An
+    /// empty array is a `200` here too, and means the same thing: nothing on
+    /// offer.
+    fn fetch_first_release(&self, api_url: &str) -> anyhow::Result<Option<Release>> {
+        let mut response = self
+            .agent
+            .get(api_url)
+            .call()
+            .context("could not fetch metadata from the Adoptium API")?;
+
+        if !response.status().is_success() {
+            bail!(
+                "Failed to fetch metadata from API: HTTP {}",
+                response.status()
+            );
+        }
+
+        let releases: Vec<Release> = response
+            .body_mut()
+            .read_json()
+            .context("could not parse the Adoptium API response")?;
+
+        Ok(releases.into_iter().next())
     }
 
     fn latest_asset_url(&self, java_version: &str) -> anyhow::Result<String> {
@@ -481,7 +562,12 @@ mod client_tests {
         let _m = metadata_mock(&mut server, 200, ASSETS_FIXTURE);
 
         let client = AdoptiumClient::new(server.url());
-        let metadata = client.fetch_metadata("21").unwrap();
+        let metadata = client
+            .fetch_metadata(Request {
+                major: 21,
+                stream: Stream::Ga,
+            })
+            .unwrap();
 
         assert_eq!(metadata.semver, "21.0.11+10.0.LTS");
         assert_eq!(metadata.release_name, "jdk-21.0.11+10");
@@ -506,7 +592,12 @@ mod client_tests {
         let _m = metadata_mock(&mut server, 500, "boom");
 
         let client = AdoptiumClient::new(server.url());
-        let err = client.fetch_metadata("21").unwrap_err();
+        let err = client
+            .fetch_metadata(Request {
+                major: 21,
+                stream: Stream::Ga,
+            })
+            .unwrap_err();
 
         assert!(format!("{err:#}").contains("HTTP 500"), "got: {err:#}");
     }
@@ -517,7 +608,12 @@ mod client_tests {
         let _m = metadata_mock(&mut server, 200, "this is not json");
 
         let client = AdoptiumClient::new(server.url());
-        let err = client.fetch_metadata("21").unwrap_err();
+        let err = client
+            .fetch_metadata(Request {
+                major: 21,
+                stream: Stream::Ga,
+            })
+            .unwrap_err();
 
         assert!(
             format!("{err:#}").contains("could not parse the Adoptium API response"),
@@ -531,7 +627,12 @@ mod client_tests {
         let _m = metadata_mock(&mut server, 200, "[]");
 
         let client = AdoptiumClient::new(server.url());
-        let err = client.fetch_metadata("21").unwrap_err();
+        let err = client
+            .fetch_metadata(Request {
+                major: 21,
+                stream: Stream::Ga,
+            })
+            .unwrap_err();
 
         assert!(
             format!("{err:#}").contains("No matching JDK found"),
@@ -546,7 +647,12 @@ mod client_tests {
         let _m = metadata_mock(&mut server, 200, &body);
 
         let client = AdoptiumClient::new(server.url());
-        let err = client.fetch_metadata("21").unwrap_err();
+        let err = client
+            .fetch_metadata(Request {
+                major: 21,
+                stream: Stream::Ga,
+            })
+            .unwrap_err();
 
         assert!(format!("{err:#}").contains("checksum"), "got: {err:#}");
     }
@@ -558,7 +664,12 @@ mod client_tests {
         let _m = metadata_mock(&mut server, 200, &body);
 
         let client = AdoptiumClient::new(server.url());
-        let err = client.fetch_metadata("21").unwrap_err();
+        let err = client
+            .fetch_metadata(Request {
+                major: 21,
+                stream: Stream::Ga,
+            })
+            .unwrap_err();
 
         assert!(
             format!("{err:#}").contains("incomplete metadata"),
@@ -837,5 +948,95 @@ mod client_tests {
         let msg = format!("{err:#}");
         assert!(msg.contains("HTTP 404"), "got: {msg}");
         assert!(!msg.contains("checksum mismatch"), "got: {msg}");
+    }
+
+    // -- fetch_metadata: EA stream --
+
+    /// The EA endpoint answers with *releases* (a `binaries` array), not with
+    /// the flat *assets* the latest endpoint returns. Two shapes, one
+    /// `JdkMetadata`.
+    #[test]
+    fn fetch_metadata_reads_the_ea_release_shape() {
+        let mut server = mockito::Server::new();
+        let mock = server
+            .mock(
+                "GET",
+                mockito::Matcher::Regex(r"^/v3/assets/feature_releases/28/ea".to_string()),
+            )
+            .with_status(200)
+            .with_body(include_str!(
+                "../tests/fixtures/feature_releases_28_ea.json"
+            ))
+            .create();
+
+        let client = AdoptiumClient::new(server.url());
+        let metadata = client
+            .fetch_metadata(Request {
+                major: 28,
+                stream: Stream::Ea,
+            })
+            .expect("the EA fixture is a complete release");
+
+        mock.assert();
+        assert!(
+            metadata.semver.contains('-'),
+            "an EA build carries a prerelease: {}",
+            metadata.semver
+        );
+        assert!(!metadata.checksum.is_empty());
+        assert!(!metadata.download_link.is_empty());
+    }
+
+    /// A GA request must still go to the latest endpoint - the two URLs are
+    /// the only thing that keeps the streams apart at the network seam.
+    #[test]
+    fn fetch_metadata_still_uses_the_latest_endpoint_for_ga() {
+        let mut server = mockito::Server::new();
+        let mock = server
+            .mock(
+                "GET",
+                mockito::Matcher::Regex(r"^/v3/assets/latest/21/hotspot".to_string()),
+            )
+            .with_status(200)
+            .with_body(ASSETS_FIXTURE)
+            .create();
+
+        let client = AdoptiumClient::new(server.url());
+        client
+            .fetch_metadata(Request {
+                major: 21,
+                stream: Stream::Ga,
+            })
+            .expect("the GA fixture is a complete asset");
+        mock.assert();
+    }
+
+    /// An empty array is a 200, not an error: it means Adoptium has no EA
+    /// build for this major on this OS/arch. Saying so beats a silent GA
+    /// substitution, which would hand back a different JDK than was asked for.
+    #[test]
+    fn an_empty_ea_stream_is_an_error_naming_the_request() {
+        let mut server = mockito::Server::new();
+        let _mock = server
+            .mock(
+                "GET",
+                mockito::Matcher::Regex(r"^/v3/assets/feature_releases/11/ea".to_string()),
+            )
+            .with_status(200)
+            .with_body("[]")
+            .create();
+
+        let client = AdoptiumClient::new(server.url());
+        let error = client
+            .fetch_metadata(Request {
+                major: 11,
+                stream: Stream::Ea,
+            })
+            .expect_err("no EA build means no metadata");
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("11-ea"),
+            "should name the request: {message}"
+        );
     }
 }
