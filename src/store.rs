@@ -654,8 +654,8 @@ impl JdkStore {
         let dest_dir = self.base.join(&metadata.semver);
 
         // Validate extracted path
-        let extracted_jdk_path = find_jdk_path(metadata, source_dir)
-            .context("could not find the extracted JDK directory")?;
+        let extracted_jdk_path =
+            find_jdk_path(source_dir).context("could not find the extracted JDK directory")?;
 
         // Create destination directory
         ui.start_install();
@@ -1061,23 +1061,29 @@ fn is_jdk_version_dir(name: &str) -> bool {
 /// home, which is what jlo used to do, left those tools reporting no Java
 /// runtime on a machine with five JDKs on it.
 ///
-/// The `java` launcher is still what is checked for, just one level in.
-fn find_jdk_path(jdk_metadata: &JdkMetadata, temp_dest: &Path) -> anyhow::Result<PathBuf> {
-    let extracted_jdk_path = temp_dest.join(&jdk_metadata.release_name);
+/// Found by looking, not by name. The archive's own top-level directory is the
+/// fact; `release_name` is an API label that happens to match it for released
+/// builds (`jdk-21.0.12+101`) and does not for early-access ones - Adoptium
+/// labels the 28 EA build `jdk-28+16-ea-beta` and ships an archive that unpacks
+/// into `jdk-28+16`. Joining the label was only ever right by luck, and the
+/// luck ran out at the last step of an install that had already downloaded the
+/// whole archive.
+///
+/// The downloaded archive sits in this directory too, hence the filter to
+/// directories; the `java` launcher is what tells the extracted tree from
+/// anything else, one level in on a macOS bundle. Probed via [`java_home_in`]
+/// rather than selected on `env::consts::OS`, for the reason stated there.
+fn find_jdk_path(temp_dest: &Path) -> anyhow::Result<PathBuf> {
+    let read_failure = || format!("could not read the extracted archive in {temp_dest:?}");
 
-    let java_bin = if env::consts::OS == "macos" {
-        extracted_jdk_path.join(BUNDLE_HOME[0]).join(BUNDLE_HOME[1])
-    } else {
-        extracted_jdk_path.clone()
+    for entry in std::fs::read_dir(temp_dest).with_context(read_failure)? {
+        let path = entry.with_context(read_failure)?.path();
+        if path.is_dir() && java_home_in(&path).join("bin").join("java").exists() {
+            return Ok(path);
+        }
     }
-    .join("bin")
-    .join("java");
 
-    if !java_bin.exists() {
-        bail!("java executable is missing at {java_bin:?}");
-    }
-
-    Ok(extracted_jdk_path)
+    bail!("java executable is missing under {temp_dest:?}");
 }
 
 #[cfg(test)]
@@ -2552,28 +2558,44 @@ mod tests {
     #[test]
     fn find_jdk_path_valid() {
         let dir = tempdir().unwrap();
-        let release = "jdk-21.0.3+9";
-        let jdk_dir = create_extracted_jdk(dir.path(), release);
+        let jdk_dir = create_extracted_jdk(dir.path(), "jdk-21.0.3+9");
 
-        let result = find_jdk_path(&metadata("", release), dir.path()).unwrap();
+        let result = find_jdk_path(dir.path()).unwrap();
         assert_eq!(result, jdk_dir);
+    }
+
+    /// The archive's top-level directory is not the API's `release_name`, and
+    /// for an early-access build the two differ: Adoptium labels the 28 EA
+    /// build `jdk-28+16-ea-beta` and ships an archive that unpacks into
+    /// `jdk-28+16`. Naming the directory instead of looking for it cost every
+    /// EA install its last step, after the whole download.
+    #[test]
+    fn find_jdk_path_ignores_the_release_name() {
+        let dir = tempdir().unwrap();
+        let jdk_dir = create_extracted_jdk(dir.path(), "jdk-28+16");
+        // The downloaded archive is extracted in place, so it is still here.
+        fs::write(dir.path().join("OpenJDK28U-jdk_hotspot.tar.gz"), "").unwrap();
+
+        assert_eq!(find_jdk_path(dir.path()).unwrap(), jdk_dir);
     }
 
     #[test]
     fn find_jdk_path_missing_java_binary() {
         let dir = tempdir().unwrap();
-        let release = "jdk-21.0.3+9";
 
         // Create dir structure but no java binary
-        fs::create_dir_all(expected_java_home(&dir.path().join(release)).join("bin")).unwrap();
+        fs::create_dir_all(expected_java_home(&dir.path().join("jdk-21.0.3+9")).join("bin"))
+            .unwrap();
 
-        let result = find_jdk_path(&metadata("", release), dir.path());
+        let result = find_jdk_path(dir.path());
         assert!(result.is_err());
+        let message = result.unwrap_err().to_string();
+        assert!(message.contains("java executable is missing"), "{message}");
+        // An install that cannot find its java must fail loudly, and naming
+        // only a path jlo guessed at would point the reader at the wrong one.
         assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("java executable is missing")
+            message.contains(dir.path().to_str().unwrap()),
+            "names the directory it searched: {message}"
         );
     }
 
