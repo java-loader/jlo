@@ -1614,6 +1614,14 @@ mod tests {
     fn render_rows_aligns_the_columns_and_marks_the_active_build() {
         let rows = vec![
             Row {
+                major: 28,
+                version: "28.0.0-beta+16.0.ea".into(),
+                lts: false,
+                status: Status::Installed,
+                active: false,
+                ea: true,
+            },
+            Row {
                 major: 21,
                 version: "21.0.12+101.0.LTS".into(),
                 lts: true,
@@ -1641,8 +1649,9 @@ mod tests {
         assert_eq!(
             render_rows(&rows),
             vec![
-                "    21  21.0.12+101.0.LTS  LTS  update",
-                " \u{2192}  21  21.0.11+10.0.LTS   LTS  installed",
+                "    28  28.0.0-beta+16.0.ea       EA  installed",
+                "    21  21.0.12+101.0.LTS    LTS      update",
+                " \u{2192}  21  21.0.11+10.0.LTS     LTS      installed",
                 "     8  8.0.412+8",
             ]
         );

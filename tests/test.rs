@@ -1302,6 +1302,26 @@ fn current_says_nothing_is_pinned_when_the_cascade_would_pick_another_major() {
         .stderr(predicate::str::is_empty());
 }
 
+/// Stage 3 is GA-only, so a shell on a pre-release is never "the newest
+/// installed JDK" - a bare `jlo env` here resolves 21 and hands back
+/// 21.0.5+11, not the beta. Nothing configured, the beta active, a released
+/// build installed beside it.
+#[test]
+fn current_does_not_call_a_pre_release_the_newest_install() {
+    let (home, project) = store_fixture(&["21.0.5+11", "28.0.0-beta+16.0.ea"]);
+
+    current_cmd(home.path(), &project)
+        .env(
+            "JAVA_HOME",
+            store_base(home.path()).join("28.0.0-beta+16.0.ea"),
+        )
+        .assert()
+        .success()
+        .code(0)
+        .stdout("28.0.0-beta+16.0.ea  (active, nothing pinned)\n")
+        .stderr(predicate::str::is_empty());
+}
+
 /// Case 5: a JDK jlo does not manage. The path is the whole answer - jlo is
 /// not managing this, and naming a version would claim knowledge it does not
 /// have. No advisory either: whatever is pinned, jlo did not put this here.
