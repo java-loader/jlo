@@ -63,7 +63,7 @@ pub(crate) fn update_path(
 }
 
 /// Build the child `PATH` with the JDK's `bin` directory prepended.
-pub(crate) fn child_path(java_bin: &str, current_path: &str) -> anyhow::Result<String> {
+fn child_path(java_bin: &str, current_path: &str) -> anyhow::Result<String> {
     if current_path.is_empty() {
         return Ok(java_bin.to_string());
     }
