@@ -592,6 +592,46 @@ pub(crate) fn foreign_java_home(path: &Path) {
     hint!("JAVA_HOME points outside jlo's store ({}).", path.display());
 }
 
+/// The advice line under both of the states in which `jlo current` has no
+/// answer to print. Naming `jlo env` is the whole of it: that is the command
+/// that puts a JDK back in this shell.
+pub(crate) const NO_ACTIVE_JDK_HINT: &str = "Run 'jlo env' to activate a JDK in this shell.";
+
+/// The line `jlo env` ends on when its exports went nowhere.
+///
+/// Keyed on stdout being a terminal, which is a reliable enough negative: the
+/// `jlo` shell function sources the exports out of a process substitution
+/// (`. <(jlo-bin env ...)`), and the autoload hook calls that same function, so
+/// on the sourced path stdout is a pipe and this never fires - not even on the
+/// `cd` hook that runs on every directory change.
+/// `jlo-bin env 21 > file` stays silent too - an accepted gap, since the case
+/// that actually misleads is the interactive/agent one.
+pub(crate) fn unsourced_env_hint(java_version: &str) -> String {
+    format!(
+        "jlo env prints exports for a shell to source; it did not change anything. \
+         Use 'jlo exec {java_version} -- <command>' or \
+         'export JAVA_HOME=\"$(jlo home {java_version})\"'."
+    )
+}
+
+/// The line `jlo install` and `jlo update` end on when this run left an older
+/// minor behind.
+///
+/// `None` when there is nothing to say: no install happened (the leftovers
+/// predate this run, and nagging on every no-op run trains the user to ignore
+/// the line), or nothing is superseded.
+pub(crate) fn superseded_hint(installed_any: bool, superseded: usize) -> Option<String> {
+    if !installed_any || superseded == 0 {
+        return None;
+    }
+
+    let plural = if superseded == 1 { "" } else { "s" };
+    Some(format!(
+        "{superseded} superseded JDK{plural} still installed - run 'jlo remove --superseded' to remove {}.",
+        if superseded == 1 { "it" } else { "them" }
+    ))
+}
+
 /// `println!` panics when the reader goes away, and this output is meant to be
 /// piped (`jlo list | head`), so treat a closed pipe as a normal end of output.
 pub(crate) fn print_lines(lines: impl IntoIterator<Item = String>) {
@@ -930,6 +970,54 @@ fn tilde(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- unsourced_env_hint --
+
+    /// The hint exists to hand the caller a command that does work without a
+    /// sourcing shell, so it has to name both alternatives and carry the
+    /// version the user actually asked for.
+    #[test]
+    fn unsourced_env_hint_names_both_alternatives() {
+        let hint = unsourced_env_hint("21");
+        assert!(hint.contains("did not change anything"), "{hint}");
+        assert!(hint.contains("jlo exec 21 -- <command>"), "{hint}");
+        assert!(
+            hint.contains("export JAVA_HOME=\"$(jlo home 21)\""),
+            "{hint}"
+        );
+    }
+
+    // -- superseded_hint --
+
+    #[test]
+    fn superseded_hint_names_the_command_and_the_count() {
+        let hint = superseded_hint(true, 2).expect("an install plus leftovers earns a hint");
+        assert!(hint.contains('2'), "hint should say how many: {hint}");
+        assert!(
+            hint.contains("jlo remove --superseded"),
+            "hint should name the command: {hint}"
+        );
+    }
+
+    #[test]
+    fn superseded_hint_singular_for_one() {
+        let hint = superseded_hint(true, 1).unwrap();
+        assert!(hint.contains("1 superseded JDK "), "{hint}");
+    }
+
+    /// Nothing was superseded, so pointing at the command would send the user
+    /// to a command that removes nothing.
+    #[test]
+    fn superseded_hint_silent_when_nothing_is_superseded() {
+        assert!(superseded_hint(true, 0).is_none());
+    }
+
+    /// Every JDK was already current: the leftovers are pre-existing clutter,
+    /// not something this run caused, and `jlo update` would nag on every run.
+    #[test]
+    fn superseded_hint_silent_when_nothing_was_installed() {
+        assert!(superseded_hint(false, 3).is_none());
+    }
 
     // -- provenance_line --
     //

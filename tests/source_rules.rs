@@ -56,7 +56,7 @@ fn stdout_is_written_only_by_the_one_machine_output_path() {
 
     assert_eq!(
         found,
-        ["src/main.rs:310: println!(\"{}\", java_home.to_string_lossy());"],
+        ["src/main.rs:293: println!(\"{}\", java_home.to_string_lossy());"],
         "unexpected write to stdout - every user-facing message is an eprintln!, \
          and listing rows go through ui::print_lines (ADR-0001)"
     );
