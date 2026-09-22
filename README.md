@@ -119,8 +119,10 @@ mv /path/to/jdk ~/.jdks/21.0.11+9
 ```
 
 The directory name is the whole registration: it has to parse as a semantic version — a leading `v` is tolerated, so
-`v21.0.11+9` works too — and its major is what `jlo env 21` and friends then match on. The directory itself must be a JDK root — the one holding `bin`,
-`lib` and `release`. On macOS that is the `Contents/Home` directory inside a `.jdk` bundle, not the bundle.
+`v21.0.11+9` works too — and its major is what `jlo env 21` and friends then match on. The directory itself must hold the
+JDK — the `bin`, `lib` and `release` entries. On macOS it may instead be a **JDK bundle**, holding those under
+`Contents/Home`; J'Lo takes either, and moving the bundle rather than its `Contents/Home` is the better of the two,
+because that is the shape `/usr/libexec/java_home` can see.
 
 Such a JDK is **unmanaged**: it carries no `.jlo-managed` marker, so
 

@@ -10,6 +10,11 @@ use std::path::{Path, PathBuf};
 
 const MARKER_FILE: &str = ".jlo-managed";
 
+/// Where a macOS JDK bundle keeps its java home, relative to the bundle
+/// directory. Named once because two rules depend on it and they must not
+/// drift: [`java_home_in`] hands this path out, [`owns`] refuses to delete it.
+const BUNDLE_HOME: [&str; 2] = ["Contents", "Home"];
+
 /// What a `jlo remove --superseded` run did, so the caller owns the presentation and
 /// [`JdkStore::prune`] owns only the filesystem work.
 #[derive(Debug, Default)]
@@ -216,7 +221,7 @@ impl JdkStore {
         let active = active_java_home?;
         installed
             .iter()
-            .find(|jdk| same_dir(&self.base.join(&jdk.version), active))
+            .find(|jdk| owns(&self.base.join(&jdk.version), active))
             .map(|jdk| jdk.version.clone())
     }
 
@@ -236,7 +241,7 @@ impl JdkStore {
         matching_versions
             .into_iter()
             .next()
-            .map(|candidate| candidate.path)
+            .map(|candidate| java_home_in(&candidate.path))
     }
 
     /// The path of the exact build `metadata` describes, if it is installed.
@@ -444,7 +449,7 @@ impl JdkStore {
         let (in_use, removable): (Vec<_>, Vec<_>) = match active_java_home {
             Some(active) => matching
                 .into_iter()
-                .partition(|jdk| same_dir(&self.base.join(&jdk.version), active)),
+                .partition(|jdk| owns(&self.base.join(&jdk.version), active)),
             None => (Vec::new(), matching),
         };
         let in_use = in_use.first().map(|jdk| jdk.version.clone());
@@ -519,11 +524,15 @@ impl JdkStore {
         std::fs::rename(extracted_jdk_path, &dest_dir)
             .context("could not move JDK to destination")?;
 
-        // touch a file to indicate that this directory is managed by jlo
+        // touch a file to indicate that this directory is managed by jlo.
+        // At the store entry, not inside a bundle's Contents/Home: the entry
+        // is what `scan` walks and what `remove` deletes.
         std::fs::File::create(dest_dir.join(MARKER_FILE))
             .context("could not create marker file")?;
 
-        Ok(dest_dir)
+        // The java home, not the entry: every caller uses this as JAVA_HOME,
+        // and on macOS the two are no longer the same directory.
+        Ok(java_home_in(&dest_dir))
     }
 
     /// Every directory in the base directory, paired with what a single walk
@@ -639,6 +648,45 @@ fn same_dir(a: &Path, b: &Path) -> bool {
     }
 }
 
+/// The java home inside a store entry: `Contents/Home` for a macOS JDK
+/// bundle, the entry itself for a flat install. This is the value `jlo home`,
+/// `jlo env` and `jlo exec` hand out.
+///
+/// Probed rather than selected on `env::consts::OS`, because one store holds
+/// both shapes at once: installs made by jlo versions that unwrapped the
+/// bundle sit beside bundles, and a hand-placed JDK (README, "Using a JDK
+/// J'Lo Did Not Install") may arrive as either.
+///
+/// The probe is `bin/java`, not the directory: a `Contents/Home` that cannot
+/// run Java is not a java home, whatever its name, and requiring the launcher
+/// is also what keeps a Linux JDK that happens to carry a `Contents/Home` from
+/// being read as a bundle.
+fn java_home_in(dir: &Path) -> PathBuf {
+    let bundled = dir.join(BUNDLE_HOME[0]).join(BUNDLE_HOME[1]);
+    if bundled.join("bin").join("java").exists() {
+        bundled
+    } else {
+        dir.to_path_buf()
+    }
+}
+
+/// Whether `active` - a live `$JAVA_HOME` - names the store entry `dir`, by
+/// either of the two spellings a JDK directory has: the entry itself (a flat
+/// install) or its `Contents/Home` (a macOS bundle).
+///
+/// Deliberately *not* [`java_home_in`]: this is the guard that stops `jlo
+/// remove` deleting the JDK the calling shell is using, and a guard that asks
+/// the filesystem what shape a directory is can be switched off by a directory
+/// that cannot be stat'd. Both spellings are compared unconditionally instead,
+/// so a bundle whose `Contents/Home` has gone unreadable is still protected.
+///
+/// The same rule answers `jlo current`: a `$JAVA_HOME` pointing at a bundle
+/// root resolves to its version rather than falling through to "that install
+/// is no longer there".
+fn owns(dir: &Path, active: &Path) -> bool {
+    same_dir(dir, active) || same_dir(&dir.join(BUNDLE_HOME[0]).join(BUNDLE_HOME[1]), active)
+}
+
 /// A directory counts as a JDK when its name parses as a version. That is what
 /// jlo names its installs, and it is what keeps a hand-placed `temurin-21.0.5`
 /// out of the listing.
@@ -646,15 +694,28 @@ fn is_jdk_version_dir(name: &str) -> bool {
     crate::version::parse(name).is_ok()
 }
 
+/// What to move into the store: the root of the extracted archive.
+///
+/// On macOS that root is a JDK bundle, and the whole of it is kept - the
+/// `Contents/Info.plist` beside `Contents/Home` is what makes
+/// `/usr/libexec/java_home` (and everything that shells out to it: Maven
+/// Toolchains' macOS discovery, some Gradle toolchain detectors,
+/// `/usr/bin/java`) able to see the install at all. Unwrapping it to the java
+/// home, which is what jlo used to do, left those tools reporting no Java
+/// runtime on a machine with five JDKs on it.
+///
+/// The `java` launcher is still what is checked for, just one level in.
 fn find_jdk_path(jdk_metadata: &JdkMetadata, temp_dest: &Path) -> anyhow::Result<PathBuf> {
-    let mut extracted_jdk_path = temp_dest.join(&jdk_metadata.release_name);
+    let extracted_jdk_path = temp_dest.join(&jdk_metadata.release_name);
 
-    // On macOS, the JDK is inside Contents/Home
-    if env::consts::OS == "macos" {
-        extracted_jdk_path = extracted_jdk_path.join("Contents").join("Home");
+    let java_bin = if env::consts::OS == "macos" {
+        extracted_jdk_path.join(BUNDLE_HOME[0]).join(BUNDLE_HOME[1])
+    } else {
+        extracted_jdk_path.clone()
     }
+    .join("bin")
+    .join("java");
 
-    let java_bin = extracted_jdk_path.join("bin").join("java");
     if !java_bin.exists() {
         bail!("java executable is missing at {java_bin:?}");
     }
@@ -689,22 +750,41 @@ mod tests {
         }
     }
 
-    /// Where an extracted Adoptium archive puts the JDK on this platform.
-    fn extracted_jdk_dir(source: &Path, release: &str) -> PathBuf {
+    /// The java home inside a JDK directory on *this* platform: one level in
+    /// on macOS, where the directory is a bundle, and the directory itself
+    /// everywhere else. The expectation [`java_home_in`] has to meet, spelled
+    /// out independently of it.
+    fn expected_java_home(dir: &Path) -> PathBuf {
         if env::consts::OS == "macos" {
-            source.join(release).join("Contents").join("Home")
+            dir.join("Contents").join("Home")
         } else {
-            source.join(release)
+            dir.to_path_buf()
         }
     }
 
+    /// A JDK in the store as a macOS bundle, whatever the host: `bin/java`
+    /// lives at `<version>/Contents/Home`, not at `<version>`. Written out
+    /// rather than derived from [`expected_java_home`] so the bundle rules are
+    /// exercised on Linux too - they are shape rules, not platform rules.
+    fn create_bundle_jdk_dir(base: &Path, version: &str, managed: bool) -> PathBuf {
+        let entry = base.join(version);
+        let java_home = entry.join("Contents").join("Home");
+        fs::create_dir_all(java_home.join("bin")).unwrap();
+        fs::write(java_home.join("bin").join("java"), "").unwrap();
+        if managed {
+            fs::File::create(entry.join(MARKER_FILE)).unwrap();
+        }
+        java_home
+    }
+
     /// Create a mock extracted JDK under `source`, in the layout
-    /// [`find_jdk_path`] expects, and return its directory.
+    /// [`find_jdk_path`] expects, and return the archive root - which is what
+    /// `find_jdk_path` answers and `install` moves.
     fn create_extracted_jdk(source: &Path, release: &str) -> PathBuf {
-        let jdk_dir = extracted_jdk_dir(source, release);
-        fs::create_dir_all(jdk_dir.join("bin")).unwrap();
-        fs::write(jdk_dir.join("bin").join("java"), "").unwrap();
-        jdk_dir
+        let java_home = expected_java_home(&source.join(release));
+        fs::create_dir_all(java_home.join("bin")).unwrap();
+        fs::write(java_home.join("bin").join("java"), "").unwrap();
+        source.join(release)
     }
 
     // -- base_dir_for --
@@ -722,6 +802,148 @@ mod tests {
     fn base_dir_matches_intellij_layout_on_linux() {
         let home = Path::new("/home/u");
         assert_eq!(base_dir_for("linux", home), home.join(".jdks"));
+    }
+
+    // -- the two shapes a store entry can have --
+    //
+    // One store holds both: a bundle jlo installed, a flat directory an older
+    // jlo left behind, and a hand-placed JDK in either shape. Nothing here is
+    // gated on the host platform, because the rules are about the directory,
+    // not about the machine reading it.
+
+    /// The whole point of keeping the bundle: what jlo hands out as
+    /// `JAVA_HOME` has to be the java home inside it, not the bundle.
+    #[test]
+    fn find_matching_answers_a_bundle_with_its_contents_home() {
+        let dir = tempdir().unwrap();
+        let java_home = create_bundle_jdk_dir(dir.path(), "21.0.3+9", true);
+
+        assert_eq!(
+            JdkStore::at(dir.path()).find_matching("21"),
+            Some(java_home)
+        );
+    }
+
+    /// The other half of the same rule. An install made before jlo kept the
+    /// bundle has no `Contents/Home`, and must keep resolving to itself
+    /// rather than to a path that is not there - there is no migration step.
+    #[test]
+    fn find_matching_answers_a_flat_install_with_itself() {
+        let dir = tempdir().unwrap();
+        create_jdk_dir(dir.path(), "21.0.3+9", true);
+
+        assert_eq!(
+            JdkStore::at(dir.path()).find_matching("21"),
+            Some(dir.path().join("21.0.3+9"))
+        );
+    }
+
+    /// A directory named `Contents/Home` that cannot run Java is not a java
+    /// home. The launcher is the probe, so a JDK that merely happens to carry
+    /// such a directory still resolves to itself.
+    #[test]
+    fn a_contents_home_without_a_launcher_is_not_a_bundle() {
+        let dir = tempdir().unwrap();
+        create_jdk_dir(dir.path(), "21.0.3+9", true);
+        fs::create_dir_all(dir.path().join("21.0.3+9/Contents/Home")).unwrap();
+
+        assert_eq!(
+            JdkStore::at(dir.path()).find_matching("21"),
+            Some(dir.path().join("21.0.3+9"))
+        );
+    }
+
+    /// `jlo current` asks this, and `jlo env` set the `$JAVA_HOME` it is
+    /// asking about - so for a bundle that is the `Contents/Home` path, not
+    /// the store entry. Getting this wrong makes `current` report a live
+    /// install as one that is no longer there.
+    #[test]
+    fn active_version_recognises_a_bundles_contents_home() {
+        let dir = tempdir().unwrap();
+        let java_home = create_bundle_jdk_dir(dir.path(), "21.0.3+9", true);
+        let store = JdkStore::at(dir.path());
+        let installed = store.list().unwrap();
+
+        assert_eq!(
+            store
+                .active_version(&installed, Some(&java_home))
+                .as_deref(),
+            Some("21.0.3+9")
+        );
+    }
+
+    /// The bundle root is the other spelling of the same install. Nothing jlo
+    /// prints produces it, but a `$JAVA_HOME` set by hand can, and answering
+    /// "not one of ours" about our own directory would be wrong.
+    #[test]
+    fn active_version_recognises_a_bundle_root() {
+        let dir = tempdir().unwrap();
+        create_bundle_jdk_dir(dir.path(), "21.0.3+9", true);
+        let store = JdkStore::at(dir.path());
+        let installed = store.list().unwrap();
+
+        let entry = dir.path().join("21.0.3+9");
+        assert_eq!(
+            store.active_version(&installed, Some(&entry)).as_deref(),
+            Some("21.0.3+9")
+        );
+    }
+
+    /// The refusal that protects the calling shell, in bundle shape. `jlo env`
+    /// exported the `Contents/Home` path, so that is what the guard is handed,
+    /// and a guard that only knew the store entry would delete the JDK the
+    /// shell is running on.
+    #[test]
+    fn remove_refuses_a_bundle_whose_contents_home_is_in_use() {
+        let dir = tempdir().unwrap();
+        let java_home = create_bundle_jdk_dir(dir.path(), "21.0.3+9", true);
+
+        let err = JdkStore::at(dir.path())
+            .remove(&["21".to_string()], Some(&java_home))
+            .expect_err("JAVA_HOME points at it");
+
+        assert!(matches!(err, RemoveError::InUse(v) if v == "21.0.3+9"));
+        assert!(dir.path().join("21.0.3+9").exists());
+    }
+
+    /// The reason the guard compares paths instead of asking the filesystem
+    /// what shape the directory is. Here the bundle's launcher is gone, so the
+    /// shape probe would fall back to the store entry and conclude that a
+    /// `$JAVA_HOME` of `Contents/Home` belongs to nobody - and delete the
+    /// directory the calling shell is pointing into. A probe that fails is
+    /// exactly the case a removal guard must survive.
+    #[test]
+    fn remove_refuses_a_bundle_whose_launcher_is_missing() {
+        let dir = tempdir().unwrap();
+        let java_home = create_bundle_jdk_dir(dir.path(), "21.0.3+9", true);
+        fs::remove_file(java_home.join("bin").join("java")).unwrap();
+        assert_eq!(
+            java_home_in(&dir.path().join("21.0.3+9")),
+            dir.path().join("21.0.3+9")
+        );
+
+        let err = JdkStore::at(dir.path())
+            .remove(&["21".to_string()], Some(&java_home))
+            .expect_err("JAVA_HOME points into it");
+
+        assert!(matches!(err, RemoveError::InUse(v) if v == "21.0.3+9"));
+        assert!(dir.path().join("21.0.3+9").exists());
+    }
+
+    /// The other spelling, at the other end of the guard: a `$JAVA_HOME` set
+    /// by hand to the bundle root is still the JDK in use.
+    #[test]
+    fn remove_refuses_a_bundle_whose_root_is_in_use() {
+        let dir = tempdir().unwrap();
+        create_bundle_jdk_dir(dir.path(), "21.0.3+9", true);
+        let entry = dir.path().join("21.0.3+9");
+
+        let err = JdkStore::at(dir.path())
+            .remove(&["21".to_string()], Some(&entry))
+            .expect_err("JAVA_HOME points at it");
+
+        assert!(matches!(err, RemoveError::InUse(v) if v == "21.0.3+9"));
+        assert!(entry.exists());
     }
 
     // -- find_matching --
@@ -1513,7 +1735,7 @@ mod tests {
         let release = "jdk-21.0.3+9";
 
         // Create dir structure but no java binary
-        fs::create_dir_all(extracted_jdk_dir(dir.path(), release).join("bin")).unwrap();
+        fs::create_dir_all(expected_java_home(&dir.path().join(release)).join("bin")).unwrap();
 
         let result = find_jdk_path(&metadata("", release), dir.path());
         assert!(result.is_err());
@@ -1527,14 +1749,14 @@ mod tests {
 
     // -- install --
 
-    #[test]
-    fn install_moves_and_marks() {
+    /// Install a mock JDK into a fresh store and hand back both halves of the
+    /// answer: the store entry and what `install` returned.
+    fn install_mock_jdk(dest_parent: &Path) -> (PathBuf, PathBuf) {
         let source_dir = tempdir().unwrap();
-        let dest_parent = tempdir().unwrap();
         let release = "jdk-21.0.3+9";
         create_extracted_jdk(source_dir.path(), release);
 
-        let dest = JdkStore::at(dest_parent.path())
+        let returned = JdkStore::at(dest_parent)
             .install(
                 &metadata("21.0.3+9", release),
                 source_dir.path(),
@@ -1542,29 +1764,30 @@ mod tests {
             )
             .unwrap();
 
-        assert!(dest.exists());
-        assert!(dest.join(MARKER_FILE).exists());
-        assert!(dest.join("bin").join("java").exists());
+        (dest_parent.join("21.0.3+9"), returned)
     }
 
-    /// The caller needs the installed path (for `ui.finish` and its own return
-    /// value), and it is the store - not the caller - that decides the layout.
+    /// The marker goes on the store *entry*, not on the java home. On macOS
+    /// those are two directories, and `scan` only ever looks at the entry - a
+    /// marker written one level in would make every install read as unmanaged
+    /// and quietly turn `jlo remove` into a no-op.
     #[test]
-    fn install_returns_the_path_it_installed_to() {
-        let source_dir = tempdir().unwrap();
+    fn install_moves_and_marks() {
         let dest_parent = tempdir().unwrap();
-        let release = "jdk-21.0.3+9";
-        create_extracted_jdk(source_dir.path(), release);
+        let (entry, java_home) = install_mock_jdk(dest_parent.path());
 
-        let dest = JdkStore::at(dest_parent.path())
-            .install(
-                &metadata("21.0.3+9", release),
-                source_dir.path(),
-                &InstallUi::hidden("test"),
-            )
-            .unwrap();
+        assert!(entry.join(MARKER_FILE).exists());
+        assert!(java_home.join("bin").join("java").exists());
+    }
 
-        assert_eq!(dest, dest_parent.path().join("21.0.3+9"));
+    /// The caller uses this as `JAVA_HOME`, so on macOS it is the bundle's
+    /// `Contents/Home` and not the store entry the bundle was moved to.
+    #[test]
+    fn install_returns_the_java_home_not_the_store_entry() {
+        let dest_parent = tempdir().unwrap();
+        let (entry, java_home) = install_mock_jdk(dest_parent.path());
+
+        assert_eq!(java_home, expected_java_home(&entry));
     }
 
     #[test]
