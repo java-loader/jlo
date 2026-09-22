@@ -745,6 +745,10 @@ pub(crate) struct Row {
     pub(crate) status: Status,
     /// `$JAVA_HOME` points at this install.
     pub(crate) active: bool,
+    /// A pre-release build. The catalogue is GA-only by decision (see
+    /// `supersedes_every_install`), so a remote row is never this - only a
+    /// local row backed by an `InstalledJdk` with `stream: Stream::Ea` is.
+    pub(crate) ea: bool,
 }
 
 /// Merge the remote catalogue and the local installs into one row per version.
@@ -765,6 +769,9 @@ fn build_rows(
                 None => Status::Available,
             },
             active: false,
+            // The catalogue is GA-only by decision, so every remote row is a
+            // released build.
+            ea: false,
         })
         .collect();
 
@@ -779,10 +786,15 @@ fn build_rows(
                 major: i.major,
                 version: i.version.clone(),
                 // LTS is a property of the major, so an older build keeps the
-                // tag even once Adoptium stops offering that exact version.
-                lts: available.iter().any(|a| a.major == i.major && a.lts),
+                // tag even once Adoptium stops offering that exact version -
+                // but only for a GA install: "LTS" is a promise about a
+                // released build, and gating on GA keeps an EA row from
+                // printing both marks.
+                lts: i.stream == crate::request::Stream::Ga
+                    && available.iter().any(|a| a.major == i.major && a.lts),
                 status: local_status(i, installed),
                 active: false,
+                ea: i.stream == crate::request::Stream::Ea,
             }),
     );
 
@@ -807,8 +819,17 @@ fn build_rows(
 /// The catalogue can sit *behind* the store - an install that came from
 /// somewhere else, or a major Adoptium has since rolled back - and `update`
 /// there would be offering a downgrade.
+///
+/// Only GA installs are compared: the catalogue is GA-only by decision, so a
+/// pre-release install is a different name from anything Adoptium offers, not
+/// something an offered build could supersede. A major with only an EA
+/// install therefore has no GA install to compare against and falls through
+/// to `Available`, same as a major with no install at all.
 fn supersedes_every_install(jdk: &RemoteJdk, installed: &[InstalledJdk]) -> bool {
-    let mut majors = installed.iter().filter(|i| i.major == jdk.major).peekable();
+    let mut majors = installed
+        .iter()
+        .filter(|i| i.major == jdk.major && i.stream == crate::request::Stream::Ga)
+        .peekable();
     if majors.peek().is_none() {
         return false;
     }
@@ -839,8 +860,12 @@ fn local_status(jdk: &InstalledJdk, installed: &[InstalledJdk]) -> Status {
     // 21.0.1 would otherwise mark the managed one superseded and recommend a
     // command that removes nothing, the managed build still being the newest
     // of the set pruning actually looks at.
+    // Also filtered to the same stream: the two streams of one major are two
+    // names, so a pre-release and the release it previews never supersede
+    // each other, however their version strings would otherwise compare.
     let superseded = installed.iter().filter(|other| other.managed).any(|other| {
         other.major == jdk.major
+            && other.stream == jdk.stream
             && crate::version::compare(&other.version, &jdk.version)
                 .is_ok_and(|ord| ord == Ordering::Greater)
     });
@@ -864,6 +889,9 @@ fn render_rows(rows: &[Row]) -> Vec<String> {
     // `jlo list --offline` has no catalogue to read LTS out of, so the column
     // would be three blank characters on every line of it.
     let any_lts = rows.iter().any(|row| row.lts);
+    // Same reasoning for the EA column: most listings have no pre-release
+    // install at all.
+    let any_ea = rows.iter().any(|row| row.ea);
 
     rows.iter()
         .map(|row| {
@@ -880,8 +908,16 @@ fn render_rows(rows: &[Row]) -> Vec<String> {
                 (true, true) => format!("{}  ", style("LTS").bold()),
                 (true, false) => "     ".to_string(),
             };
+            // `ea` and `LTS` are different facts and get their own column;
+            // the inheritance gate in `build_rows` means no row ever carries
+            // both, but each column still has to line up on its own.
+            let ea = match (any_ea, row.ea) {
+                (false, _) => String::new(),
+                (true, true) => format!("{}  ", style("EA").bold()),
+                (true, false) => "    ".to_string(),
+            };
             format!(
-                " {gutter}  {:>major_width$}  {:<version_width$}  {lts}{}",
+                " {gutter}  {:>major_width$}  {:<version_width$}  {lts}{ea}{}",
                 style(row.major).dim(),
                 row.version,
                 render_status(row.status),
@@ -1227,6 +1263,15 @@ mod tests {
         }
     }
 
+    fn local_ea(version: &str, major: i64) -> InstalledJdk {
+        InstalledJdk {
+            version: version.to_string(),
+            major,
+            stream: crate::request::Stream::Ea,
+            managed: true,
+        }
+    }
+
     fn row(major: i64, version: &str, status: Status) -> Row {
         Row {
             major,
@@ -1234,6 +1279,7 @@ mod tests {
             lts: false,
             status,
             active: false,
+            ea: false,
         }
     }
 
@@ -1420,6 +1466,48 @@ mod tests {
     }
 
     #[test]
+    fn an_installed_pre_release_is_marked() {
+        let rows = build_rows(&[], &[local_ea("28.0.0-beta+16.0.ea", 28)], None);
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].ea, "a pre-release row carries the mark");
+    }
+
+    /// The two streams of one major are two names, so neither supersedes the
+    /// other. Without the filter the beta - which sorts above the release it
+    /// previews - would mark the installed GA build superseded and send the
+    /// reader to 'jlo remove --superseded', which would not touch it.
+    #[test]
+    fn neither_stream_supersedes_the_other() {
+        let rows = build_rows(
+            &[],
+            &[local("26.0.1+9", 26), local_ea("26.0.2-beta+101.0.ea", 26)],
+            None,
+        );
+
+        let ga = rows.iter().find(|r| !r.ea).expect("the release has a row");
+        let beta = rows.iter().find(|r| r.ea).expect("the beta has a row");
+        assert_eq!(ga.status, Status::Installed);
+        assert_eq!(beta.status, Status::Installed);
+    }
+
+    /// The catalogue offers GA only, so an offered release must not be called
+    /// an update to a pre-release install: following it would change streams.
+    #[test]
+    fn a_ga_release_is_not_an_update_to_an_installed_pre_release() {
+        let rows = build_rows(
+            &[remote("28.0.1+9", 28)],
+            &[local_ea("28.0.0-beta+16.0.ea", 28)],
+            None,
+        );
+
+        let offered = rows
+            .iter()
+            .find(|r| r.version == "28.0.1+9")
+            .expect("the offered build has a row");
+        assert_eq!(offered.status, Status::Available);
+    }
+
+    #[test]
     fn render_rows_aligns_the_columns_and_marks_the_active_build() {
         let rows = vec![
             Row {
@@ -1428,6 +1516,7 @@ mod tests {
                 lts: true,
                 status: Status::Update,
                 active: false,
+                ea: false,
             },
             Row {
                 major: 21,
@@ -1435,6 +1524,7 @@ mod tests {
                 lts: true,
                 status: Status::Installed,
                 active: true,
+                ea: false,
             },
             Row {
                 major: 8,
@@ -1442,6 +1532,7 @@ mod tests {
                 lts: false,
                 status: Status::Available,
                 active: false,
+                ea: false,
             },
         ];
         assert_eq!(
