@@ -111,50 +111,6 @@ fn examples<'a>(rows: impl Iterator<Item = &'a (&'a str, &'a str, bool)> + Clone
         .join("\n")
 }
 
-// Help prose that several commands share word for word. Macros rather than
-// `const`s because `concat!` takes only literals; the line breaks are part of
-// the text, since clap prints long_about as written.
-macro_rules! cascade_help {
-    () => {
-        "When VERSION is omitted, it resolves in four steps: the nearest
-.jlorc at or above the current directory, then ~/.jlo/default.jlorc,
-then the newest JDK already installed, then the latest release, which
-is downloaded."
-    };
-}
-
-macro_rules! downloads_help {
-    () => {
-        "Downloads the latest build Adoptium offers of every name given - a
-major (21) or a pre-release stream (28-ea), not an exact build: 21, not
-21.0.5. A name already on that build or a newer one is reported and
-left alone - never moved back; one Adoptium has no build of for this
-machine is skipped with a warning."
-    };
-}
-
-macro_rules! one_operation_help {
-    () => {
-        "install and update are one operation. They differ only when no version
-is given: "
-    };
-}
-
-macro_rules! replaces_help {
-    () => {
-        "The new build replaces the old one: J'Lo keeps one build per name, so
-each download deletes the builds it supersedes - including the one
-JAVA_HOME points at, in which case this shell moves to the new build.
-Other shells still on it need 'jlo env' again."
-    };
-}
-
-macro_rules! version_arg_help {
-    () => {
-        "Java version: a major (21) or a pre-release stream (28-ea)"
-    };
-}
-
 #[derive(Debug, Parser)]
 #[command(
     name = "jlo",
@@ -246,8 +202,7 @@ pub(crate) enum Command {
     #[command(
         visible_alias = "use",
         about = "Set JAVA_HOME and PATH in the current shell",
-        long_about = concat!(
-            "\
+        long_about = "\
 Set JAVA_HOME and PATH in the current shell
 
 Prints export statements on stdout; the jlo shell function sources
@@ -259,9 +214,10 @@ the JDK is there, exit status 1 and no exports if it is not, and no
 network access either way. That is how the autoload hook calls it, so
 entering a directory never starts a download.
 
-",
-        cascade_help!(),
-        " The third step does not ask Adoptium whether something
+When VERSION is omitted, it resolves in four steps: the nearest
+.jlorc at or above the current directory, then ~/.jlo/default.jlorc,
+then the newest JDK already installed, then the latest release, which
+is downloaded. The third step does not ask Adoptium whether something
 newer exists, so a machine holding only Java 17 resolves to 17.
 --offline stops after that step instead of downloading. A major
 version (21) or a pre-release stream (28-ea) is accepted, not an
@@ -272,10 +228,9 @@ Anything else jlo has to say - download progress, a warning - goes to
 stderr, where the shell will not try to execute it. To see which JDK
 is active and where the version came from, run jlo current - it starts
 from the live JAVA_HOME, so it can also say when the two disagree."
-        )
     )]
     Env {
-        #[arg(help = concat!(version_arg_help!(), ". Default: .jlorc, the newest installed JDK, then the latest release"))]
+        /// Java version: a major (21) or a pre-release stream (28-ea). Default: .jlorc, the newest installed JDK, then the latest release
         version: Option<String>,
 
         /// Only look at installed JDKs; never download, never touch the network
@@ -285,8 +240,7 @@ from the live JAVA_HOME, so it can also say when the two disagree."
 
     #[command(
         about = "Print the JAVA_HOME path for a version",
-        long_about = concat!(
-            "\
+        long_about = "\
 Print the JAVA_HOME path for a version
 
 Writes the path and nothing else to stdout, so $(jlo home 21) stays
@@ -297,14 +251,14 @@ Pass --offline to answer from what is already installed instead: the
 path if it is there, exit status 1 if it is not, and no network access
 either way.
 
-",
-            cascade_help!(),
-            " A major version (21) or a pre-release stream (28-ea)
+When VERSION is omitted, it resolves in four steps: the nearest
+.jlorc at or above the current directory, then ~/.jlo/default.jlorc,
+then the newest JDK already installed, then the latest release, which
+is downloaded. A major version (21) or a pre-release stream (28-ea)
 is accepted, not an exact build: 21, not 21.0.5."
-        )
     )]
     Home {
-        #[arg(help = concat!(version_arg_help!(), ". Default: .jlorc, the newest installed JDK, then the latest release"))]
+        /// Java version: a major (21) or a pre-release stream (28-ea). Default: .jlorc, the newest installed JDK, then the latest release
         version: Option<String>,
 
         /// Only look at installed JDKs; never download, never touch the network
@@ -368,58 +322,59 @@ some other version lives, see jlo home."
 
     #[command(
         about = "Install JDKs; without a version, the one jlo env would use",
-        long_about = concat!(
-            "\
+        long_about = "\
 Install JDKs; without a version, the one jlo env would use
 
-",
-            downloads_help!(),
-            "
+Downloads the latest build Adoptium offers of every name given - a
+major (21) or a pre-release stream (28-ea), not an exact build: 21, not
+21.0.5. A name already on that build or a newer one is reported and
+left alone - never moved back; one Adoptium has no build of for this
+machine is skipped with a warning.
 
-",
-            one_operation_help!(),
-            "install resolves one in four steps - the nearest .jlorc at or
+install and update are one operation. They differ only when no version
+is given: install resolves one in four steps - the nearest .jlorc at or
 above the current directory, then ~/.jlo/default.jlorc, then the newest
 JDK already installed, then the latest release - while update takes
 every installed name.
 
-",
-            replaces_help!(),
-            " Otherwise no shell is
+The new build replaces the old one: J'Lo keeps one build per name, so
+each download deletes the builds it supersedes - including the one
+JAVA_HOME points at, in which case this shell moves to the new build.
+Other shells still on it need 'jlo env' again. Otherwise no shell is
 touched.
 
 The usual route is jlo env, which switches the current shell and
 downloads the JDK on demand if it is missing, so an explicit install
 is for the cases that come before that - warming a CI cache, preparing
 for offline work, or seeding a machine without switching it."
-        )
     )]
     Install {
-        #[arg(help = concat!(version_arg_help!(), ". Default: .jlorc, the newest installed JDK, then the latest release"))]
+        /// Java version: a major (21) or a pre-release stream (28-ea). Default: .jlorc, the newest installed JDK, then the latest release
         versions: Vec<String>,
     },
 
     #[command(
         about = "Update JDKs; without a version, every installed one",
-        long_about = concat!(
-            "\
+        long_about = "\
 Update JDKs; without a version, every installed one
 
-",
-            downloads_help!(),
-            "
+Downloads the latest build Adoptium offers of every name given - a
+major (21) or a pre-release stream (28-ea), not an exact build: 21, not
+21.0.5. A name already on that build or a newer one is reported and
+left alone - never moved back; one Adoptium has no build of for this
+machine is skipped with a warning.
 
-",
-            one_operation_help!(),
-            "update takes every installed name, pre-release streams
+install and update are one operation. They differ only when no version
+is given: update takes every installed name, pre-release streams
 included, while install resolves one version the way jlo env does.
 
-",
-            replaces_help!()
-        )
+The new build replaces the old one: J'Lo keeps one build per name, so
+each download deletes the builds it supersedes - including the one
+JAVA_HOME points at, in which case this shell moves to the new build.
+Other shells still on it need 'jlo env' again."
     )]
     Update {
-        #[arg(help = concat!(version_arg_help!(), ". Default: every installed name"))]
+        /// Java version: a major (21) or a pre-release stream (28-ea). Default: every installed name
         versions: Vec<String>,
     },
 
@@ -448,7 +403,7 @@ rule is the selector - and, being nobody's explicit request, it leaves
 an install J'Lo did not make alone without calling it an error."
     )]
     Remove {
-        #[arg(help = concat!(version_arg_help!(), ", or the exact version of a single install"))]
+        /// Java version: a major (21) or a pre-release stream (28-ea), or the exact version of a single install
         versions: Vec<String>,
 
         /// Remove every superseded minor release instead of a named version
@@ -470,7 +425,7 @@ an install J'Lo did not make alone without calling it an error."
     /// falls back to when no .jlorc is found, ahead of the newest JDK
     /// already installed.
     Init {
-        #[arg(help = concat!(version_arg_help!(), ". Default: latest release"))]
+        /// Java version: a major (21) or a pre-release stream (28-ea). Default: latest release
         version: Option<String>,
 
         /// Write ~/.jlo/default.jlorc instead of ./.jlorc
