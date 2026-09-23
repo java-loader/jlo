@@ -548,12 +548,11 @@ fn list_remote_shows_available_versions() {
         .env("JLO_ADOPTIUM_API_URL", server.url())
         .assert()
         .success()
-        // The name leads the row, after the gutter column that marks which
-        // install `$JAVA_HOME` points at - the name is what `jlo install`
-        // takes. Nothing is installed, so the build sits under LATEST.
-        .stdout("    21               21.0.11+10.0.LTS  LTS\n")
-        // The column names go to stderr with the tip, so a pipe sees rows only.
-        .stderr("    NAME  INSTALLED  LATEST\n");
+        // Nothing is installed, so 21 is only named in the available line -
+        // by the name `jlo install` takes.
+        .stdout("    21\n")
+        // The section heading goes to stderr, so a pipe sees rows only.
+        .stderr("Available\n");
 }
 
 /// The case `jlo remove 17.0.11+10` had nowhere to read its argument from:
@@ -589,12 +588,10 @@ fn list_remote_gives_a_superseded_build_its_own_line() {
         .env("JLO_ADOPTIUM_API_URL", server.url())
         .assert()
         .success()
-        .stdout(
-            "    21    21.0.11+10.0.LTS  LTS\n \u{2192}        21.0.9+10.0.LTS        superseded\n",
-        )
+        .stdout("    21  21.0.11+10.0.LTS\n  \u{25cf}     21.0.9+10.0.LTS   superseded\n")
         // The advice belongs on stderr, so a pipe sees only the rows.
         .stderr(predicate::str::contains(
-            "`jlo remove --superseded` (1 superseded)",
+            "'jlo remove --superseded' (1 superseded)",
         ));
 }
 
@@ -1957,19 +1954,18 @@ fn a_listing_reads_the_same_with_colour_off() {
         );
     }
 
-    // The distinctions survive as text: a column per fact and a status word
-    // per exception, and the active line marked by the gutter column rather
-    // than by a colour.
+    // The distinctions survive as text: a status word per exception, and the
+    // active line marked by the gutter glyph rather than by a colour.
     assert_eq!(
-        stdout, "    21    21.0.11+10\n \u{2192}        21.0.9+10   superseded\n",
+        stdout, "    21  21.0.11+10\n  \u{25cf}     21.0.9+10   superseded\n",
         "with colour off the rows must still say which is which"
     );
     assert!(
-        stderr.starts_with("    NAME  INSTALLED\n"),
-        "the column names head stderr, with no LATEST offline: {stderr:?}"
+        stderr.starts_with("Installed\n"),
+        "the section heading heads stderr: {stderr:?}"
     );
     assert!(
-        stderr.contains("`jlo remove --superseded` (1 superseded)"),
+        stderr.contains("'jlo remove --superseded' (1 superseded)"),
         "the tip must still name its command: {stderr:?}"
     );
 }

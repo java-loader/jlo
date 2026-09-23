@@ -663,14 +663,25 @@ pub(crate) fn remote_list(
     print_listing(&build_rows(available, installed, active_version));
 }
 
-/// The header, the rows, then at most one line of advice.
+/// The installed section, the available one, then at most one line of
+/// advice.
 fn print_listing(rows: &[Row]) {
     let listing = render_rows(rows);
 
-    // The header and the tip go to stderr, so a pipe sees only the rows -
-    // `jlo list | grep` should not have to step over a line of column names.
-    eprintln!("{}", listing.header);
-    print_lines(listing.lines);
+    // The section headings and the tip go to stderr, so a pipe sees only the
+    // rows - `jlo list | grep` should not have to step over a heading.
+    let installed_any = !listing.installed.is_empty();
+    if installed_any {
+        eprintln!("{}", style("Installed").bold().for_stderr());
+        print_lines(listing.installed);
+    }
+    if let Some(available) = listing.available {
+        if installed_any {
+            eprintln!();
+        }
+        eprintln!("{}", style("Available").bold().for_stderr());
+        print_lines([available]);
+    }
 
     if let Some(tip) = tip_line(rows) {
         eprintln!("\n{tip}");
@@ -902,7 +913,6 @@ struct NameRow {
     latest: Option<String>,
     /// `latest` is newer than every install of this name.
     update: bool,
-    lts: bool,
     /// `$JAVA_HOME` points at `installed`.
     active: bool,
     /// Every other install of the name, newest first.
@@ -1025,7 +1035,6 @@ fn name_row(
         installed: head.map(|jdk| jdk.version.clone()),
         latest,
         update,
-        lts: offered.is_some_and(|jdk| jdk.lts),
         active: head.is_some_and(|jdk| is_active(&jdk.version)),
         others,
     })
@@ -1051,138 +1060,162 @@ fn other_status(jdk: &InstalledJdk, head: Option<&InstalledJdk>) -> Status {
     }
 }
 
-/// A listing rendered: the column header, and one line per name or build.
+/// A listing rendered: the lines of the installed section, and the one line
+/// naming everything else Adoptium offers.
 struct Listing {
-    header: String,
-    lines: Vec<String>,
+    installed: Vec<String>,
+    available: Option<String>,
 }
 
-/// One printed line before padding: the cells of a name, or of a build under
-/// it.
-struct Cells<'a> {
-    active: bool,
-    name: String,
-    installed: &'a str,
-    latest: &'a str,
-    lts: bool,
-    status: String,
+/// The gutter glyph of a line, which says the one thing about it that calls
+/// for attention. Plain characters, not colour, carry the distinction, so it
+/// survives `NO_COLOR` and a pipe.
+#[derive(Clone, Copy)]
+enum Mark {
+    None,
+    Active,
+    Update,
+    Superseded,
+    Unmanaged,
 }
 
-fn cells(rows: &[Row]) -> Vec<Cells<'_>> {
-    let mut out = Vec::new();
-    for row in rows {
-        push_name(&mut out, &row.head, "");
-        if let Some(pre_release) = &row.pre_release {
-            push_name(&mut out, pre_release, "  ");
+impl Mark {
+    fn render(self) -> String {
+        match self {
+            Mark::None => " ".to_string(),
+            Mark::Active => style("\u{25cf}").green().to_string(),
+            Mark::Update => style("\u{2191}").yellow().to_string(),
+            Mark::Superseded => style("\u{2717}").dim().to_string(),
+            Mark::Unmanaged => style("?").dim().to_string(),
         }
     }
-    out
 }
 
-/// A name's line, then its other builds. A build's name cell is left empty:
-/// the build sits in the INSTALLED column, where the exact version `jlo
-/// remove` takes is read from, and the blank is what marks it as belonging to
-/// the name above.
-fn push_name<'a>(out: &mut Vec<Cells<'a>>, row: &'a NameRow, indent: &str) {
+/// One printed line before padding: a name with its build, or a build of the
+/// name above.
+struct Cells<'a> {
+    mark: Mark,
+    /// Empty on a build line: the blank is what ties it to the name above.
+    name: String,
+    version: &'a str,
+    active: bool,
+    /// What follows the version, already styled: the offered build, or the
+    /// status word of a build line.
+    tail: String,
+}
+
+/// A name is installed when anything of it is on disk - a managed build or
+/// only unmanaged ones.
+fn is_installed(row: &NameRow) -> bool {
+    row.installed.is_some() || !row.others.is_empty()
+}
+
+/// A name's line, then its other builds.
+fn push_name<'a>(out: &mut Vec<Cells<'a>>, row: &'a NameRow) {
+    let mark = if row.active {
+        Mark::Active
+    } else if row.update {
+        Mark::Update
+    } else {
+        Mark::None
+    };
+    // `update` and `offered` are words as well as a colour so `jlo list |
+    // grep update` works; the second is a catalogue sitting behind the store,
+    // shown so it is not mistaken for nothing on offer.
+    let tail = match (&row.latest, row.update) {
+        (Some(latest), true) => format!("{} {}", style(latest).yellow(), style("update").dim()),
+        (Some(latest), false) => style(format!("{latest} offered")).dim().to_string(),
+        (None, _) => String::new(),
+    };
     out.push(Cells {
+        mark,
+        name: row.name.to_string(),
+        version: row.installed.as_deref().unwrap_or(""),
         active: row.active,
-        name: format!("{indent}{}", row.name),
-        installed: row.installed.as_deref().unwrap_or(""),
-        latest: row.latest.as_deref().unwrap_or(""),
-        lts: row.lts,
-        status: if row.update {
-            style("update").yellow().to_string()
-        } else {
-            String::new()
-        },
+        tail,
     });
     for build in &row.others {
         out.push(Cells {
-            active: build.active,
+            mark: match (build.active, build.status) {
+                (true, _) => Mark::Active,
+                (false, Status::Superseded) => Mark::Superseded,
+                (false, Status::Unmanaged) => Mark::Unmanaged,
+                (false, Status::Installed) => Mark::None,
+            },
             name: String::new(),
-            installed: &build.version,
-            latest: "",
-            lts: false,
-            status: render_status(build.status),
+            version: &build.version,
+            active: build.active,
+            tail: render_status(build.status),
         });
     }
 }
 
-const NAME_HEADER: &str = "NAME";
-const INSTALLED_HEADER: &str = "INSTALLED";
-const LATEST_HEADER: &str = "LATEST";
-
-/// Render the rows as aligned columns: active gutter, name, installed build,
-/// latest build, LTS tag, status.
+/// Render the rows as two sections: every installed name, one line each plus
+/// a line per other build of it, then the names not installed on one line.
 ///
-/// The gutter is emitted on every line whether or not anything is active, so
-/// the columns sit in the same place from one run to the next - a listing that
-/// shifted sideways the moment `$JAVA_HOME` was set would be worse than one
-/// that never marked anything.
+/// Pre-release names get a line of their own like any other: the section,
+/// not an indent, now says whether a name is on disk.
 fn render_rows(rows: &[Row]) -> Listing {
-    let cells = cells(rows);
-    let width = |header: &str, cell: fn(&Cells) -> usize| {
-        cells
-            .iter()
-            .map(cell)
-            .chain([header.len()])
-            .max()
-            .unwrap_or(0)
-    };
-    let name_width = width(NAME_HEADER, |c| c.name.len());
-    let installed_width = width(INSTALLED_HEADER, |c| c.installed.len());
-    let latest_width = width(LATEST_HEADER, |c| c.latest.len());
-    // `jlo list --offline` has no catalogue, so it has neither a latest build
-    // nor an LTS tag to show, and either column would be blank on every line.
-    let any_latest = cells.iter().any(|c| !c.latest.is_empty());
-    let any_lts = cells.iter().any(|c| c.lts);
+    let names: Vec<&NameRow> = rows.iter().flat_map(Row::names).collect();
 
-    // Every styled field is padded as a plain string first: the escape bytes
-    // `console::style` adds are invisible but still counted by the formatter,
-    // so styling before padding shifts the columns.
-    let line = |gutter: &str, name: &str, installed: &str, latest: &str, rest: &str| {
-        let latest = if any_latest {
-            format!("{latest:<latest_width$}  ")
-        } else {
-            String::new()
-        };
-        format!(" {gutter}  {name}  {installed:<installed_width$}  {latest}{rest}")
-            .trim_end()
-            .to_string()
-    };
+    let mut cells = Vec::new();
+    for row in names.iter().copied().filter(|row| is_installed(row)) {
+        push_name(&mut cells, row);
+    }
 
-    let header = heading(&line(
-        " ",
-        &format!("{NAME_HEADER:<name_width$}"),
-        INSTALLED_HEADER,
-        LATEST_HEADER,
-        "",
-    ));
+    let name_width = cells.iter().map(|c| c.name.len()).max().unwrap_or(0);
+    let version_width = cells.iter().map(|c| c.version.len()).max().unwrap_or(0);
 
-    let lines = cells
+    let installed = cells
         .iter()
-        .map(|c| {
-            let gutter = if c.active {
-                style("\u{2192}").cyan().bold().to_string()
-            } else {
-                " ".to_string()
-            };
-            let lts = match (any_lts, c.lts) {
-                (false, _) => String::new(),
-                (true, true) => format!("{}  ", style("LTS").bold()),
-                (true, false) => "     ".to_string(),
-            };
-            line(
-                &gutter,
-                &style(format!("{:<name_width$}", c.name)).dim().to_string(),
-                c.installed,
-                c.latest,
-                &format!("{lts}{}", c.status),
-            )
-        })
+        .map(|c| render_line(c, name_width, version_width))
         .collect();
 
-    Listing { header, lines }
+    let not_installed: Vec<String> = names
+        .iter()
+        .filter(|row| !is_installed(row))
+        .map(|row| row.name.to_string())
+        .collect();
+    let available = (!not_installed.is_empty())
+        .then(|| format!("    {}", style(not_installed.join("  ")).dim()));
+
+    Listing {
+        installed,
+        available,
+    }
+}
+
+/// One line of the installed section. Each field is padded only when
+/// something follows it, so no line ends in spaces - and padded as a plain
+/// string before it is styled, because the escape bytes `console::style` adds
+/// are invisible but still counted by the formatter.
+fn render_line(c: &Cells, name_width: usize, version_width: usize) -> String {
+    let pad = |text: &str, width: usize, last: bool| {
+        if last {
+            text.to_string()
+        } else {
+            format!("{text:<width$}")
+        }
+    };
+    let version_last = c.tail.is_empty();
+    let name_last = version_last && c.version.is_empty();
+
+    let name = pad(&c.name, name_width, name_last);
+    let version = pad(c.version, version_width, version_last);
+    let (name, version) = if c.active {
+        (style(name).green().bold(), style(version).green())
+    } else {
+        (style(name).bold(), style(version).dim())
+    };
+
+    let mut fields = vec![name.to_string()];
+    if !name_last {
+        fields.push(version.to_string());
+    }
+    if !version_last {
+        fields.push(c.tail.clone());
+    }
+    format!("  {} {}", c.mark.render(), fields.join("  "))
 }
 
 /// The one word an indented build line ends on. Each is a single token - no
@@ -1215,26 +1248,24 @@ fn tip_line(rows: &[Row]) -> Option<String> {
 
     let mut offers = Vec::new();
     if outdated > 0 {
-        offers.push(format!(
-            "{} ({outdated} outdated)",
-            style("`jlo update`").bold().for_stderr()
-        ));
+        offers.push(format!("'jlo update' ({outdated} outdated)"));
     }
     if superseded > 0 {
         offers.push(format!(
-            "{} ({superseded} superseded)",
-            style("`jlo remove --superseded`").bold().for_stderr()
+            "'jlo remove --superseded' ({superseded} superseded)"
         ));
     }
     if offers.is_empty() {
         return None;
     }
 
-    Some(format!(
-        "{} {}",
-        style("TIP:").bold().for_stderr(),
-        offers.join(" \u{b7} ")
-    ))
+    // Dim, like every other hint: advice, not a finding.
+    Some(
+        style(format!("run {}", offers.join(" \u{b7} ")))
+            .dim()
+            .for_stderr()
+            .to_string(),
+    )
 }
 
 /// Whether stderr can carry a bar that redraws over itself.
@@ -1604,7 +1635,6 @@ mod tests {
             version: version.to_string(),
             major,
             stream: Stream::Ga,
-            lts: false,
         }
     }
 
@@ -1613,16 +1643,6 @@ mod tests {
             version: version.to_string(),
             major,
             stream: Stream::Ea,
-            lts: false,
-        }
-    }
-
-    fn remote_lts(version: &str, major: i64) -> RemoteJdk {
-        RemoteJdk {
-            version: version.to_string(),
-            major,
-            stream: Stream::Ga,
-            lts: true,
         }
     }
 
@@ -1660,7 +1680,6 @@ mod tests {
             installed: None,
             latest: None,
             update: false,
-            lts: false,
             active: false,
             others: Vec::new(),
         }
@@ -1679,11 +1698,6 @@ mod tests {
 
         fn update(mut self) -> Self {
             self.update = true;
-            self
-        }
-
-        fn lts(mut self) -> Self {
-            self.lts = true;
             self
         }
 
@@ -1942,18 +1956,6 @@ mod tests {
         assert!(rows[0].head.others[0].active, "{rows:?}");
     }
 
-    /// LTS is a property of the major, so a row whose installed build is not
-    /// the offered one keeps the tag.
-    #[test]
-    fn the_lts_tag_is_the_majors_whichever_build_is_installed() {
-        let rows = build_rows(
-            &[remote_lts("21.0.12+101.0.LTS", 21)],
-            &[local("21.0.11+10.0.LTS", 21)],
-            None,
-        );
-        assert!(rows[0].head.lts, "{rows:?}");
-    }
-
     /// The two streams of one major are two names, so neither supersedes the
     /// other. Without the per-name rule the beta - which sorts above the
     /// release it previews - would make the GA build read as superseded and
@@ -2039,12 +2041,11 @@ mod tests {
     // -- render_rows --
 
     #[test]
-    fn render_rows_aligns_the_columns_and_marks_the_active_build() {
+    fn render_rows_puts_installed_names_first_and_marks_each_exception() {
         let mut outdated = name("21")
             .installed("21.0.11+10.0.LTS")
             .latest("21.0.12+101.0.LTS")
             .update()
-            .lts()
             .other("21.0.9+10.0.LTS", Status::Superseded)
             .other("21.0.8+9.0.LTS", Status::Unmanaged);
         outdated.others[0].active = true;
@@ -2060,69 +2061,46 @@ mod tests {
             ),
             row(name("26").latest("26.0.2+101")),
             row(outdated),
+            row(name("20").latest("20.0.2+9")),
         ]);
 
-        assert_eq!(listing.header, "    NAME     INSTALLED            LATEST");
         assert_eq!(
-            listing.lines,
+            listing.installed,
             vec![
-                "    28-ea    28.0.0-beta+14.0.ea  28.0.0-beta+16.0.ea       update",
-                " \u{2192}  27       27.0.0+35",
-                "      27-ea  27.0.0-beta+30.0.ea",
-                "    26                            26.0.2+101",
-                "    21       21.0.11+10.0.LTS     21.0.12+101.0.LTS    LTS  update",
-                " \u{2192}           21.0.9+10.0.LTS                                superseded",
-                "             21.0.8+9.0.LTS                                 unmanaged",
+                "  \u{2191} 28-ea  28.0.0-beta+14.0.ea  28.0.0-beta+16.0.ea update",
+                "  \u{25cf} 27     27.0.0+35",
+                "    27-ea  27.0.0-beta+30.0.ea",
+                "  \u{2191} 21     21.0.11+10.0.LTS     21.0.12+101.0.LTS update",
+                "  \u{25cf}        21.0.9+10.0.LTS      superseded",
+                "  ?        21.0.8+9.0.LTS       unmanaged",
             ]
         );
+        assert_eq!(listing.available.as_deref(), Some("    26  20"));
     }
 
-    /// INSTALLED and LATEST are sized apart, and an indented build counts
-    /// toward INSTALLED's width even when it is wider than every name's.
+    /// A catalogue sitting behind the store is shown, but as an offer rather
+    /// than an update, and a superseded build is marked in the gutter.
     #[test]
-    fn render_rows_sizes_each_column_by_its_own_widest_cell() {
-        let listing = render_rows(&[
-            row(name("25")
-                .installed("25.0.1+8")
-                .latest("25.0.2+10")
-                .update()),
-            row(name("21")
-                .installed("21.0.11+9")
-                .latest("21.0.12+101.0.LTS")
-                .update()
-                .other("21.0.9+10.0.LTS", Status::Superseded)),
-        ]);
-
-        assert_eq!(listing.header, "    NAME  INSTALLED        LATEST");
+    fn render_rows_says_offered_for_an_older_build_on_offer() {
+        let listing = render_rows(&[row(name("21")
+            .installed("21.0.12+101.0.LTS")
+            .latest("21.0.11+10.0.LTS")
+            .other("21.0.9+10.0.LTS", Status::Superseded))]);
         assert_eq!(
-            listing.lines,
+            listing.installed,
             vec![
-                "    25    25.0.1+8         25.0.2+10          update",
-                "    21    21.0.11+9        21.0.12+101.0.LTS  update",
-                "          21.0.9+10.0.LTS                     superseded",
+                "    21  21.0.12+101.0.LTS  21.0.11+10.0.LTS offered",
+                "  \u{2717}     21.0.9+10.0.LTS    superseded",
             ]
         );
+        assert_eq!(listing.available, None);
     }
 
     #[test]
-    fn render_rows_drops_the_latest_and_lts_columns_when_nothing_fills_them() {
-        // `jlo list --offline` knows neither, so each column would be blank
-        // on every line.
-        let listing = render_rows(&[
-            row(name("26").installed("26.0.2+101")),
-            row(name("21")
-                .installed("21.0.11+10.0.LTS")
-                .other("21.0.9+10.0.LTS", Status::Superseded)),
-        ]);
-        assert_eq!(listing.header, "    NAME  INSTALLED");
-        assert_eq!(
-            listing.lines,
-            vec![
-                "    26    26.0.2+101",
-                "    21    21.0.11+10.0.LTS",
-                "          21.0.9+10.0.LTS   superseded",
-            ]
-        );
+    fn render_rows_has_no_installed_section_when_nothing_is_installed() {
+        let listing = render_rows(&[row(name("26").latest("26.0.2+101"))]);
+        assert!(listing.installed.is_empty());
+        assert_eq!(listing.available.as_deref(), Some("    26"));
     }
 
     // -- tip_line --
@@ -2152,7 +2130,7 @@ mod tests {
         ];
         assert_eq!(
             tip_line(&rows).as_deref(),
-            Some("TIP: `jlo update` (2 outdated) \u{b7} `jlo remove --superseded` (1 superseded)")
+            Some("run 'jlo update' (2 outdated) \u{b7} 'jlo remove --superseded' (1 superseded)")
         );
     }
 
@@ -2184,7 +2162,7 @@ mod tests {
         ];
         assert_eq!(
             tip_line(&rows).as_deref(),
-            Some("TIP: `jlo update` (3 outdated) \u{b7} `jlo remove --superseded` (1 superseded)")
+            Some("run 'jlo update' (3 outdated) \u{b7} 'jlo remove --superseded' (1 superseded)")
         );
     }
 
@@ -2195,7 +2173,7 @@ mod tests {
             .other("21.0.9+10.0.LTS", Status::Superseded))];
         assert_eq!(
             tip_line(&rows).as_deref(),
-            Some("TIP: `jlo remove --superseded` (1 superseded)")
+            Some("run 'jlo remove --superseded' (1 superseded)")
         );
     }
 

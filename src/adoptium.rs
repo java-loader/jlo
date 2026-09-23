@@ -121,8 +121,6 @@ impl TryFrom<Release> for JdkMetadata {
 #[derive(serde::Deserialize)]
 struct ReleaseInfo {
     available_releases: Vec<i64>,
-    #[serde(default)]
-    available_lts_releases: Vec<i64>,
     // Optional because only the listing reads these two, and a response
     // without them still answers every other question this document is
     // fetched for.
@@ -169,7 +167,6 @@ pub(crate) struct RemoteJdk {
     pub version: String,
     pub major: i64,
     pub stream: Stream,
-    pub lts: bool,
 }
 
 impl RemoteJdk {
@@ -321,9 +318,6 @@ impl AdoptiumClient {
     /// threads sharing the pooled client.
     pub(crate) fn available_jdks(&self) -> anyhow::Result<Catalogue> {
         let releases = self.fetch_available_releases()?;
-        let lts: std::collections::HashSet<i64> =
-            releases.available_lts_releases.iter().copied().collect();
-
         let names: Vec<Request> = releases
             .available_releases
             .iter()
@@ -362,7 +356,6 @@ impl AdoptiumClient {
                     version,
                     major: name.major,
                     stream: name.stream,
-                    lts: lts.contains(&name.major),
                 }),
                 // No build for this OS/architecture - nothing to offer.
                 Ok(None) => {}
@@ -760,10 +753,9 @@ mod client_tests {
 
     // -- available_jdks --
 
-    fn releases_body(majors: &[i64], lts: &[i64]) -> String {
+    fn releases_body(majors: &[i64]) -> String {
         serde_json::json!({
             "available_releases": majors,
-            "available_lts_releases": lts,
         })
         .to_string()
     }
@@ -797,7 +789,7 @@ mod client_tests {
         let mut server = mockito::Server::new();
         let _r = server
             .mock("GET", "/v3/info/available_releases")
-            .with_body(releases_body(&[17, 21, 25], &[17, 21]))
+            .with_body(releases_body(&[17, 21, 25]))
             .create();
         let _a17 = major_mock(&mut server, 17, 200, &asset_body("17.0.20+101"));
         let _a21 = major_mock(&mut server, 21, 200, &asset_body("21.0.12+101.0.LTS"));
@@ -806,16 +798,13 @@ mod client_tests {
         let client = AdoptiumClient::new(server.url());
         let jdks = client.available_jdks().unwrap().jdks;
 
-        let rows: Vec<_> = jdks
-            .iter()
-            .map(|j| (j.version.as_str(), j.major, j.lts))
-            .collect();
+        let rows: Vec<_> = jdks.iter().map(|j| (j.version.as_str(), j.major)).collect();
         assert_eq!(
             rows,
             vec![
-                ("25.0.4+101.0.LTS", 25, false),
-                ("21.0.12+101.0.LTS", 21, true),
-                ("17.0.20+101", 17, true),
+                ("25.0.4+101.0.LTS", 25),
+                ("21.0.12+101.0.LTS", 21),
+                ("17.0.20+101", 17),
             ]
         );
     }
@@ -825,7 +814,7 @@ mod client_tests {
         let mut server = mockito::Server::new();
         let _r = server
             .mock("GET", "/v3/info/available_releases")
-            .with_body(releases_body(&[16, 21], &[21]))
+            .with_body(releases_body(&[16, 21]))
             .create();
         // Adoptium answers 200 with an empty array when it has no build for
         // this OS/architecture.
@@ -844,7 +833,7 @@ mod client_tests {
         let mut server = mockito::Server::new();
         let _r = server
             .mock("GET", "/v3/info/available_releases")
-            .with_body(releases_body(&[17, 21], &[17, 21]))
+            .with_body(releases_body(&[17, 21]))
             .create();
         let _a17 = major_mock(&mut server, 17, 500, "boom");
         let _a21 = major_mock(&mut server, 21, 200, &asset_body("21.0.12+101.0.LTS"));
@@ -869,22 +858,6 @@ mod client_tests {
         let err = client.available_jdks().unwrap_err();
 
         assert!(format!("{err:#}").contains("HTTP 503"), "got: {err:#}");
-    }
-
-    #[test]
-    fn available_jdks_without_lts_field_marks_nothing_lts() {
-        let mut server = mockito::Server::new();
-        let _r = server
-            .mock("GET", "/v3/info/available_releases")
-            .with_body(r#"{"available_releases":[21]}"#)
-            .create();
-        let _a21 = major_mock(&mut server, 21, 200, &asset_body("21.0.12+101.0.LTS"));
-
-        let client = AdoptiumClient::new(server.url());
-        let jdks = client.available_jdks().unwrap().jdks;
-
-        assert_eq!(jdks.len(), 1);
-        assert!(!jdks[0].lts);
     }
 
     const EA_FIXTURE: &str = include_str!("../tests/fixtures/feature_releases_28_ea.json");
@@ -912,10 +885,9 @@ mod client_tests {
             .create()
     }
 
-    fn releases_with_tip(majors: &[i64], lts: &[i64], released: i64, tip: i64) -> String {
+    fn releases_with_tip(majors: &[i64], released: i64, tip: i64) -> String {
         serde_json::json!({
             "available_releases": majors,
-            "available_lts_releases": lts,
             "most_recent_feature_release": released,
             "tip_version": tip,
         })
@@ -930,7 +902,7 @@ mod client_tests {
         let mut server = mockito::Server::new();
         let _r = server
             .mock("GET", "/v3/info/available_releases")
-            .with_body(releases_with_tip(&[25, 26], &[25], 26, 28))
+            .with_body(releases_with_tip(&[25, 26], 26, 28))
             .create();
         let _a25 = major_mock(&mut server, 25, 200, &asset_body("25.0.4+101.0.LTS"));
         let _a26 = major_mock(&mut server, 26, 200, &asset_body("26.0.1+9"));
@@ -943,15 +915,15 @@ mod client_tests {
 
         let rows: Vec<_> = jdks
             .iter()
-            .map(|j| (j.version.as_str(), j.request().to_string(), j.lts))
+            .map(|j| (j.version.as_str(), j.request().to_string()))
             .collect();
         assert_eq!(
             rows,
             vec![
-                ("28.0.0-beta+16.0.ea", "28-ea".to_string(), false),
-                ("27.0.0-beta+30.0.ea", "27-ea".to_string(), false),
-                ("26.0.1+9", "26".to_string(), false),
-                ("25.0.4+101.0.LTS", "25".to_string(), true),
+                ("28.0.0-beta+16.0.ea", "28-ea".to_string()),
+                ("27.0.0-beta+30.0.ea", "27-ea".to_string()),
+                ("26.0.1+9", "26".to_string()),
+                ("25.0.4+101.0.LTS", "25".to_string()),
             ]
         );
         ea26.assert();
@@ -965,7 +937,7 @@ mod client_tests {
         let mut server = mockito::Server::new();
         let _r = server
             .mock("GET", "/v3/info/available_releases")
-            .with_body(releases_with_tip(&[26], &[], 26, 28))
+            .with_body(releases_with_tip(&[26], 26, 28))
             .create();
         let _a26 = major_mock(&mut server, 26, 200, &asset_body("26.0.1+9"));
         let _ea27 = ea_mock(&mut server, 27, 500, "boom");
