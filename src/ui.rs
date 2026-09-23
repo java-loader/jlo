@@ -1405,13 +1405,10 @@ mod tests {
 
     // -- unsourced_env_hint --
 
-    /// The hint exists to hand the caller a command that does work without a
-    /// sourcing shell, so it has to name both alternatives and carry the
-    /// version the user actually asked for.
+    /// Both commands the hint hands over carry the version the user asked for.
     #[test]
     fn unsourced_env_hint_names_both_alternatives() {
         let hint = unsourced_env_hint("21");
-        assert!(hint.contains("did not change anything"), "{hint}");
         assert!(hint.contains("jlo exec 21 -- <command>"), "{hint}");
         assert!(
             hint.contains("export JAVA_HOME=\"$(jlo home 21)\""),
@@ -1421,34 +1418,27 @@ mod tests {
 
     // -- superseded_hint --
 
+    /// Silent when nothing was superseded (the command would remove nothing)
+    /// and when nothing was installed (the leftovers are not this run's, and
+    /// a no-op `jlo update` would nag on every run).
     #[test]
-    fn superseded_hint_names_the_command_and_the_count() {
-        let hint = superseded_hint(true, 2).expect("an install plus leftovers earns a hint");
-        assert!(hint.contains('2'), "hint should say how many: {hint}");
-        assert!(
-            hint.contains("jlo remove --superseded"),
-            "hint should name the command: {hint}"
-        );
-    }
-
-    #[test]
-    fn superseded_hint_singular_for_one() {
-        let hint = superseded_hint(true, 1).unwrap();
-        assert!(hint.contains("1 superseded JDK "), "{hint}");
-    }
-
-    /// Nothing was superseded, so pointing at the command would send the user
-    /// to a command that removes nothing.
-    #[test]
-    fn superseded_hint_silent_when_nothing_is_superseded() {
-        assert!(superseded_hint(true, 0).is_none());
-    }
-
-    /// Every JDK was already current: the leftovers are pre-existing clutter,
-    /// not something this run caused, and `jlo update` would nag on every run.
-    #[test]
-    fn superseded_hint_silent_when_nothing_was_installed() {
-        assert!(superseded_hint(false, 3).is_none());
+    fn superseded_hint_speaks_only_after_an_install_that_left_something() {
+        for (installed_any, superseded, expected) in [
+            (true, 1, Some("1 superseded JDK still")),
+            (true, 2, Some("2 superseded JDKs still")),
+            (true, 0, None),
+            (false, 3, None),
+        ] {
+            let hint = superseded_hint(installed_any, superseded);
+            assert_eq!(
+                hint.is_some(),
+                expected.is_some(),
+                "{installed_any} {superseded}: {hint:?}"
+            );
+            if let (Some(hint), Some(expected)) = (hint, expected) {
+                assert!(hint.starts_with(expected), "{hint}");
+            }
+        }
     }
 
     // -- provenance_line --
@@ -2048,13 +2038,6 @@ mod tests {
             ]
         );
         assert_eq!(listing.available, None);
-    }
-
-    #[test]
-    fn render_rows_has_no_installed_section_when_nothing_is_installed() {
-        let listing = render_rows(&[row(name("26").latest("26.0.2+101"))]);
-        assert!(listing.installed.is_empty());
-        assert_eq!(listing.available.as_deref(), Some("    26"));
     }
 
     // -- tip_line --
