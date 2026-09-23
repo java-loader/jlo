@@ -508,6 +508,18 @@ fn help_through_the_eval_branch_is_printed_not_evaluated() {
     }
 }
 
+/// `--help` after `exec --` belongs to the child. The wrapper hands `exec` its
+/// argv untouched - no `__wrapped`, no eval - or jlo's own help would answer.
+#[test]
+fn exec_forwards_a_childs_help_flag_verbatim() {
+    let home = jlo_home_with_stub("printf '%s\\n' \"$@\"");
+    for sh in shells("exec_forwards_a_childs_help_flag_verbatim", INTERPRETERS) {
+        let out = run_in(sh, home.path(), "jlo exec -- echo --help");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(stdout, "exec\n--\necho\n--help\n", "{sh}");
+    }
+}
+
 /// A usage error goes to stderr with clap's status; stdout is empty, so
 /// nothing is evaluated or printed.
 #[test]
