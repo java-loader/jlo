@@ -1932,21 +1932,39 @@ fn bare_env_offline_ignores_an_ea_install() {
 }
 
 /// A bare `install` resolves through the cascade, then asks Adoptium about
-/// whatever it produced. With the network wired to fail, the version named
-/// in the failure is the assertion: reaching Adoptium at all means stage 3
-/// answered.
+/// whatever it produced: stage 3 answers 21, the installed major, so 21 is
+/// the one name looked up. Falling through to stage 4 would ask for the
+/// latest release instead.
 #[test]
 fn install_resolves_the_newest_installed_jdk() {
+    let mut server = mockito::Server::new();
+    // Offers exactly the installed build, so nothing downloads.
+    let asked_21 = server
+        .mock(
+            "GET",
+            mockito::Matcher::Regex(r"^/v3/assets/latest/21/hotspot".to_string()),
+        )
+        .match_query(mockito::Matcher::Any)
+        .with_body(
+            include_str!("fixtures/assets_latest.json").replace("21.0.11+10.0.LTS", "21.0.5+11"),
+        )
+        .create();
+    let latest_release = server
+        .mock("GET", "/v3/info/available_releases")
+        .expect(0)
+        .create();
+
     let (home, project) = store_fixture(&["21.0.5+11"]);
 
     cascade_cmd(home.path(), &project, &["install"])
+        .env("JLO_ADOPTIUM_API_URL", server.url())
         .assert()
-        .failure()
-        .code(1)
-        .stdout(predicate::str::is_empty())
-        // Not "no valid Java versions provided": the cascade produced 21,
-        // and it is the request about 21 that failed.
-        .stderr(predicate::str::contains("Adoptium"));
+        .success()
+        .code(0)
+        .stdout(predicate::str::is_empty());
+
+    asked_21.assert();
+    latest_release.assert();
 }
 
 /// A bare `update` is every installed name, pre-release streams included -

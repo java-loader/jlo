@@ -538,6 +538,135 @@ fn install_and_update_eval_their_exports_even_when_they_fail() {
     }
 }
 
+/// A tar.gz holding one JDK root with a `bin/java`, as Adoptium ships it -
+/// enough for the whole download, verify, extract and move pipeline.
+fn fake_jdk_archive(root: &str) -> Vec<u8> {
+    let mut builder = tar::Builder::new(flate2::write::GzEncoder::new(
+        Vec::new(),
+        flate2::Compression::fast(),
+    ));
+    let mut header = tar::Header::new_gnu();
+    header.set_size(0);
+    header.set_mode(0o755);
+    header.set_cksum();
+    builder
+        .append_data(&mut header, format!("{root}/bin/java"), std::io::empty())
+        .unwrap();
+    builder.into_inner().unwrap().finish().unwrap()
+}
+
+/// The stub above pins the wrapper's half; this is the whole chain, real
+/// binary included. Names go sorted: 17, which the shell is on, is replaced;
+/// 21 is looked up fine but its download fails. The run fails, and the shell
+/// must still end up on the new 17 - `JAVA_HOME` and `PATH` alike - because
+/// the old 17 is gone and a failure later in the run does not bring it back.
+#[test]
+fn a_later_failure_still_moves_the_shell_off_the_replaced_build() {
+    use sha2::Digest;
+
+    for sh in INTERPRETERS {
+        if skip_missing(
+            "a_later_failure_still_moves_the_shell_off_the_replaced_build",
+            sh,
+        ) {
+            continue;
+        }
+        for verb in ["update", "install 17 21"] {
+            let mut server = mockito::Server::new();
+            let archive = fake_jdk_archive("jdk-17.0.9+10");
+            let checksum = hex::encode(sha2::Sha256::digest(&archive));
+            let mut latest = |major: &str, semver: &str, checksum: &str| {
+                server
+                    .mock(
+                        "GET",
+                        mockito::Matcher::Regex(format!(r"^/v3/assets/latest/{major}/hotspot")),
+                    )
+                    .match_query(mockito::Matcher::Any)
+                    .with_body(format!(
+                        r#"[{{"version":{{"semver":"{semver}"}},"binary":{{"package":{{"name":"jdk.tar.gz","link":"{}/jdk-{major}.tar.gz","checksum":"{checksum}"}}}}}}]"#,
+                        server.url()
+                    ))
+                    .create()
+            };
+            let asked_17 = latest("17", "17.0.9+10", &checksum);
+            let asked_21 = latest("21", "21.0.9+10", "00");
+            let _pkg_17 = server
+                .mock("GET", "/jdk-17.tar.gz")
+                .with_body(archive)
+                .create();
+            let pkg_21 = server
+                .mock("GET", "/jdk-21.tar.gz")
+                .with_status(500)
+                .create();
+
+            let jlo = jlo_home();
+            let home = tempfile::tempdir().unwrap();
+            let store = if cfg!(target_os = "macos") {
+                home.path().join("Library/Java/JavaVirtualMachines")
+            } else {
+                home.path().join(".jdks")
+            };
+            for version in ["17.0.5+8", "21.0.5+11"] {
+                let jdk = store.join(version);
+                std::fs::create_dir_all(jdk.join("bin")).unwrap();
+                std::fs::write(jdk.join(".jlo-managed"), "").unwrap();
+            }
+            let old = store.join("17.0.5+8");
+            let new = store.join("17.0.9+10");
+
+            let out = run_in(
+                sh,
+                jlo.path(),
+                &format!(
+                    r#"
+                    export HOME="{home}"
+                    export JLO_ADOPTIUM_API_URL="{api}"
+                    export JAVA_HOME="{old}"
+                    export PATH="{old}/bin:$PATH"
+                    jlo {verb}
+                    echo "status=$?"
+                    echo "java_home=$JAVA_HOME"
+                    echo "path=$PATH"
+                    "#,
+                    home = home.path().display(),
+                    api = server.url(),
+                    old = old.display(),
+                ),
+            );
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let ctx = format!("{sh} {verb}: {stdout:?} / {stderr:?}");
+
+            asked_17.assert();
+            asked_21.assert();
+            pkg_21.assert();
+            assert!(stdout.contains("status=1"), "{ctx}");
+            assert!(!old.exists(), "the replacement was undone: {ctx}");
+            assert!(new.join("bin/java").exists(), "{ctx}");
+            assert!(
+                store.join("21.0.5+11").exists() && !store.join("21.0.9+10").exists(),
+                "the failed name's install was touched: {ctx}"
+            );
+            assert!(
+                stdout.contains(&format!("java_home={}\n", new.display())),
+                "JAVA_HOME left on the deleted build: {ctx}"
+            );
+            let path = stdout
+                .lines()
+                .find_map(|line| line.strip_prefix("path="))
+                .unwrap();
+            assert!(
+                path.starts_with(&format!("{}/bin:", new.display())),
+                "PATH does not lead with the new build: {ctx}"
+            );
+            assert!(
+                !path.contains(&format!("{}/bin", old.display())),
+                "PATH still holds the deleted build: {ctx}"
+            );
+        }
+    }
+}
+
 /// A profile may well run under `set -u`, and `jlo` with no arguments is the
 /// ordinary way to ask for help. `case "$1"` aborted the shell there on an
 /// unbound parameter before the binary was reached - the same failure
