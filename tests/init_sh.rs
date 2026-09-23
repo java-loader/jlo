@@ -24,7 +24,7 @@
 
 mod common;
 
-use common::{INTERPRETERS, bash_bin, chmod, fake_jdk_archive, shells};
+use common::{INTERPRETERS, bash_bin, chmod, fake_jdk_archive, offer, shells};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -674,21 +674,8 @@ fn a_later_failure_still_moves_the_shell_off_the_replaced_build() {
             let mut server = mockito::Server::new();
             let archive = fake_jdk_archive("jdk-17.0.9+10");
             let checksum = hex::encode(sha2::Sha256::digest(&archive));
-            let mut latest = |major: &str, semver: &str, checksum: &str| {
-                server
-                    .mock(
-                        "GET",
-                        mockito::Matcher::Regex(format!(r"^/v3/assets/latest/{major}/hotspot")),
-                    )
-                    .match_query(mockito::Matcher::Any)
-                    .with_body(format!(
-                        r#"[{{"version":{{"semver":"{semver}"}},"binary":{{"package":{{"name":"jdk.tar.gz","link":"{}/jdk-{major}.tar.gz","checksum":"{checksum}"}}}}}}]"#,
-                        server.url()
-                    ))
-                    .create()
-            };
-            let asked_17 = latest("17", "17.0.9+10", &checksum);
-            let asked_21 = latest("21", "21.0.9+10", "00");
+            let asked_17 = offer(&mut server, "17", "17.0.9+10", &checksum).create();
+            let asked_21 = offer(&mut server, "21", "21.0.9+10", "00").create();
             let _pkg_17 = server
                 .mock("GET", "/jdk-17.tar.gz")
                 .with_body(archive)

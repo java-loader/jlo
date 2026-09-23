@@ -66,3 +66,30 @@ pub(crate) fn fake_jdk_archive(root: &str) -> Vec<u8> {
         .unwrap();
     builder.into_inner().unwrap().finish().unwrap()
 }
+
+/// The not-yet-created mock of Adoptium's latest-build lookup for `major`,
+/// for the caller to give a body or status (and an `expect`) and `create`.
+#[allow(dead_code)]
+pub(crate) fn latest(server: &mut mockito::ServerGuard, major: &str) -> mockito::Mock {
+    server
+        .mock(
+            "GET",
+            mockito::Matcher::Regex(format!(r"^/v3/assets/latest/{major}/hotspot")),
+        )
+        .match_query(mockito::Matcher::Any)
+}
+
+/// [`latest`] answering with one build, `version`, whose package is served at
+/// `/jdk-{major}.tar.gz` on the same server and hashes to `checksum`.
+#[allow(dead_code)]
+pub(crate) fn offer(
+    server: &mut mockito::ServerGuard,
+    major: &str,
+    version: &str,
+    checksum: &str,
+) -> mockito::Mock {
+    let link = format!("{}/jdk-{major}.tar.gz", server.url());
+    latest(server, major).with_body(format!(
+        r#"[{{"version":{{"semver":"{version}"}},"binary":{{"package":{{"name":"jdk.tar.gz","link":"{link}","checksum":"{checksum}"}}}}}}]"#
+    ))
+}

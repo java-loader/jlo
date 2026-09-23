@@ -5,7 +5,7 @@
 mod common;
 
 use assert_cmd::Command;
-use common::{INTERPRETERS, chmod, fake_jdk_archive, shells};
+use common::{INTERPRETERS, chmod, fake_jdk_archive, latest, offer, shells};
 use predicates::prelude::*;
 use serial_test::serial;
 
@@ -550,12 +550,7 @@ fn list_remote_shows_available_versions() {
         .mock("GET", "/v3/info/available_releases")
         .with_body(r#"{"available_releases":[21],"available_lts_releases":[21]}"#)
         .create();
-    let _a = server
-        .mock(
-            "GET",
-            mockito::Matcher::Regex(r"^/v3/assets/latest/21/hotspot".to_string()),
-        )
-        .match_query(mockito::Matcher::Any)
+    let _a = latest(&mut server, "21")
         .with_body(include_str!("fixtures/assets_latest.json"))
         .create();
     let home = tempfile::tempdir().unwrap();
@@ -585,12 +580,7 @@ fn list_remote_gives_a_superseded_build_its_own_line() {
         .mock("GET", "/v3/info/available_releases")
         .with_body(r#"{"available_releases":[21],"available_lts_releases":[21]}"#)
         .create();
-    let _a = server
-        .mock(
-            "GET",
-            mockito::Matcher::Regex(r"^/v3/assets/latest/21/hotspot".to_string()),
-        )
-        .match_query(mockito::Matcher::Any)
+    let _a = latest(&mut server, "21")
         .with_body(include_str!("fixtures/assets_latest.json"))
         .create();
 
@@ -930,14 +920,7 @@ fn env() {
 #[test]
 fn update_reports_api_http_error() {
     let mut server = mockito::Server::new();
-    let _m = server
-        .mock(
-            "GET",
-            mockito::Matcher::Regex(r"^/v3/assets/latest/10014/hotspot".to_string()),
-        )
-        .match_query(mockito::Matcher::Any)
-        .with_status(500)
-        .create();
+    let _m = latest(&mut server, "10014").with_status(500).create();
 
     Command::cargo_bin("jlo-bin")
         .unwrap()
@@ -961,19 +944,9 @@ fn run_over_an_older_build(
     let mut server = mockito::Server::new();
     let archive = fake_jdk_archive("jdk-21.0.9+10");
     let checksum = hex::encode(sha2::Sha256::digest(&archive));
-    let _meta = server
-        .mock(
-            "GET",
-            mockito::Matcher::Regex(r"^/v3/assets/latest/21/hotspot".to_string()),
-        )
-        .match_query(mockito::Matcher::Any)
-        .with_body(format!(
-            r#"[{{"version":{{"semver":"21.0.9+10"}},"binary":{{"package":{{"name":"jdk.tar.gz","link":"{}/jdk.tar.gz","checksum":"{checksum}"}}}}}}]"#,
-            server.url()
-        ))
-        .create();
+    let _meta = offer(&mut server, "21", "21.0.9+10", &checksum).create();
     let _pkg = server
-        .mock("GET", "/jdk.tar.gz")
+        .mock("GET", "/jdk-21.tar.gz")
         .with_body(archive)
         .create();
 
@@ -1100,19 +1073,9 @@ fn run_against_an_offer(
     let mut server = mockito::Server::new();
     let archive = fake_jdk_archive(&format!("jdk-{offered}"));
     let checksum = hex::encode(sha2::Sha256::digest(&archive));
-    let _meta = server
-        .mock(
-            "GET",
-            mockito::Matcher::Regex(r"^/v3/assets/latest/21/hotspot".to_string()),
-        )
-        .match_query(mockito::Matcher::Any)
-        .with_body(format!(
-            r#"[{{"version":{{"semver":"{offered}"}},"binary":{{"package":{{"name":"jdk.tar.gz","link":"{}/jdk.tar.gz","checksum":"{checksum}"}}}}}}]"#,
-            server.url()
-        ))
-        .create();
+    let _meta = offer(&mut server, "21", offered, &checksum).create();
     let download = server
-        .mock("GET", "/jdk.tar.gz")
+        .mock("GET", "/jdk-21.tar.gz")
         .with_body(archive)
         .expect(downloads)
         .create();
@@ -1214,14 +1177,7 @@ fn a_newer_pre_release_does_not_hold_back_its_release() {
 /// A `200 []` for the latest build of `major` - Adoptium's answer for a name
 /// it has no build of on this platform.
 fn not_offered_mock(server: &mut mockito::ServerGuard, major: &str) -> mockito::Mock {
-    server
-        .mock(
-            "GET",
-            mockito::Matcher::Regex(format!(r"^/v3/assets/latest/{major}/hotspot")),
-        )
-        .match_query(mockito::Matcher::Any)
-        .with_body("[]")
-        .create()
+    latest(server, major).with_body("[]").create()
 }
 
 /// Names are processed sorted, so on Apple silicon `jlo install 8 21` used to
@@ -1231,12 +1187,7 @@ fn not_offered_mock(server: &mut mockito::ServerGuard, major: &str) -> mockito::
 fn a_name_adoptium_does_not_offer_is_skipped_not_a_stop() {
     let mut server = mockito::Server::new();
     let _no_8 = not_offered_mock(&mut server, "8");
-    let asked_21 = server
-        .mock(
-            "GET",
-            mockito::Matcher::Regex(r"^/v3/assets/latest/21/hotspot".to_string()),
-        )
-        .match_query(mockito::Matcher::Any)
+    let asked_21 = latest(&mut server, "21")
         .with_body(include_str!("fixtures/assets_latest.json"))
         .create();
 
@@ -1295,26 +1246,9 @@ fn only_names_adoptium_does_not_offer_is_an_error() {
 #[test]
 fn a_failed_lookup_stops_the_run_before_anything_changes() {
     let mut server = mockito::Server::new();
-    let _offers_17 = server
-        .mock(
-            "GET",
-            mockito::Matcher::Regex(r"^/v3/assets/latest/17/hotspot".to_string()),
-        )
-        .match_query(mockito::Matcher::Any)
-        .with_body(format!(
-            r#"[{{"version":{{"semver":"17.0.9+10"}},"binary":{{"package":{{"name":"jdk.tar.gz","link":"{}/jdk.tar.gz","checksum":"00"}}}}}}]"#,
-            server.url()
-        ))
-        .create();
-    let _fails_21 = server
-        .mock(
-            "GET",
-            mockito::Matcher::Regex(r"^/v3/assets/latest/21/hotspot".to_string()),
-        )
-        .match_query(mockito::Matcher::Any)
-        .with_status(500)
-        .create();
-    let download = server.mock("GET", "/jdk.tar.gz").expect(0).create();
+    let _offers_17 = offer(&mut server, "17", "17.0.9+10", "00").create();
+    let _fails_21 = latest(&mut server, "21").with_status(500).create();
+    let download = server.mock("GET", "/jdk-17.tar.gz").expect(0).create();
 
     let home = tempfile::tempdir().unwrap();
     install_fake_jdk(home.path(), "17.0.5+8");
@@ -2033,12 +1967,7 @@ fn bare_env_offline_ignores_an_ea_install() {
 fn install_resolves_the_newest_installed_jdk() {
     let mut server = mockito::Server::new();
     // Offers exactly the installed build, so nothing downloads.
-    let asked_21 = server
-        .mock(
-            "GET",
-            mockito::Matcher::Regex(r"^/v3/assets/latest/21/hotspot".to_string()),
-        )
-        .match_query(mockito::Matcher::Any)
+    let asked_21 = latest(&mut server, "21")
         .with_body(
             include_str!("fixtures/assets_latest.json").replace("21.0.11+10.0.LTS", "21.0.5+11"),
         )
@@ -2067,13 +1996,8 @@ fn install_resolves_the_newest_installed_jdk() {
 #[test]
 fn a_bare_update_asks_about_every_installed_name() {
     let mut server = mockito::Server::new();
-    let mut latest = |major: &str| {
-        server
-            .mock(
-                "GET",
-                mockito::Matcher::Regex(format!(r"^/v3/assets/latest/{major}/hotspot")),
-            )
-            .match_query(mockito::Matcher::Any)
+    let mut offered = |major: &str| {
+        latest(&mut server, major)
             .with_body(
                 include_str!("fixtures/assets_latest.json")
                     .replace("21.0.11+10.0.LTS", &format!("{major}.0.11+10")),
@@ -2082,8 +2006,8 @@ fn a_bare_update_asks_about_every_installed_name() {
     };
     // No mock for 25: were it asked about, the unmatched request would fail
     // the run.
-    let asked_17 = latest("17");
-    let asked_21 = latest("21");
+    let asked_17 = offered("17");
+    let asked_21 = offered("21");
     let asked_28_ea = server
         .mock(
             "GET",
@@ -2120,12 +2044,7 @@ fn a_bare_update_asks_about_every_installed_name() {
 #[test]
 fn update_leaves_a_major_already_on_its_latest_build_alone() {
     let mut server = mockito::Server::new();
-    let _a = server
-        .mock(
-            "GET",
-            mockito::Matcher::Regex(r"^/v3/assets/latest/21/hotspot".to_string()),
-        )
-        .match_query(mockito::Matcher::Any)
+    let _a = latest(&mut server, "21")
         .with_body(include_str!("fixtures/assets_latest.json"))
         .create();
 
