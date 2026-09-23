@@ -57,10 +57,19 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 // The shell sources. Verbatim - the wrappers carry no interpolation at all,
 // which is what keeps them shellcheck-able files rather than templates. Only
 // the three stubs below are generated with a path baked in.
-const INIT_ZSH: &str = include_str!("../shell/jlo-init.zsh");
-const INIT_BASH: &str = include_str!("../shell/jlo-init.bash");
-const AUTOLOAD_ZSH: &str = include_str!("../shell/jlo-autoload.zsh");
-const AUTOLOAD_BASH: &str = include_str!("../shell/jlo-autoload.bash");
+//
+// The jlo function is one text that parses under both shells, written out
+// under each dialect's name. The cd hook differs only in how it registers
+// itself, so each dialect is its own registration plus the common rest.
+const INIT: &str = include_str!("../shell/jlo-init-common.sh");
+const AUTOLOAD_ZSH: &str = concat!(
+    include_str!("../shell/jlo-autoload.zsh"),
+    include_str!("../shell/jlo-autoload-common.sh")
+);
+const AUTOLOAD_BASH: &str = concat!(
+    include_str!("../shell/jlo-autoload.bash"),
+    include_str!("../shell/jlo-autoload-common.sh")
+);
 
 /// Picks `bin/jlo-init.$_jlo_d` at source time.
 ///
@@ -548,8 +557,8 @@ fn write_layout(layout: &Layout) -> Result<()> {
 
     // The wrappers first: the stubs below are what point at them.
     for (name, body) in [
-        ("jlo-init.zsh", INIT_ZSH),
-        ("jlo-init.bash", INIT_BASH),
+        ("jlo-init.zsh", INIT),
+        ("jlo-init.bash", INIT),
         ("jlo-autoload.zsh", AUTOLOAD_ZSH),
         ("jlo-autoload.bash", AUTOLOAD_BASH),
     ] {

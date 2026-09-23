@@ -1,4 +1,5 @@
-//! Tests for the shell integration in `shell/jlo-autoload.{bash,zsh}`.
+//! Tests for the shell integration in `shell/jlo-autoload.{bash,zsh}` and the
+//! `shell/jlo-autoload-common.sh` the binary appends to each.
 //!
 //! The two dialects are separate files: the binary writes both into
 //! `$JLO_HOME/bin/` and the generated `autoload.sh` picks one at source time,
@@ -22,18 +23,34 @@
 #![allow(clippy::unwrap_used)]
 
 use std::fmt::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 use tempfile::tempdir;
 
 /// Separates the `declare -p` line from the element dump.
 const MARKER: &str = "--8<--";
 
+/// The dialect as `__install` writes it: its own registration, then the
+/// common rest - the same `concat!` `src/install.rs` compiles in, assembled
+/// once per test run.
 fn autoload_script(dialect: &str) -> String {
-    format!(
-        "{}/shell/jlo-autoload.{dialect}",
-        env!("CARGO_MANIFEST_DIR")
-    )
+    static DIR: OnceLock<PathBuf> = OnceLock::new();
+    let dir = DIR.get_or_init(|| {
+        let shell = Path::new(env!("CARGO_MANIFEST_DIR")).join("shell");
+        let common = std::fs::read_to_string(shell.join("jlo-autoload-common.sh")).unwrap();
+        let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("autoload");
+        std::fs::create_dir_all(&dir).unwrap();
+        for dialect in ["bash", "zsh"] {
+            let name = format!("jlo-autoload.{dialect}");
+            let head = std::fs::read_to_string(shell.join(&name)).unwrap();
+            std::fs::write(dir.join(&name), head + &common).unwrap();
+        }
+        dir
+    });
+    dir.join(format!("jlo-autoload.{dialect}"))
+        .display()
+        .to_string()
 }
 
 fn bash_bin() -> String {
