@@ -103,9 +103,11 @@ fn stub_curl(dir: &Path, tarball: &Path, checksum: Checksum) -> PathBuf {
     std::fs::create_dir_all(&bin).unwrap();
     let curl = bin.join("curl");
     let serve_sum = match checksum {
+        // Either tool, as install.sh itself accepts: a GNU userland without
+        // perl has no `shasum`, and an empty sum is a refused install.
         Checksum::Correct => format!(
-            "shasum -a 256 '{}' | cut -d ' ' -f 1 > \"$out\"",
-            tarball.display()
+            "{{ shasum -a 256 '{t}' 2>/dev/null || sha256sum '{t}'; }} | cut -d ' ' -f 1 > \"$out\"",
+            t = tarball.display()
         ),
         Checksum::Wrong => format!("echo '{}' > \"$out\"", "0".repeat(64)),
         Checksum::Missing => "exit 22".to_string(),
@@ -831,8 +833,20 @@ fn a_failure_to_write_the_required_entry_fails_the_install() {
             "#!/bin/sh\n\
              /bin/sh '{}' > \"$HOME/out.txt\" 2>\"$HOME/err.txt\" &\n\
              installer=$!\n\
-             # Seal the directory once the installer has populated bin/.\n\
-             while [ ! -x '{}/bin/jlo-bin' ]; do sleep 0.05; done\n\
+             # Seal the directory once the installer has populated bin/ -\n\
+             # or stop waiting if it died first, which the asserts report,\n\
+             # or if it is still running after two minutes: a hang must\n\
+             # fail the test, not stall the suite.\n\
+             waited=0\n\
+             while [ ! -x '{}/bin/jlo-bin' ] && kill -0 $installer 2>/dev/null; do\n\
+             \x20 waited=$((waited + 1))\n\
+             \x20 if [ $waited -ge 2400 ]; then\n\
+             \x20   echo 'timed out: install.sh never populated bin/' >&2\n\
+             \x20   kill $installer\n\
+             \x20   exit 124\n\
+             \x20 fi\n\
+             \x20 sleep 0.05\n\
+             done\n\
              chmod a-w '{}'\n\
              wait $installer\n",
             manifest().join("install.sh").display(),
@@ -856,6 +870,12 @@ fn a_failure_to_write_the_required_entry_fails_the_install() {
     std::fs::set_permissions(&jlo_home, perms).unwrap();
 
     let said = std::fs::read_to_string(home.join("err.txt")).unwrap_or_default();
+    assert_ne!(
+        out.status.code(),
+        Some(124),
+        "{}{said}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     if jlo_home.join("jlo.sh").is_file() {
         eprintln!(
             "SKIP a_failure_to_write_the_required_entry_fails_the_install: could not make the write fail here."

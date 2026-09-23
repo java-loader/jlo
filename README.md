@@ -143,8 +143,9 @@ Such a JDK is **unmanaged**: J'Lo wrote no `.jlo-managed` marker beside it, so
 - `jlo update` cannot update it. Adoptium does not list it, so there is no newer minor to resolve. If you also install
   that major from Adoptium, both remain, and `jlo env` picks the highest version of the two.
 
-That is deliberately how J'Lo handles early-access and preview builds: they are yours to drop in and yours to
-remove, and `jlo update` will never reach for one on your behalf.
+A preview build you drop in this way stays yours to remove, and `jlo update` never touches it. For Temurin's own
+early-access builds there is no need: `jlo install 28-ea` fetches one as a managed install, and `jlo update` keeps it
+current, replacing each weekly build with the next.
 
 ## Managing J’Lo Itself
 
