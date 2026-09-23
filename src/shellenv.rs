@@ -245,57 +245,6 @@ fn exec_failure_code(kind: std::io::ErrorKind) -> i32 {
 }
 
 #[cfg(test)]
-mod exec_arg_recovery_tests {
-    use super::separator_immediately_follows_exec;
-
-    fn raw(tokens: &[&str]) -> impl Iterator<Item = String> {
-        tokens
-            .iter()
-            .map(|s| (*s).to_string())
-            .collect::<Vec<_>>()
-            .into_iter()
-    }
-
-    #[test]
-    fn detects_separator_right_after_exec() {
-        // `jlo exec -- java -version`: clap eats this `--` before `cmd_exec`
-        // ever sees it.
-        assert!(separator_immediately_follows_exec(raw(&[
-            "jlo-bin", "exec", "--", "java", "-version"
-        ])));
-    }
-
-    #[test]
-    fn does_not_trigger_when_a_version_precedes_it() {
-        // `jlo exec 21 -- java -version`: the version binds first, so clap
-        // never touches this `--`.
-        assert!(!separator_immediately_follows_exec(raw(&[
-            "jlo-bin", "exec", "21", "--", "java", "-version"
-        ])));
-    }
-
-    #[test]
-    fn still_detects_it_when_the_command_has_its_own_dash_dash() {
-        // `jlo exec -- -- echo hi`: the first `--` is still the one clap
-        // eats, even though a second, user-typed `--` (part of the command)
-        // immediately follows it. (Regression for the bug where
-        // `args.first() == "--"` was used as a stand-in for "already
-        // restored": that second `--` would land at `args[0]` after clap's
-        // parse and get mistaken for the already-restored separator.)
-        assert!(separator_immediately_follows_exec(raw(&[
-            "jlo-bin", "exec", "--", "--", "echo", "hi"
-        ])));
-    }
-
-    #[test]
-    fn does_not_trigger_without_any_separator() {
-        assert!(!separator_immediately_follows_exec(raw(&[
-            "jlo-bin", "exec", "java", "-version"
-        ])));
-    }
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -440,34 +389,80 @@ mod tests {
         body.replace(r"'\''", "'")
     }
 
+    /// At most one version before the first `--`, a command after it, and
+    /// every later `--` belongs to the command.
     #[test]
-    fn parse_exec_args_version_and_command() {
-        let (version, command) =
-            parse_exec_args(&owned(&["21", "--", "java", "-version"])).unwrap();
-        assert_eq!(version, Some("21".to_string()));
-        assert_eq!(command, owned(&["java", "-version"]));
+    fn parse_exec_args_splits_at_the_first_separator() {
+        type Parsed<'a> = Option<(Option<&'a str>, &'a [&'a str])>;
+        let cases: [(&[&str], Parsed); 8] = [
+            (
+                &["21", "--", "java", "-version"],
+                Some((Some("21"), &["java", "-version"])),
+            ),
+            (
+                &["--", "java", "-version"],
+                Some((None, &["java", "-version"])),
+            ),
+            (
+                &["21", "--", "sh", "-c", "--", "x"],
+                Some((Some("21"), &["sh", "-c", "--", "x"])),
+            ),
+            (&["21", "java", "-version"], None),
+            (&["21", "--"], None),
+            (&["21", "25", "--", "java"], None),
+            (&[], None),
+            (&["--"], None),
+        ];
+        for (args, expected) in cases {
+            let parsed = parse_exec_args(&owned(args)).ok();
+            let expected =
+                expected.map(|(version, command)| (version.map(String::from), owned(command)));
+            assert_eq!(parsed, expected, "{args:?}");
+        }
+    }
+
+    // -- separator_immediately_follows_exec --
+
+    fn raw(tokens: &[&str]) -> impl Iterator<Item = String> {
+        tokens.iter().map(|s| (*s).to_string())
     }
 
     #[test]
-    fn parse_exec_args_no_version_uses_none() {
-        let (version, command) = parse_exec_args(&owned(&["--", "java", "-version"])).unwrap();
-        assert_eq!(version, None);
-        assert_eq!(command, owned(&["java", "-version"]));
+    fn detects_separator_right_after_exec() {
+        // `jlo exec -- java -version`: clap eats this `--` before `cmd_exec`
+        // ever sees it.
+        assert!(separator_immediately_follows_exec(raw(&[
+            "jlo-bin", "exec", "--", "java", "-version"
+        ])));
     }
 
     #[test]
-    fn parse_exec_args_missing_separator_errors() {
-        assert!(parse_exec_args(&owned(&["21", "java", "-version"])).is_err());
+    fn does_not_trigger_when_a_version_precedes_it() {
+        // `jlo exec 21 -- java -version`: the version binds first, so clap
+        // never touches this `--`.
+        assert!(!separator_immediately_follows_exec(raw(&[
+            "jlo-bin", "exec", "21", "--", "java", "-version"
+        ])));
     }
 
     #[test]
-    fn parse_exec_args_empty_command_errors() {
-        assert!(parse_exec_args(&owned(&["21", "--"])).is_err());
+    fn still_detects_it_when_the_command_has_its_own_dash_dash() {
+        // `jlo exec -- -- echo hi`: the first `--` is still the one clap
+        // eats, even though a second, user-typed `--` (part of the command)
+        // immediately follows it. (Regression for the bug where
+        // `args.first() == "--"` was used as a stand-in for "already
+        // restored": that second `--` would land at `args[0]` after clap's
+        // parse and get mistaken for the already-restored separator.)
+        assert!(separator_immediately_follows_exec(raw(&[
+            "jlo-bin", "exec", "--", "--", "echo", "hi"
+        ])));
     }
 
     #[test]
-    fn parse_exec_args_multiple_versions_error() {
-        assert!(parse_exec_args(&owned(&["21", "25", "--", "java"])).is_err());
+    fn does_not_trigger_without_any_separator() {
+        assert!(!separator_immediately_follows_exec(raw(&[
+            "jlo-bin", "exec", "java", "-version"
+        ])));
     }
 
     #[test]
@@ -476,26 +471,6 @@ mod tests {
         assert_eq!(exec_failure_code(ErrorKind::NotFound), 127);
         assert_eq!(exec_failure_code(ErrorKind::PermissionDenied), 126);
         assert_eq!(exec_failure_code(ErrorKind::Other), 127);
-    }
-
-    #[test]
-    fn parse_exec_args_no_args_errors() {
-        assert!(parse_exec_args(&owned(&[])).is_err());
-    }
-
-    #[test]
-    fn parse_exec_args_only_separator_errors() {
-        // "--" alone: no version, no command
-        assert!(parse_exec_args(&owned(&["--"])).is_err());
-    }
-
-    #[test]
-    fn parse_exec_args_double_dash_in_command_is_preserved() {
-        // only the first "--" separates; later ones belong to the command
-        let (version, command) =
-            parse_exec_args(&owned(&["21", "--", "sh", "-c", "--", "x"])).unwrap();
-        assert_eq!(version, Some("21".to_string()));
-        assert_eq!(command, owned(&["sh", "-c", "--", "x"]));
     }
 
     /// `env::var(..).unwrap_or_default()` used to sit where `current_path`
