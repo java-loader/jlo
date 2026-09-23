@@ -22,20 +22,11 @@
 // Test code: an `unwrap` failure here is a test failure, which is the point.
 #![allow(clippy::unwrap_used)]
 
+mod common;
+
+use common::{INTERPRETERS, bash_bin, chmod, fake_jdk_archive, shells};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-
-/// Every interpreter the wrapper must work under.
-///
-/// `/bin/bash` is an absolute path on purpose: on macOS it is the system bash
-/// 3.2.57, the only shell in the supported range whose `source` cannot read
-/// the `/dev/fd/N` of a process substitution. A `bash` taken from `PATH` is
-/// usually a Homebrew 5.x and would not cover it.
-const INTERPRETERS: &[&str] = &["/bin/bash", "zsh"];
-
-fn bash_bin() -> String {
-    std::env::var("JLO_TEST_BASH").unwrap_or_else(|_| "bash".to_string())
-}
 
 /// Which wrapper file this interpreter would be handed by `jlo.sh`.
 fn dialect(sh: &str) -> &'static str {
@@ -44,17 +35,6 @@ fn dialect(sh: &str) -> &'static str {
     } else {
         "bash"
     }
-}
-
-/// Returns true when the caller should skip this interpreter. Prints loudly: a
-/// silently skipped shell is indistinguishable from a passing one.
-#[must_use]
-fn skip_missing(test: &str, sh: &str) -> bool {
-    if Command::new(sh).arg("-c").arg("exit 0").output().is_ok() {
-        return false;
-    }
-    eprintln!("SKIP {test}: {sh} is not installed here.");
-    true
 }
 
 /// A `JLO_HOME` whose `bin/` holds both wrapper dialects and a `jlo-bin`
@@ -73,9 +53,7 @@ fn jlo_home_with_stub(body: &str) -> tempfile::TempDir {
     let home = init_sh_home();
     let stub = home.path().join("bin").join("jlo-bin");
     std::fs::write(&stub, format!("#!/bin/sh\n{body}\n")).unwrap();
-    let mut perms = std::fs::metadata(&stub).unwrap().permissions();
-    std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
-    std::fs::set_permissions(&stub, perms).unwrap();
+    chmod(&stub, 0o755);
     home
 }
 
@@ -161,10 +139,7 @@ fn exec_does_not_intercept_child_help_flags() {
 /// user on the system bash. Capture-then-eval works in every supported shell.
 #[test]
 fn env_exports_reach_the_calling_shell() {
-    for sh in INTERPRETERS {
-        if skip_missing("env_exports_reach_the_calling_shell", sh) {
-            continue;
-        }
+    for sh in shells("env_exports_reach_the_calling_shell", INTERPRETERS) {
         let home = jlo_home_with_stub(&format!("echo 'export JLO_PROBE=reached'\n{MARK}"));
         let out = run_in(sh, home.path(), "jlo env\necho \"probe=[${JLO_PROBE-}]\"");
         let stdout = String::from_utf8_lossy(&out.stdout);
@@ -179,10 +154,7 @@ fn env_exports_reach_the_calling_shell() {
 
 #[test]
 fn use_alias_exports_reach_the_calling_shell() {
-    for sh in INTERPRETERS {
-        if skip_missing("use_alias_exports_reach_the_calling_shell", sh) {
-            continue;
-        }
+    for sh in shells("use_alias_exports_reach_the_calling_shell", INTERPRETERS) {
         let home = jlo_home_with_stub(&format!("echo 'export JLO_PROBE=reached'\n{MARK}"));
         let out = run_in(
             sh,
@@ -199,10 +171,7 @@ fn use_alias_exports_reach_the_calling_shell() {
 /// one. The capture form propagates it.
 #[test]
 fn env_propagates_the_binarys_failure_status() {
-    for sh in INTERPRETERS {
-        if skip_missing("env_propagates_the_binarys_failure_status", sh) {
-            continue;
-        }
+    for sh in shells("env_propagates_the_binarys_failure_status", INTERPRETERS) {
         let home = jlo_home_with_stub("exit 3");
         let out = run_in(sh, home.path(), "jlo env\necho \"status=$?\"");
         let stdout = String::from_utf8_lossy(&out.stdout);
@@ -212,10 +181,7 @@ fn env_propagates_the_binarys_failure_status() {
 
 #[test]
 fn env_reports_success_when_the_binary_succeeds() {
-    for sh in INTERPRETERS {
-        if skip_missing("env_reports_success_when_the_binary_succeeds", sh) {
-            continue;
-        }
+    for sh in shells("env_reports_success_when_the_binary_succeeds", INTERPRETERS) {
         let home = jlo_home_with_stub(&format!("echo 'export JLO_PROBE=reached'\n{MARK}"));
         let out = run_in(sh, home.path(), "jlo env\necho \"status=$?\"");
         let stdout = String::from_utf8_lossy(&out.stdout);
@@ -227,10 +193,7 @@ fn env_reports_success_when_the_binary_succeeds() {
 /// still reach the terminal rather than being swallowed by the capture.
 #[test]
 fn env_lets_the_binarys_stderr_through() {
-    for sh in INTERPRETERS {
-        if skip_missing("env_lets_the_binarys_stderr_through", sh) {
-            continue;
-        }
+    for sh in shells("env_lets_the_binarys_stderr_through", INTERPRETERS) {
         let home = jlo_home_with_stub("echo 'jlo: nope' >&2\nexit 1");
         let out = run_in(sh, home.path(), "jlo env --offline");
         let stderr = String::from_utf8_lossy(&out.stderr);
@@ -242,10 +205,7 @@ fn env_lets_the_binarys_stderr_through() {
 /// or introduce anything in the user's namespace.
 #[test]
 fn env_does_not_leak_helper_variables() {
-    for sh in INTERPRETERS {
-        if skip_missing("env_does_not_leak_helper_variables", sh) {
-            continue;
-        }
+    for sh in shells("env_does_not_leak_helper_variables", INTERPRETERS) {
         let home = jlo_home_with_stub(&format!("echo 'export JLO_PROBE=reached'\n{MARK}"));
         let out = run_in(
             sh,
@@ -290,10 +250,10 @@ fn real_binary_offline_miss_fails_through_the_wrapper() {
 /// catches a typo in them.
 #[test]
 fn each_wrapper_dialect_parses_under_its_own_shell() {
-    for sh in ["/bin/bash", "zsh"] {
-        if skip_missing("each_wrapper_dialect_parses_under_its_own_shell", sh) {
-            continue;
-        }
+    for sh in shells(
+        "each_wrapper_dialect_parses_under_its_own_shell",
+        INTERPRETERS,
+    ) {
         let out = Command::new(sh)
             .arg("-n")
             .arg(shell_source())
@@ -312,10 +272,10 @@ fn each_wrapper_dialect_parses_under_its_own_shell() {
 #[test]
 fn the_installer_parses_under_every_supported_shell() {
     let installer = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("install.sh");
-    for sh in INTERPRETERS.iter().chain(["/bin/sh"].iter()) {
-        if skip_missing("the_installer_parses_under_every_supported_shell", sh) {
-            continue;
-        }
+    for sh in shells(
+        "the_installer_parses_under_every_supported_shell",
+        INTERPRETERS.iter().chain(["/bin/sh"].iter()),
+    ) {
         let out = Command::new(sh).arg("-n").arg(&installer).output().unwrap();
         assert!(
             out.status.success(),
@@ -356,10 +316,7 @@ fn run_selfupdate(sh: &str, home: &Path, args: &str) -> Output {
 /// that ran the update ends up with the function the new binary generated.
 #[test]
 fn selfupdate_evals_the_reload_line() {
-    for sh in INTERPRETERS {
-        if skip_missing("selfupdate_evals_the_reload_line", sh) {
-            continue;
-        }
+    for sh in shells("selfupdate_evals_the_reload_line", INTERPRETERS) {
         let home = jlo_home_with_stub(&format!("echo 'JLO_TEST_RELOADED=yes'\n{MARK}"));
         let out = run_selfupdate(sh, home.path(), "");
         let stdout = String::from_utf8_lossy(&out.stdout);
@@ -378,10 +335,10 @@ fn selfupdate_evals_the_reload_line() {
 /// must not turn a successful update into a non-zero status.
 #[test]
 fn selfupdate_with_an_empty_stdout_still_succeeds() {
-    for sh in INTERPRETERS {
-        if skip_missing("selfupdate_with_an_empty_stdout_still_succeeds", sh) {
-            continue;
-        }
+    for sh in shells(
+        "selfupdate_with_an_empty_stdout_still_succeeds",
+        INTERPRETERS,
+    ) {
         let home = jlo_home_with_stub(&format!(
             "echo \"J'Lo 0.4.0 is already the latest version.\" >&2\n{MARK}"
         ));
@@ -402,10 +359,10 @@ fn selfupdate_with_an_empty_stdout_still_succeeds() {
 /// one, and an unmarked reload line is never executed.
 #[test]
 fn selfupdate_propagates_a_failure_without_evaluating() {
-    for sh in INTERPRETERS {
-        if skip_missing("selfupdate_propagates_a_failure_without_evaluating", sh) {
-            continue;
-        }
+    for sh in shells(
+        "selfupdate_propagates_a_failure_without_evaluating",
+        INTERPRETERS,
+    ) {
         let home = jlo_home_with_stub("echo 'JLO_TEST_RELOADED=yes'\necho boom >&2\nexit 3");
         let out = run_selfupdate(sh, home.path(), "");
         let stdout = String::from_utf8_lossy(&out.stdout);
@@ -423,10 +380,7 @@ fn selfupdate_propagates_a_failure_without_evaluating() {
 /// `--help` and `--version` go to stdout, unmarked: printed, not evaluated.
 #[test]
 fn selfupdate_help_is_printed_not_evaluated() {
-    for sh in INTERPRETERS {
-        if skip_missing("selfupdate_help_is_printed_not_evaluated", sh) {
-            continue;
-        }
+    for sh in shells("selfupdate_help_is_printed_not_evaluated", INTERPRETERS) {
         let home = jlo_home_with_stub("echo 'JLO_TEST_RELOADED=yes'");
         let out = run_selfupdate(sh, home.path(), "--help");
         let stdout = String::from_utf8_lossy(&out.stdout);
@@ -465,10 +419,10 @@ fn probe(sh: &str, home: &Path, args: &str) -> String {
 /// generic 1, whether the eval succeeds or fails.
 #[test]
 fn a_marked_payload_is_evaluated_even_when_the_run_fails() {
-    for sh in INTERPRETERS {
-        if skip_missing("a_marked_payload_is_evaluated_even_when_the_run_fails", sh) {
-            continue;
-        }
+    for sh in shells(
+        "a_marked_payload_is_evaluated_even_when_the_run_fails",
+        INTERPRETERS,
+    ) {
         for (first, moved) in [("true", "moved"), ("false", "")] {
             let home = jlo_home_with_stub(&format!(
                 "echo '{first} &&'\necho 'export JLO_PROBE=moved'\n{MARK}\necho boom >&2\nexit 7"
@@ -520,13 +474,10 @@ fn run_interactive_without_comments(sh: &str, home: &Path, body: &str) -> Output
 /// fails after applying its exports and a `set -e` shell exits.
 #[test]
 fn a_marked_payload_is_evaluated_without_interactive_comments() {
-    for sh in INTERPRETERS {
-        if skip_missing(
-            "a_marked_payload_is_evaluated_without_interactive_comments",
-            sh,
-        ) {
-            continue;
-        }
+    for sh in shells(
+        "a_marked_payload_is_evaluated_without_interactive_comments",
+        INTERPRETERS,
+    ) {
         for (stub, reached) in [
             (
                 format!("echo 'export JLO_PROBE=reached'\n{MARK}"),
@@ -555,10 +506,10 @@ fn a_marked_payload_is_evaluated_without_interactive_comments() {
 #[test]
 fn help_through_the_eval_branch_is_printed_not_evaluated() {
     let home = jlo_home();
-    for sh in INTERPRETERS {
-        if skip_missing("help_through_the_eval_branch_is_printed_not_evaluated", sh) {
-            continue;
-        }
+    for sh in shells(
+        "help_through_the_eval_branch_is_printed_not_evaluated",
+        INTERPRETERS,
+    ) {
         for args in [
             "env --help",
             "env -h",
@@ -587,10 +538,7 @@ fn help_through_the_eval_branch_is_printed_not_evaluated() {
 #[test]
 fn an_invalid_flag_fails_without_evaluating() {
     let home = jlo_home();
-    for sh in INTERPRETERS {
-        if skip_missing("an_invalid_flag_fails_without_evaluating", sh) {
-            continue;
-        }
+    for sh in shells("an_invalid_flag_fails_without_evaluating", INTERPRETERS) {
         let out = run_in(sh, home.path(), "jlo env --bogus\necho \"status=$?\"");
         let stdout = String::from_utf8_lossy(&out.stdout);
         let stderr = String::from_utf8_lossy(&out.stderr);
@@ -605,10 +553,7 @@ fn an_invalid_flag_fails_without_evaluating() {
 /// of it is evaluated.
 #[test]
 fn a_truncated_payload_is_not_evaluated() {
-    for sh in INTERPRETERS {
-        if skip_missing("a_truncated_payload_is_not_evaluated", sh) {
-            continue;
-        }
+    for sh in shells("a_truncated_payload_is_not_evaluated", INTERPRETERS) {
         for cut in [
             r"export JLO_PROBE='x # jlo'\''end'",
             r"export JLO_PROBE='x # jlo'\''end' &&\nexport PATH='/cut",
@@ -629,10 +574,10 @@ fn a_truncated_payload_is_not_evaluated() {
 /// subcommand there, rejected before any JDK command runs.
 #[test]
 fn a_binary_that_rejects_the_prefix_is_not_evaluated() {
-    for sh in INTERPRETERS {
-        if skip_missing("a_binary_that_rejects_the_prefix_is_not_evaluated", sh) {
-            continue;
-        }
+    for sh in shells(
+        "a_binary_that_rejects_the_prefix_is_not_evaluated",
+        INTERPRETERS,
+    ) {
         let home = jlo_home_with_stub(&format!(
             "if [ \"$1\" = __wrapped ]; then echo \"error: unrecognized subcommand '__wrapped'\" >&2; exit 2; fi\n\
              echo 'export JLO_PROBE=old'\n{MARK}"
@@ -648,10 +593,7 @@ fn a_binary_that_rejects_the_prefix_is_not_evaluated() {
 /// though the binary succeeded.
 #[test]
 fn a_failing_first_statement_fails_the_call() {
-    for sh in INTERPRETERS {
-        if skip_missing("a_failing_first_statement_fails_the_call", sh) {
-            continue;
-        }
+    for sh in shells("a_failing_first_statement_fails_the_call", INTERPRETERS) {
         let home = jlo_home_with_stub(&format!(
             "echo \". '/nonexistent/jlo.sh' &&\"\necho 'export JLO_PROBE=reached'\n{MARK}"
         ));
@@ -664,10 +606,10 @@ fn a_failing_first_statement_fails_the_call() {
 /// Unmarked output is printed; when that printing fails, the call fails.
 #[test]
 fn a_failed_print_of_unmarked_output_fails_the_call() {
-    for sh in INTERPRETERS {
-        if skip_missing("a_failed_print_of_unmarked_output_fails_the_call", sh) {
-            continue;
-        }
+    for sh in shells(
+        "a_failed_print_of_unmarked_output_fails_the_call",
+        INTERPRETERS,
+    ) {
         let home = jlo_home_with_stub("echo 'Usage: jlo env'");
         let out = run_in(
             sh,
@@ -687,13 +629,10 @@ fn a_failed_print_of_unmarked_output_fails_the_call() {
 /// deletion, so it is refused before the binary runs.
 #[test]
 fn a_read_only_environment_is_refused_before_the_binary_runs() {
-    for sh in INTERPRETERS {
-        if skip_missing(
-            "a_read_only_environment_is_refused_before_the_binary_runs",
-            sh,
-        ) {
-            continue;
-        }
+    for sh in shells(
+        "a_read_only_environment_is_refused_before_the_binary_runs",
+        INTERPRETERS,
+    ) {
         for var in ["JAVA_HOME", "PATH"] {
             let home = jlo_home_with_stub(&format!(
                 "touch \"$JLO_HOME/called\"\necho 'export JLO_PROBE=reached'\n{MARK}"
@@ -718,23 +657,6 @@ fn a_read_only_environment_is_refused_before_the_binary_runs() {
     }
 }
 
-/// A tar.gz holding one JDK root with a `bin/java`, as Adoptium ships it -
-/// enough for the whole download, verify, extract and move pipeline.
-fn fake_jdk_archive(root: &str) -> Vec<u8> {
-    let mut builder = tar::Builder::new(flate2::write::GzEncoder::new(
-        Vec::new(),
-        flate2::Compression::fast(),
-    ));
-    let mut header = tar::Header::new_gnu();
-    header.set_size(0);
-    header.set_mode(0o755);
-    header.set_cksum();
-    builder
-        .append_data(&mut header, format!("{root}/bin/java"), std::io::empty())
-        .unwrap();
-    builder.into_inner().unwrap().finish().unwrap()
-}
-
 /// The stub above pins the wrapper's half; this is the whole chain, real
 /// binary included. Names go sorted: 17, which the shell is on, is replaced;
 /// 21 is looked up fine but its download fails. The run fails, and the shell
@@ -744,13 +666,10 @@ fn fake_jdk_archive(root: &str) -> Vec<u8> {
 fn a_later_failure_still_moves_the_shell_off_the_replaced_build() {
     use sha2::Digest;
 
-    for sh in INTERPRETERS {
-        if skip_missing(
-            "a_later_failure_still_moves_the_shell_off_the_replaced_build",
-            sh,
-        ) {
-            continue;
-        }
+    for sh in shells(
+        "a_later_failure_still_moves_the_shell_off_the_replaced_build",
+        INTERPRETERS,
+    ) {
         for verb in ["update", "install 17 21"] {
             let mut server = mockito::Server::new();
             let archive = fake_jdk_archive("jdk-17.0.9+10");
@@ -854,10 +773,7 @@ fn a_later_failure_still_moves_the_shell_off_the_replaced_build() {
 /// compiler never sees.
 #[test]
 fn a_bare_jlo_survives_set_u() {
-    for sh in INTERPRETERS {
-        if skip_missing("a_bare_jlo_survives_set_u", sh) {
-            continue;
-        }
+    for sh in shells("a_bare_jlo_survives_set_u", INTERPRETERS) {
         let home = jlo_home_with_stub("echo reached-the-binary");
         let out = run_in(sh, home.path(), "set -u\njlo");
         let stdout = String::from_utf8_lossy(&out.stdout);

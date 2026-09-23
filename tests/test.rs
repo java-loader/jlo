@@ -2,7 +2,10 @@
 // `unsafe` under edition 2024 despite the serial_test guard.
 #![allow(unsafe_code, clippy::unwrap_used)]
 
+mod common;
+
 use assert_cmd::Command;
+use common::{INTERPRETERS, chmod, fake_jdk_archive, shells};
 use predicates::prelude::*;
 use serial_test::serial;
 
@@ -945,23 +948,6 @@ fn update_reports_api_http_error() {
         .stderr(predicate::str::contains("HTTP 500"));
 }
 
-/// A tar.gz holding one JDK root with a `bin/java`, as Adoptium ships it -
-/// enough for the whole download, verify, extract and move pipeline.
-fn fake_jdk_archive(root: &str) -> Vec<u8> {
-    let mut builder = tar::Builder::new(flate2::write::GzEncoder::new(
-        Vec::new(),
-        flate2::Compression::fast(),
-    ));
-    let mut header = tar::Header::new_gnu();
-    header.set_size(0);
-    header.set_mode(0o755);
-    header.set_cksum();
-    builder
-        .append_data(&mut header, format!("{root}/bin/java"), std::io::empty())
-        .unwrap();
-    builder.into_inner().unwrap().finish().unwrap()
-}
-
 /// `jlo-bin <args> 21` against a store holding 21.0.5+11, with Adoptium
 /// offering 21.0.9+10. Returns the store and the command's output; `JAVA_HOME`
 /// points at the old build when `active`.
@@ -1454,16 +1440,10 @@ fn env_does_not_let_a_hostile_path_execute_when_evaluated() {
     );
 
     // ... and evaluating the line does not run it, in any supported shell.
-    for sh in ["/bin/bash", "zsh"] {
-        if std::process::Command::new(sh)
-            .arg("-c")
-            .arg("exit 0")
-            .output()
-            .is_err()
-        {
-            eprintln!("SKIP env_does_not_let_a_hostile_path_execute_when_evaluated: {sh} missing.");
-            continue;
-        }
+    for sh in shells(
+        "env_does_not_let_a_hostile_path_execute_when_evaluated",
+        INTERPRETERS,
+    ) {
         let _ = std::fs::remove_file(&marker);
         let out = std::process::Command::new(sh)
             .arg("-c")
@@ -2188,9 +2168,7 @@ fn remove_reports_a_failed_deletion_as_a_failure() {
 
         let store = jdk_store_in(home.path());
         let restore = std::fs::metadata(&store).unwrap().permissions();
-        let mut readonly = restore.clone();
-        std::os::unix::fs::PermissionsExt::set_mode(&mut readonly, 0o555);
-        std::fs::set_permissions(&store, readonly).unwrap();
+        chmod(&store, 0o555);
 
         let assertion = Command::cargo_bin("jlo-bin")
             .unwrap()

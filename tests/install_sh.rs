@@ -13,11 +13,12 @@
 // Test code: an `unwrap` failure here is a test failure, which is the point.
 #![allow(clippy::unwrap_used)]
 
+mod common;
+
+use common::{INTERPRETERS, chmod, shells, skip_missing};
 use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-
-const INTERPRETERS: &[&str] = &["/bin/bash", "zsh"];
 
 /// A `tar` that unquotes backslash escapes in its arguments, the way GNU tar
 /// does by default and bsdtar does not.
@@ -40,9 +41,7 @@ fn stub_gnu_tar(bin: &Path) {
          exec /usr/bin/tar \"$@\"\n",
     )
     .unwrap();
-    let mut perms = std::fs::metadata(&tar).unwrap().permissions();
-    std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
-    std::fs::set_permissions(&tar, perms).unwrap();
+    chmod(&tar, 0o755);
 }
 
 /// Runs a binary this thread has just written, waiting out `ETXTBSY`.
@@ -71,15 +70,6 @@ fn run_staged(command: &mut Command) -> Output {
 
 fn manifest() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-}
-
-#[must_use]
-fn skip_missing(test: &str, sh: &str) -> bool {
-    if Command::new(sh).arg("-c").arg("exit 0").output().is_ok() {
-        return false;
-    }
-    eprintln!("SKIP {test}: {sh} is not installed here.");
-    true
 }
 
 /// A release tarball with the same shape as the real one: the binary under
@@ -159,9 +149,7 @@ fn stub_curl(dir: &Path, tarball: &Path, checksum: Checksum) -> PathBuf {
         ),
     )
     .unwrap();
-    let mut perms = std::fs::metadata(&curl).unwrap().permissions();
-    std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
-    std::fs::set_permissions(&curl, perms).unwrap();
+    chmod(&curl, 0o755);
     bin
 }
 
@@ -245,13 +233,10 @@ fn sourcing_jlo_sh_alone_defines_the_wrapper_and_exports_jlo_home() {
     let entry = home.join(".jlo").join("jlo.sh");
     assert!(entry.is_file(), "install.sh did not generate {entry:?}");
 
-    for sh in INTERPRETERS {
-        if skip_missing(
-            "sourcing_jlo_sh_alone_defines_the_wrapper_and_exports_jlo_home",
-            sh,
-        ) {
-            continue;
-        }
+    for sh in shells(
+        "sourcing_jlo_sh_alone_defines_the_wrapper_and_exports_jlo_home",
+        INTERPRETERS,
+    ) {
         // Read JLO_HOME back from a *child* process: a plain assignment would
         // satisfy an in-shell echo, but the binary and jlo-autoload.sh both
         // read it out of the environment.
@@ -333,10 +318,7 @@ fn autoload_is_inert_without_the_required_entry() {
         "install.sh did not generate {autoload:?}"
     );
 
-    for sh in INTERPRETERS {
-        if skip_missing("autoload_is_inert_without_the_required_entry", sh) {
-            continue;
-        }
+    for sh in shells("autoload_is_inert_without_the_required_entry", INTERPRETERS) {
         let out = source_and_run(sh, &home, &autoload, "echo \"status=$?\"");
         let stdout = String::from_utf8_lossy(&out.stdout);
         assert!(
@@ -357,10 +339,10 @@ fn generated_entries_parse_under_every_supported_shell() {
     for name in ["jlo.sh", "autoload.sh", "completions.sh"] {
         let script = jlo.join(name);
         assert!(script.is_file(), "install.sh did not generate {script:?}");
-        for sh in INTERPRETERS.iter().chain(["/bin/sh"].iter()) {
-            if skip_missing("generated_entries_parse_under_every_supported_shell", sh) {
-                continue;
-            }
+        for sh in shells(
+            "generated_entries_parse_under_every_supported_shell",
+            INTERPRETERS.iter().chain(["/bin/sh"].iter()),
+        ) {
             let out = Command::new(sh).arg("-n").arg(&script).output().unwrap();
             assert!(
                 out.status.success(),
@@ -480,13 +462,12 @@ fn a_jlo_home_that_spells_the_terminator_does_not_end_the_heredoc() {
     // The real check: the block the user would paste has to parse, and it has
     // to write the profile lines rather than spill into the shell.
     let block = heredoc_block(&printed).expect("installer printed no heredoc");
-    for (i, sh) in INTERPRETERS.iter().enumerate() {
-        if skip_missing(
-            "a_jlo_home_that_spells_the_terminator_does_not_end_the_heredoc",
-            sh,
-        ) {
-            continue;
-        }
+    for (i, sh) in shells(
+        "a_jlo_home_that_spells_the_terminator_does_not_end_the_heredoc",
+        INTERPRETERS,
+    )
+    .enumerate()
+    {
         let profile = home.join(format!(".eof-profile{i}"));
         let script =
             block
@@ -750,13 +731,10 @@ fn a_jlo_home_with_shell_metacharacters_still_generates_valid_files() {
     ] {
         let script = custom.join(name);
         assert!(script.is_file(), "install.sh did not generate {script:?}");
-        for sh in INTERPRETERS.iter().chain(["/bin/sh"].iter()) {
-            if skip_missing(
-                "a_jlo_home_with_shell_metacharacters_still_generates_valid_files",
-                sh,
-            ) {
-                continue;
-            }
+        for sh in shells(
+            "a_jlo_home_with_shell_metacharacters_still_generates_valid_files",
+            INTERPRETERS.iter().chain(["/bin/sh"].iter()),
+        ) {
             let parsed = Command::new(sh).arg("-n").arg(&script).output().unwrap();
             assert!(
                 parsed.status.success(),
@@ -796,13 +774,12 @@ fn a_jlo_home_with_shell_metacharacters_still_generates_valid_files() {
     // Under both shells. A quoted heredoc is literal everywhere, which is the
     // property being asserted: the backslash in this JLO_HOME must arrive in
     // the profile unchanged.
-    for (i, sh) in INTERPRETERS.iter().enumerate() {
-        if skip_missing(
-            "a_jlo_home_with_shell_metacharacters_still_generates_valid_files",
-            sh,
-        ) {
-            continue;
-        }
+    for (i, sh) in shells(
+        "a_jlo_home_with_shell_metacharacters_still_generates_valid_files",
+        INTERPRETERS,
+    )
+    .enumerate()
+    {
         // A profile of its own per shell, so the second run appends to an
         // empty file rather than to the first run's line.
         let profile = home.join(format!(".profile{i}"));
@@ -893,9 +870,7 @@ fn a_failure_to_write_the_required_entry_fails_the_install() {
         .unwrap();
 
     // Restore write permission so the tempdir can be cleaned up.
-    let mut perms = std::fs::metadata(&jlo_home).unwrap().permissions();
-    std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
-    std::fs::set_permissions(&jlo_home, perms).unwrap();
+    chmod(&jlo_home, 0o755);
 
     let said = std::fs::read_to_string(home.join("err.txt")).unwrap_or_default();
     assert_ne!(
@@ -1651,9 +1626,7 @@ fn a_malformed_checksum_file_aborts_the_install_with(malformed: &str) {
         ),
     )
     .unwrap();
-    let mut perms = std::fs::metadata(&curl).unwrap().permissions();
-    std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
-    std::fs::set_permissions(&curl, perms).unwrap();
+    chmod(&curl, 0o755);
 
     let home = dir.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
@@ -1803,14 +1776,10 @@ fn the_reload_line_re_sources_only_what_this_shell_had_enabled() {
     let home = dir.path().join("home");
     let jlo = home.join(".jlo");
 
-    for sh in INTERPRETERS {
-        if skip_missing(
-            "the_reload_line_re_sources_only_what_this_shell_had_enabled",
-            sh,
-        ) {
-            continue;
-        }
-
+    for sh in shells(
+        "the_reload_line_re_sources_only_what_this_shell_had_enabled",
+        INTERPRETERS,
+    ) {
         let bare = reload_in(sh, &home, &jlo, &[]);
         let stdout = String::from_utf8_lossy(&bare.stdout);
         assert!(
@@ -1878,13 +1847,10 @@ fn a_stub_whose_target_cannot_be_loaded_fails_when_sourced() {
     let home = dir.path().join("home");
     let jlo = home.join(".jlo");
 
-    for sh in INTERPRETERS {
-        if skip_missing(
-            "a_stub_whose_target_cannot_be_loaded_fails_when_sourced",
-            sh,
-        ) {
-            continue;
-        }
+    for sh in shells(
+        "a_stub_whose_target_cannot_be_loaded_fails_when_sourced",
+        INTERPRETERS,
+    ) {
         for (stub, target, needs_wrapper) in stub_targets(sh) {
             let target = jlo.join(target);
             for how in [
@@ -1901,9 +1867,7 @@ fn a_stub_whose_target_cannot_be_loaded_fails_when_sourced() {
                 match how {
                     Breakage::Missing => std::fs::remove_file(&target).unwrap(),
                     Breakage::Unreadable => {
-                        let mut perms = std::fs::metadata(&target).unwrap().permissions();
-                        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o000);
-                        std::fs::set_permissions(&target, perms).unwrap();
+                        chmod(&target, 0o000);
                     }
                     Breakage::FailsToLoad => std::fs::write(&target, "return 7\n").unwrap(),
                 }
@@ -1938,9 +1902,7 @@ fn a_stub_whose_target_cannot_be_loaded_fails_when_sourced() {
 
                 let _ = std::fs::remove_file(&target);
                 std::fs::write(&target, original).unwrap();
-                let mut perms = std::fs::metadata(&target).unwrap().permissions();
-                std::os::unix::fs::PermissionsExt::set_mode(&mut perms, mode);
-                std::fs::set_permissions(&target, perms).unwrap();
+                chmod(&target, mode);
 
                 let Some(out) = out else { continue };
                 let stdout = String::from_utf8_lossy(&out.stdout);
@@ -2008,14 +1970,12 @@ fn a_reload_that_cannot_load_a_stub_fails_the_selfupdate() {
     std::fs::write(&replay, &payload.stdout).unwrap();
     std::fs::remove_file(&binary).unwrap();
     std::fs::write(&binary, format!("#!/bin/sh\ncat {}\n", squote(&replay))).unwrap();
-    let mut perms = std::fs::metadata(&binary).unwrap().permissions();
-    std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
-    std::fs::set_permissions(&binary, perms).unwrap();
+    chmod(&binary, 0o755);
 
-    for sh in INTERPRETERS {
-        if skip_missing("a_reload_that_cannot_load_a_stub_fails_the_selfupdate", sh) {
-            continue;
-        }
+    for sh in shells(
+        "a_reload_that_cannot_load_a_stub_fails_the_selfupdate",
+        INTERPRETERS,
+    ) {
         // `errexit` too: the stubs drop a failure under it when a profile
         // sources them, and must not when the reload does.
         let run = |options: &str, breakage: &str| {
@@ -2111,10 +2071,7 @@ fn the_old_profile_paths_load_the_new_wrapper() {
         printed(&out)
     );
 
-    for sh in INTERPRETERS {
-        if skip_missing("the_old_profile_paths_load_the_new_wrapper", sh) {
-            continue;
-        }
+    for sh in shells("the_old_profile_paths_load_the_new_wrapper", INTERPRETERS) {
         // The old block's own two lines, verbatim.
         let out = Command::new(sh)
             .arg("-c")
@@ -2296,13 +2253,10 @@ fn a_jlo_home_containing_a_newline_still_generates_files_that_parse() {
             script.is_file(),
             "the install verb did not write {script:?}"
         );
-        for sh in INTERPRETERS.iter().chain(["/bin/sh"].iter()) {
-            if skip_missing(
-                "a_jlo_home_containing_a_newline_still_generates_files_that_parse",
-                sh,
-            ) {
-                continue;
-            }
+        for sh in shells(
+            "a_jlo_home_containing_a_newline_still_generates_files_that_parse",
+            INTERPRETERS.iter().chain(["/bin/sh"].iter()),
+        ) {
             let parsed = Command::new(sh).arg("-n").arg(&script).output().unwrap();
             assert!(
                 parsed.status.success(),

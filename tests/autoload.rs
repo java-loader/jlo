@@ -22,6 +22,9 @@
 // Test code: an `unwrap` failure here is a test failure, which is the point.
 #![allow(clippy::unwrap_used)]
 
+mod common;
+
+use common::{bash_bin, skip_missing};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -51,10 +54,6 @@ fn autoload_script(dialect: &str) -> String {
     dir.join(format!("jlo-autoload.{dialect}"))
         .display()
         .to_string()
-}
-
-fn bash_bin() -> String {
-    std::env::var("JLO_TEST_BASH").unwrap_or_else(|_| "bash".to_string())
 }
 
 /// The state of `PROMPT_COMMAND` after sourcing.
@@ -320,18 +319,12 @@ fn zsh_registers_chpwd_hook_once_and_leaves_prompt_command_alone() {
 // from the other. These tests run each dialect under the shell that will
 // actually source it.
 
-/// The shells that source a dialect, paired with the file they get.
-fn hook_shells() -> Vec<(String, &'static str)> {
-    vec![(bash_bin(), "bash"), ("zsh".to_string(), "zsh")]
-}
-
-#[must_use]
-fn skip_missing(test: &str, sh: &str) -> bool {
-    if Command::new(sh).arg("-c").arg("exit 0").output().is_ok() {
-        return false;
-    }
-    eprintln!("SKIP {test}: {sh} is not installed here.");
-    true
+/// The shells that source a dialect and are installed here, each paired with
+/// the file it gets.
+fn hook_shells(test: &str) -> impl Iterator<Item = (String, &'static str)> {
+    [(bash_bin(), "bash"), ("zsh".to_string(), "zsh")]
+        .into_iter()
+        .filter(move |(sh, _)| !skip_missing(test, sh))
 }
 
 /// Run `body` under `sh` with `HOME`, `JLO_HOME` and the working directory
@@ -398,10 +391,7 @@ fn canon(p: &Path) -> std::path::PathBuf {
 
 /// Builds a `HOME` tree, then asserts what every dialect makes of it.
 fn assert_lookup(test: &str, build: impl Fn(&Path) -> std::path::PathBuf, expected: bool) {
-    for (sh, dialect) in hook_shells() {
-        if skip_missing(test, &sh) {
-            continue;
-        }
+    for (sh, dialect) in hook_shells(test) {
         let home = tempdir().unwrap();
         let home = canon(home.path());
         let start = build(&home);
@@ -494,10 +484,7 @@ fn find_stops_at_a_worktree_whose_git_is_a_file() {
 /// temp tree rather than the tree itself.
 #[test]
 fn find_stops_at_home() {
-    for (sh, dialect) in hook_shells() {
-        if skip_missing("find_stops_at_home", &sh) {
-            continue;
-        }
+    for (sh, dialect) in hook_shells("find_stops_at_home") {
         let outside = tempdir().unwrap();
         let outside = canon(outside.path());
         let home = outside.join("home");
@@ -519,10 +506,7 @@ fn find_stops_at_home() {
 /// read - the two halves of one rule disagreeing about where home is.
 #[test]
 fn find_stops_at_home_with_a_trailing_slash() {
-    for (sh, dialect) in hook_shells() {
-        if skip_missing("find_stops_at_home_with_a_trailing_slash", &sh) {
-            continue;
-        }
+    for (sh, dialect) in hook_shells("find_stops_at_home_with_a_trailing_slash") {
         let outside = tempdir().unwrap();
         let outside = canon(outside.path());
         let home = outside.join("home");
@@ -563,10 +547,7 @@ fn find_reports_none_when_absent() {
 /// several-hundred-megabyte download.
 #[test]
 fn hook_runs_jlo_env_from_a_project_subdirectory() {
-    for (sh, dialect) in hook_shells() {
-        if skip_missing("hook_runs_jlo_env_from_a_project_subdirectory", &sh) {
-            continue;
-        }
+    for (sh, dialect) in hook_shells("hook_runs_jlo_env_from_a_project_subdirectory") {
         let home = tempdir().unwrap();
         let home = canon(home.path());
         let project = home.join("project");
@@ -594,10 +575,7 @@ fn hook_runs_jlo_env_from_a_project_subdirectory() {
 /// worst possible place to start a download, so it too must ask offline.
 #[test]
 fn fresh_shell_applies_the_user_default_offline() {
-    for (sh, dialect) in hook_shells() {
-        if skip_missing("fresh_shell_applies_the_user_default_offline", &sh) {
-            continue;
-        }
+    for (sh, dialect) in hook_shells("fresh_shell_applies_the_user_default_offline") {
         let home = tempdir().unwrap();
         let home = canon(home.path());
         let neutral = home.join("neutral");
@@ -618,10 +596,7 @@ fn fresh_shell_applies_the_user_default_offline() {
 /// branch must not run the binary at all - there is nothing for it to resolve.
 #[test]
 fn fresh_shell_stays_quiet_without_any_config() {
-    for (sh, dialect) in hook_shells() {
-        if skip_missing("fresh_shell_stays_quiet_without_any_config", &sh) {
-            continue;
-        }
+    for (sh, dialect) in hook_shells("fresh_shell_stays_quiet_without_any_config") {
         let home = tempdir().unwrap();
         let home = canon(home.path());
         let neutral = home.join("neutral");
@@ -643,10 +618,7 @@ fn fresh_shell_stays_quiet_without_any_config() {
 /// carries the same guard so a hand call behaves identically.
 #[test]
 fn hook_runs_once_per_directory_not_once_per_prompt() {
-    for (sh, dialect) in hook_shells() {
-        if skip_missing("hook_runs_once_per_directory_not_once_per_prompt", &sh) {
-            continue;
-        }
+    for (sh, dialect) in hook_shells("hook_runs_once_per_directory_not_once_per_prompt") {
         let home = tempdir().unwrap();
         let home = canon(home.path());
         let project = home.join("project");
@@ -672,10 +644,7 @@ fn hook_runs_once_per_directory_not_once_per_prompt() {
 /// not become the status their prompt reports.
 #[test]
 fn hook_reports_success_even_when_jlo_env_fails() {
-    for (sh, dialect) in hook_shells() {
-        if skip_missing("hook_reports_success_even_when_jlo_env_fails", &sh) {
-            continue;
-        }
+    for (sh, dialect) in hook_shells("hook_reports_success_even_when_jlo_env_fails") {
         let home = tempdir().unwrap();
         let home = canon(home.path());
         let project = home.join("project");
@@ -714,10 +683,7 @@ fn hook_reports_success_even_when_jlo_env_fails() {
 /// of the user's shell setup with it.
 #[test]
 fn fresh_shell_survives_a_failing_jlo_env_under_set_e() {
-    for (sh, dialect) in hook_shells() {
-        if skip_missing("fresh_shell_survives_a_failing_jlo_env_under_set_e", &sh) {
-            continue;
-        }
+    for (sh, dialect) in hook_shells("fresh_shell_survives_a_failing_jlo_env_under_set_e") {
         let home = tempdir().unwrap();
         let home = canon(home.path());
         let project = home.join("project");
@@ -755,10 +721,7 @@ fn sources_and_runs_the_hook_under_set_u() {
     std::fs::create_dir_all(&neutral).unwrap();
     let jlo_home = tempdir().unwrap();
 
-    for (sh, dialect) in hook_shells() {
-        if skip_missing("sources_and_runs_the_hook_under_set_u", &sh) {
-            continue;
-        }
+    for (sh, dialect) in hook_shells("sources_and_runs_the_hook_under_set_u") {
         let script = autoload_script(dialect);
         for prologue in ["", "unset JLO_HOME\n"] {
             let body = format!(
