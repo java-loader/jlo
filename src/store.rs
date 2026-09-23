@@ -591,34 +591,29 @@ impl JdkStore {
         active_java_home: Option<&Path>,
     ) -> Result<RemoveReport, RemoveError> {
         let installed = self.list().map_err(RemoveError::Store)?;
+        let selectors: Vec<(&String, Selector)> = targets
+            .iter()
+            .map(|target| (target, Selector::parse(target)))
+            .collect();
 
-        // Resolved by index into `installed` so overlapping targets - `jlo
-        // remove 17 17.0.2+8` names the same directory twice - select it
-        // once. Deleting it twice would turn the second attempt into a
-        // spurious "could not remove" line.
-        let mut selected: Vec<usize> = Vec::new();
         let mut missing: Vec<String> = Vec::new();
-        for target in targets {
-            let matches = installed
-                .iter()
-                .enumerate()
-                .filter(|(_, jdk)| matches_target(jdk, target))
-                .map(|(index, _)| index);
-
-            let before = selected.len();
-            selected.extend(matches);
-            if selected.len() == before && !missing.contains(target) {
-                missing.push(target.clone());
+        for (target, selector) in &selectors {
+            if !installed.iter().any(|jdk| selector.matches(jdk)) && !missing.contains(target) {
+                missing.push((*target).clone());
             }
         }
 
-        // `installed` is newest first, so ascending indices report the
-        // removals in the order `jlo list --offline` shows them, whatever
+        // Filtering `installed` rather than collecting per target means
+        // overlapping targets - `jlo remove 17 17.0.2+8` names the same
+        // directory twice - select it once, where deleting it twice would
+        // turn the second attempt into a spurious "could not remove" line.
+        // It also keeps `installed`'s newest-first order, so the removals
+        // are reported the way `jlo list --offline` shows them, whatever
         // order the targets were given in.
-        selected.sort_unstable();
-        selected.dedup();
-
-        let matching: Vec<&InstalledJdk> = selected.into_iter().map(|i| &installed[i]).collect();
+        let matching: Vec<&InstalledJdk> = installed
+            .iter()
+            .filter(|jdk| selectors.iter().any(|(_, selector)| selector.matches(jdk)))
+            .collect();
 
         // Set aside before the marker check, so a live install that is also
         // unmanaged is reported as live: that is the one the user can act on.
@@ -1169,18 +1164,32 @@ pub(crate) fn quoted_list(items: &[String]) -> String {
     }
 }
 
-/// Whether `target` names this install: a version name (`17`, `28-ea`)
-/// selects every build of that name, an exact directory name selects one.
+/// A `jlo remove` target: a version name (`17`, `28-ea`) selects every build
+/// of that name, an exact directory name selects one.
 ///
 /// The name, not the major: `jlo remove 26` must leave `26-ea` alone, for the
 /// same reason `jlo env 26` must not resolve to it. Anything that is not a
 /// name falls through to the exact spelling, which is how `17.0.11+10` still
 /// works - and why `17.0` still matches nothing, a range being what `.jlorc`
 /// deliberately does not have.
-fn matches_target(jdk: &InstalledJdk, target: &str) -> bool {
-    match Request::parse(target) {
-        Ok(request) => jdk.request() == request,
-        Err(_) => jdk.version == target,
+enum Selector<'a> {
+    Name(Request),
+    Exact(&'a str),
+}
+
+impl<'a> Selector<'a> {
+    fn parse(target: &'a str) -> Self {
+        match Request::parse(target) {
+            Ok(request) => Self::Name(request),
+            Err(_) => Self::Exact(target),
+        }
+    }
+
+    fn matches(&self, jdk: &InstalledJdk) -> bool {
+        match self {
+            Self::Name(request) => jdk.request() == *request,
+            Self::Exact(version) => jdk.version == *version,
+        }
     }
 }
 
@@ -2723,14 +2732,14 @@ mod tests {
         assert_eq!(quoted_list(&[]), "");
     }
 
-    // -- matches_target --
+    // -- Selector --
 
     /// `jlo remove 26` must not take the beta with it, and `jlo remove 26-ea`
     /// must reach the beta - the selector is the *name*, like every other rule
     /// here. Exact-build targets are untouched by that: they name one
     /// directory and always did.
     #[test]
-    fn matches_target_selects_by_name_not_by_major() {
+    fn selector_selects_by_name_not_by_major() {
         let ga = InstalledJdk {
             version: "26.0.1+9".to_string(),
             major: 26,
@@ -2744,16 +2753,16 @@ mod tests {
             managed: true,
         };
 
-        assert!(matches_target(&ga, "26"));
-        assert!(!matches_target(&ea, "26"));
-        assert!(matches_target(&ea, "26-ea"));
-        assert!(!matches_target(&ga, "26-ea"));
+        assert!(Selector::parse("26").matches(&ga));
+        assert!(!Selector::parse("26").matches(&ea));
+        assert!(Selector::parse("26-ea").matches(&ea));
+        assert!(!Selector::parse("26-ea").matches(&ga));
         // The exact build still names exactly one install.
-        assert!(matches_target(&ea, "26.0.2-beta+101.0.ea"));
+        assert!(Selector::parse("26.0.2-beta+101.0.ea").matches(&ea));
     }
 
     #[test]
-    fn matches_target_reads_a_bare_integer_as_a_major() {
+    fn selector_reads_a_bare_integer_as_a_major() {
         let jdk = InstalledJdk {
             version: "17.0.2+8".to_string(),
             major: 17,
@@ -2761,12 +2770,12 @@ mod tests {
             managed: true,
         };
 
-        assert!(matches_target(&jdk, "17"));
-        assert!(matches_target(&jdk, "17.0.2+8"));
-        assert!(!matches_target(&jdk, "1"));
+        assert!(Selector::parse("17").matches(&jdk));
+        assert!(Selector::parse("17.0.2+8").matches(&jdk));
+        assert!(!Selector::parse("1").matches(&jdk));
         // Neither a major nor a directory name: a range, which jlo has no
         // notion of anywhere.
-        assert!(!matches_target(&jdk, "17.0"));
+        assert!(!Selector::parse("17.0").matches(&jdk));
     }
 
     // -- find_jdk_path --
