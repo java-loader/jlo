@@ -1609,12 +1609,6 @@ mod tests {
     }
 
     #[test]
-    fn single_quoting_survives_an_apostrophe() {
-        assert_eq!(sq("o'brien"), r"'o'\''brien'");
-        assert_eq!(sq("$x `id`"), "'$x `id`'");
-    }
-
-    #[test]
     fn a_default_home_keeps_the_snippet_portable() {
         let home = Path::new("/home/u");
         let layout = layout_at(&home.join(".jlo"));

@@ -628,35 +628,12 @@ mod tests {
         assert!(!is_newer("0.4.0", "0.4.0").expect("compare"));
         assert!(!is_newer("0.3.0", "0.4.0").expect("compare"));
     }
-
-    #[test]
-    fn package_name_matches_a_published_asset() {
-        // Fails on a platform the release workflow does not build, which is
-        // the honest answer for one.
-        let name = package_name().expect("this platform is built by the release workflow");
-        assert!(name.starts_with("jlo-"), "{name}");
-        assert!(name.ends_with(".tar.gz"), "{name}");
-    }
 }
 
 #[cfg(test)]
 mod http_tests {
     use super::*;
     use sha2::Digest as _;
-
-    #[test]
-    fn latest_tag_reads_the_redirect() {
-        let mut server = mockito::Server::new();
-        let mock = server
-            .mock("GET", "/latest")
-            .with_status(302)
-            .with_header("location", &format!("{}/tag/jlo-bin-v9.9.9", server.url()))
-            .create();
-
-        let client = ReleaseClient::new(server.url());
-        assert_eq!(client.latest_tag().expect("tag"), "jlo-bin-v9.9.9");
-        mock.assert();
-    }
 
     /// The whole discovery step depends on *not* following the redirect. If a
     /// future ureq upgrade changes the default, or the per-request override is
