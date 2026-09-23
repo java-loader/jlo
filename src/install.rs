@@ -560,13 +560,24 @@ fn write_layout(layout: &Layout) -> Result<()> {
     // install.sh (0.2.0 and 0.3.0) pasted into the user's profile. Fatal for
     // the same reason the dialect files above are: for anyone still carrying
     // that block these are the only load points there are.
+    //
+    // Generated rather than left at their 0.3.0 contents: the entry files
+    // landed after 0.3.0 was tagged, so *no* released version knows `jlo.sh`
+    // exists, and a stale shim would leave every existing user loading the
+    // old wrapper permanently - including its `curl | bash` selfupdate, which
+    // never reaches the Rust command - with nothing about it looking broken.
+    // `jlo-init.sh` gets the same body as `jlo.sh`; its baked `JLO_HOME` is
+    // the truth rather than the `export` the old block puts above it, which
+    // says `$HOME/.jlo` whatever directory the files actually went to. The
+    // old block sources `jlo-autoload.sh` unconditionally, so re-pointing it
+    // preserves exactly the hook those users already had.
     write_atomic(
         &layout.bin.join("jlo-init.sh"),
-        compat_init_sh(layout).as_bytes(),
+        init_stub(layout, &compat_note("jlo.sh", layout)).as_bytes(),
     )?;
     write_atomic(
         &layout.bin.join("jlo-autoload.sh"),
-        compat_autoload_sh(layout).as_bytes(),
+        autoload_stub(layout, &compat_note("autoload.sh", layout)).as_bytes(),
     )?;
 
     let mut partial = write_completions(layout);
@@ -575,13 +586,23 @@ fn write_layout(layout: &Layout) -> Result<()> {
     // exports the JLO_HOME the rest of the layout hangs off. A failure here
     // means the printed instructions would point at nothing, so it is fatal
     // where the two optional stubs are warnings.
-    write_atomic(&layout.home.join("jlo.sh"), jlo_sh(layout).as_bytes())
+    let jlo_sh = init_stub(
+        layout,
+        "\
+# Source this from your shell profile. The line never changes: an upgrade
+# regenerates the files it points at.
+",
+    );
+    write_atomic(&layout.home.join("jlo.sh"), jlo_sh.as_bytes())
         .context("could not write jlo.sh; J'Lo cannot be loaded from your shell profile.")?;
 
-    if let Err(e) = write_atomic(
-        &layout.home.join("autoload.sh"),
-        autoload_sh(layout).as_bytes(),
-    ) {
+    let autoload_sh = autoload_stub(
+        layout,
+        "\
+# Optional: switches JDK on cd when a .jlorc is in scope. Source after jlo.sh.
+",
+    );
+    if let Err(e) = write_atomic(&layout.home.join("autoload.sh"), autoload_sh.as_bytes()) {
         ui::warning!("{e:#} cd autoloading is unavailable.");
         partial = true;
     }
@@ -632,35 +653,6 @@ fn write_completions(layout: &Layout) -> bool {
 // ---------------------------------------------------------------------------
 // Generated stubs
 // ---------------------------------------------------------------------------
-
-fn jlo_sh(layout: &Layout) -> String {
-    init_stub(
-        layout,
-        "\
-# Source this from your shell profile. The line never changes: an upgrade
-# regenerates the files it points at.
-",
-    )
-}
-
-/// `bin/jlo-init.sh` - the path every published `install.sh` told users to
-/// source, and therefore the only load point in every profile in the wild.
-///
-/// 0.2.0 and 0.3.0 are the only releases there have ever been, and both print
-/// the same three-line block. The generated entry files landed after 0.3.0 was
-/// tagged, so *no* released version knows `jlo.sh` exists. Writing the dialect
-/// files beside this one and leaving it at its 0.3.0 contents would leave
-/// every existing user loading the old wrapper permanently - including its
-/// `curl | bash` selfupdate, which never reaches the Rust command - with
-/// nothing about it looking broken.
-///
-/// So it is generated too, with the same body as `jlo.sh`: the same dialect
-/// test, the same baked `JLO_HOME`. The baked path is the truth here rather
-/// than the `export` the old block puts above this line, because that export
-/// says `$HOME/.jlo` whatever directory the files actually went to.
-fn compat_init_sh(layout: &Layout) -> String {
-    init_stub(layout, &compat_note("jlo.sh", layout))
-}
 
 fn init_stub(layout: &Layout, note: &str) -> String {
     format!(
@@ -725,31 +717,15 @@ fn commented(body: &str, indent: &str) -> String {
     out
 }
 
-fn autoload_sh(layout: &Layout) -> String {
-    // The wrapper path is baked in rather than read from $JLO_HOME: this file
-    // is opt-in and may be sourced on its own, by a profile that never ran
-    // jlo.sh - and under `set -u` an unset $JLO_HOME would abort it.
-    //
-    // Guarded on the 'jlo' *function* rather than on the directory, because
-    // that is what jlo_after_cd calls: sourcing this without jlo.sh has to be
-    // inert, not a stream of errors on every cd. `typeset -f` needs no
-    // subshell, and under a shell that lacks it the guard fails closed - which
-    // is the right answer there anyway.
-    autoload_stub(
-        layout,
-        "\
-# Optional: switches JDK on cd when a .jlorc is in scope. Source after jlo.sh.
-",
-    )
-}
-
-/// `bin/jlo-autoload.sh` - the second path the old profile block sources. Same
-/// reasoning as [`compat_init_sh`]; the old block sources it unconditionally,
-/// so re-pointing it preserves exactly the hook those users already had.
-fn compat_autoload_sh(layout: &Layout) -> String {
-    autoload_stub(layout, &compat_note("autoload.sh", layout))
-}
-
+/// The wrapper path is baked in rather than read from `$JLO_HOME`: this file
+/// is opt-in and may be sourced on its own, by a profile that never ran
+/// `jlo.sh` - and under `set -u` an unset `$JLO_HOME` would abort it.
+///
+/// Guarded on the 'jlo' *function* rather than on the directory, because that
+/// is what `jlo_after_cd` calls: sourcing this without `jlo.sh` has to be inert,
+/// not a stream of errors on every cd. `typeset -f` needs no subshell, and
+/// under a shell that lacks it the guard fails closed - which is the right
+/// answer there anyway.
 fn autoload_stub(layout: &Layout, note: &str) -> String {
     format!(
         "{GENERATED_HEADER}{note}\
@@ -891,11 +867,6 @@ fn ensure_symlink(_layout: &Layout) -> Option<PathBuf> {
 // Receipt
 // ---------------------------------------------------------------------------
 
-/// `None` for both a missing and a malformed receipt.
-///
-/// The two are distinguished where it matters - `selfupdate` stops on a
-/// malformed one rather than guessing - but neither is a reason for an
-/// ordinary command to refuse to run.
 /// The reading `selfupdate` needs, where the two failures are *not* the same
 /// thing: a missing receipt is an install that predates them and may be
 /// updated, a malformed one is an error that stops the update and names the
@@ -912,23 +883,33 @@ pub(crate) fn load_receipt(layout: &Layout) -> Result<Option<Receipt>> {
         .map_err(|e| anyhow!("{path:?} is not a valid install receipt: {e}."))
 }
 
+/// `None` for both a missing and a malformed receipt.
+///
+/// The two are distinguished where it matters - `selfupdate` stops on a
+/// malformed one rather than guessing - but neither is a reason for an
+/// ordinary command to refuse to run.
 fn read_receipt(layout: &Layout) -> Option<Receipt> {
-    let raw = fs::read_to_string(layout.receipt()).ok()?;
-    serde_json::from_str(&raw).ok()
+    load_receipt(layout).ok().flatten()
 }
 
 fn write_receipt(layout: &Layout, method: &str, symlink: Option<&Path>) -> Result<()> {
-    let receipt = Receipt {
+    Receipt {
         version: VERSION.to_string(),
         method: method.to_string(),
         jlo_home: display(&layout.home),
         binary: display(&layout.binary()),
         symlink: symlink.map(display),
-    };
-    let mut json = serde_json::to_string_pretty(&receipt)
-        .context("could not serialise the install receipt")?;
-    json.push('\n');
-    write_atomic(&layout.receipt(), json.as_bytes())
+    }
+    .write(layout)
+}
+
+impl Receipt {
+    fn write(&self, layout: &Layout) -> Result<()> {
+        let mut json = serde_json::to_string_pretty(self)
+            .context("could not serialise the install receipt")?;
+        json.push('\n');
+        write_atomic(&layout.receipt(), json.as_bytes())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1521,20 +1502,10 @@ mod tests {
             symlink: None,
         };
         fs::create_dir_all(layout.home()).unwrap();
-        let mut json = serde_json::to_string_pretty(&receipt).unwrap();
-        json.push('\n');
-        fs::write(layout.receipt(), json).unwrap();
+        receipt.write(layout).unwrap();
         receipt
     }
 
-    /// The decision `self_heal` makes, isolated so it can be made twice: once
-    /// cheaply, and once again under the lock.
-    ///
-    /// The second read is what keeps the heal from causing the very
-    /// disagreement it repairs. A publisher that finishes while this process
-    /// is between its first check and the lock leaves a receipt that is
-    /// *current*; healing anyway would write this binary's older scripts and
-    /// stamp its own version over the newer one.
     #[test]
     fn a_receipt_that_matches_this_binary_is_not_stale() {
         let dir = tempfile::tempdir().unwrap();
@@ -1611,9 +1582,7 @@ mod tests {
         let layout = layout_at(dir.path());
         let mut receipt = receipt_at(&layout, "0.0.1-not-this-build");
         receipt.binary = display(&dir.path().join("somewhere-else").join("jlo-bin"));
-        let mut json = serde_json::to_string_pretty(&receipt).unwrap();
-        json.push('\n');
-        fs::write(layout.receipt(), json).unwrap();
+        receipt.write(&layout).unwrap();
         assert!(
             stale_receipt(&layout).is_none(),
             "a receipt describing a different executable was treated as ours"
