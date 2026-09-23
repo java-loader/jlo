@@ -47,9 +47,10 @@ const DEFAULT_METHOD: &str = "installer";
 /// they stage - so the staging sweep knows exactly which file was its own.
 const BINARY_NAME: &str = "jlo-bin";
 
-/// What `install.sh` and `install-local.sh` name the directory they unpack
-/// into, beside the binary they are about to publish. Matched rather than
-/// reconstructed: the pid in the real name belongs to the shell, not to us.
+/// What `install.sh`, `install-local.sh` and `selfupdate` name the directory
+/// they unpack into, beside the binary they are about to publish. Matched
+/// rather than reconstructed: the pid in the real name belongs to whoever
+/// staged it, usually a shell, not to us.
 const STAGING_PREFIX: &str = ".jlo-install";
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -156,11 +157,19 @@ impl Layout {
         &self.home
     }
 
-    /// Where `selfupdate` stages the download: the staging directory has to be
-    /// a *sibling* of the binary, because `rename` is only atomic within one
-    /// filesystem and `bin/` can itself be a mount point or a symlink.
-    pub(crate) fn bin_dir(&self) -> &Path {
+    fn bin_dir(&self) -> &Path {
         &self.bin
+    }
+
+    /// Where `selfupdate` stages the download, under the name [`Staging`]
+    /// sweeps once the staged binary has taken over. A *sibling* of the
+    /// binary, because `rename` is only atomic within one filesystem and
+    /// `bin/` can itself be a mount point or a symlink.
+    ///
+    /// The name is a contract across versions: the binary that stages is the
+    /// old one, the binary that sweeps is the release it downloaded.
+    pub(crate) fn staging_dir(&self, pid: u32) -> PathBuf {
+        self.bin.join(format!("{STAGING_PREFIX}-{pid}"))
     }
 
     /// The binary's path, which is also the symlink target.
@@ -243,9 +252,10 @@ impl Lock {
             // The lock lives on the open file description, not on the fd
             // number, so it survives `exec` - but only if the fd does. std
             // opens every file `O_CLOEXEC`, which would drop the lock at
-            // exactly the moment `selfupdate` is half-published: the new
-            // binary in place, its scripts and receipt not yet written.
-            // Silently, with no error to report.
+            // exactly the moment `selfupdate` hands over: the staged binary
+            // would then publish itself, its scripts and its receipt with
+            // nothing holding anyone else off. Silently, with no error to
+            // report.
             rustix::io::fcntl_setfd(&file, rustix::io::FdFlags::empty())
                 .with_context(|| format!("could not keep {path:?} open across exec"))?;
 
@@ -377,11 +387,12 @@ pub(crate) fn cmd_install(args: &[String], wrapped: bool) -> Result<()> {
 
 /// Move the running executable to its published path.
 ///
-/// The installers unpack into a staging directory *beside* the destination and
-/// run the staged binary from there, so that this - the write that replaces
+/// The installers and `selfupdate` unpack into a staging directory *beside* the
+/// destination and run the staged binary from there, so that this - the write that replaces
 /// `bin/jlo-bin` - happens under the lock with every other part of the
-/// publication, rather than before the lock exists. An installer that wrote
-/// the binary itself would be a second publisher standing outside the gate: it
+/// publication, rather than before the lock exists, and only once the new
+/// binary has proved it can start. An installer that wrote the binary itself
+/// would be a second publisher standing outside the gate: it
 /// could swap the executable out from under a `selfupdate` that holds the
 /// lock, and on Linux it would hit `ETXTBSY` trying to overwrite a binary that
 /// is still running.
@@ -406,7 +417,7 @@ fn publish_binary(layout: &Layout) -> Result<()> {
     fs::create_dir_all(layout.bin_dir())
         .with_context(|| format!("could not create {:?}", layout.bin_dir()))?;
     // The staged file's *contents* first. The installers wrote it with `tar`
-    // or `cp` and neither flushed it, so a crash just after the rename could
+    // or `cp`, `selfupdate` with its own unpack, and none of them flushed it, so a crash just after the rename could
     // leave a durable directory entry - and a receipt vouching for it - in
     // front of a binary that is still only in the page cache. `sync_dir`
     // below flushes the entry, not the data behind it.
@@ -424,9 +435,9 @@ fn publish_binary(layout: &Layout) -> Result<()> {
 
 /// The installer's staging directory, swept when this value is dropped.
 ///
-/// `install.sh` unpacks into `bin/.jlo-install-<pid>/` and `exec`s the binary
-/// from there, so from that moment the staged process is the only one that can
-/// still tidy up: a refused publish would otherwise leave a whole copy of J'Lo
+/// `install.sh` and `selfupdate` unpack into `bin/.jlo-install-<pid>/` and
+/// `exec` the binary from there, so from that moment the staged process is the
+/// only one that can still tidy up: a refused publish would otherwise leave a whole copy of J'Lo
 /// in `bin/` for every failed install.
 ///
 /// What it removes is the file it knows was staged, and then the directory
@@ -1457,7 +1468,7 @@ fn write_atomic(path: &Path, contents: &[u8]) -> Result<()> {
 /// while the script it vouches for is still only in the page cache. Best
 /// effort, because some filesystems refuse an `fsync` on a directory and that
 /// is not a reason to fail an install that otherwise succeeded.
-pub(crate) fn sync_dir(dir: &Path) {
+fn sync_dir(dir: &Path) {
     if let Ok(handle) = fs::File::open(dir) {
         let _ = handle.sync_all();
     }
@@ -1572,9 +1583,8 @@ mod tests {
     /// `selfupdate`'s `exec` - but only if the fd does. std opens every file
     /// `O_CLOEXEC`, and nothing in the type system undoes that, so a refactor
     /// that drops the `fcntl_setfd` call compiles, passes every other test,
-    /// and silently releases the lock at exactly the moment the install is
-    /// half-published: the new binary in place, its scripts and receipt not
-    /// yet written.
+    /// and silently releases the lock at exactly the moment `selfupdate` hands
+    /// over to the staged binary, which then publishes unguarded.
     ///
     /// `tests/selfupdate.rs` proves an *externally* held lock blocks a second
     /// update. This is the other half: that ours is still held after the

@@ -19,18 +19,20 @@
 //! 3. **Compare against `CARGO_PKG_VERSION` and stop early** when there is
 //!    nothing to do. Nothing to reload in that case: the wrapper gets the
 //!    end marker alone, anyone else nothing.
-//! 4. **Verify, then stage, then `rename`** - into a directory beside the
-//!    target file, never `std::env::temp_dir()`, because `rename` is atomic
-//!    only within one filesystem.
-//! 5. **`exec` the *new* binary** with the hidden install verb. The running
-//!    process carries its *own* `include_str!` templates, so a process that
-//!    renames a new binary into place and then writes the shell files itself
-//!    would install new code beside old scripts. There is exactly one
-//!    generator and it always matches the binary.
+//! 4. **Verify, then stage** - into a directory beside the target file, never
+//!    `std::env::temp_dir()`, because `rename` is atomic only within one
+//!    filesystem.
+//! 5. **`exec` the *staged* binary** with the hidden install verb, which
+//!    publishes it the way it publishes a binary `install.sh` staged: `rename`
+//!    under the lock, then the layout. The running process carries its *own*
+//!    `include_str!` templates, so a process that renames a new binary into
+//!    place and then writes the shell files itself would install new code
+//!    beside old scripts. There is exactly one generator and one publisher,
+//!    and a new binary that cannot start publishes nothing.
 //!
 //! See `docs/adr/0006`. Two invariants are easy to break by accident and have
 //! their own comments below: the lock fd must not carry `FD_CLOEXEC`, or the
-//! lock is dropped at exactly the moment the install is half-published; and
+//! lock is dropped at exactly the moment the new binary starts publishing; and
 //! the base URL is injectable so the whole path is testable against mockito.
 
 use crate::CommandError;
@@ -265,7 +267,7 @@ pub(crate) fn cmd_selfupdate(wrapped: bool) -> Result<(), CommandError> {
         std::env::var("JLO_RELEASE_API_URL").unwrap_or_else(|_| RELEASES_URL.to_string());
     let client = ReleaseClient::new(base_url);
 
-    // Held from here to the `exec`, so nothing else can publish underneath us
+    // Held from here across the `exec`, so nothing else can publish underneath us
     // - the binary, the generated scripts and the receipt are three
     // filesystem writes and no `rename` makes them one transaction. The
     // install verb takes the same lock, so `install.sh`, `install-local.sh`
@@ -287,30 +289,13 @@ pub(crate) fn cmd_selfupdate(wrapped: bool) -> Result<(), CommandError> {
     );
     let staged = stage(&client, &layout, &tag, latest, &package)?;
 
-    // Re-read under the lock, immediately before publishing. A slower updater
-    // carrying an older release must not overwrite a newer install that landed
-    // while it was downloading - `install.sh` and `install-local.sh` write the
-    // same layout and take no lock.
+    // Re-read under the lock, immediately before handing over. A slower
+    // updater carrying an older release must not overwrite a newer install
+    // that landed while it was downloading - `install.sh` and
+    // `install-local.sh` write the same layout and take no lock.
     guard_against_a_newer_install(&layout, latest)?;
 
-    fs::rename(&staged.binary, layout.binary()).map_err(|e| {
-        CommandError::with_hint(
-            anyhow!(
-                "could not publish the new binary to {:?}: {e}.",
-                layout.binary()
-            ),
-            "J'Lo was not changed; the binary you are running is still in place.",
-        )
-    })?;
-    // The scripts and the receipt are written after this, and the receipt is
-    // the commit marker for all three. Flushing the directory entry here is
-    // what keeps that ordering true across a crash rather than only across a
-    // clean exit.
-    install::sync_dir(layout.bin_dir());
-    // Removed before the `exec`, which runs no destructors.
-    drop(staged);
-
-    Ok(publish(&layout, lock, wrapped)?)
+    publish(&layout, lock, staged, wrapped)
 }
 
 /// Whether this install is one `selfupdate` may replace.
@@ -410,6 +395,10 @@ fn is_newer(candidate: &str, current: &str) -> Result<bool> {
 /// within one filesystem, and it fails with `EXDEV` rather than degrading.
 /// "Somewhere under `$JLO_HOME`" is not enough either, because `bin/` can
 /// itself be a mount point or a symlink.
+///
+/// The drop covers every failure up to and including an `exec` that returns.
+/// A successful `exec` runs no destructors; from there the staged binary's own
+/// install verb removes the directory.
 #[derive(Debug)]
 struct Staged {
     dir: PathBuf,
@@ -429,9 +418,7 @@ fn stage(
     latest: &str,
     package: &str,
 ) -> Result<Staged> {
-    let dir = layout
-        .bin_dir()
-        .join(format!(".jlo-update-{}", std::process::id()));
+    let dir = layout.staging_dir(std::process::id());
     // A directory left behind by a killed run would otherwise make the unpack
     // below read as a success with stale contents.
     let _ = fs::remove_dir_all(&dir);
@@ -454,13 +441,6 @@ fn stage(
     // such an archive failed with "could not run the downloaded jlo" instead.
     make_executable(&staged.binary)?;
     verify_staged_version(&staged.binary, latest)?;
-    // The archive was flushed, the file unpacked out of it was not. A rename
-    // of contents that are still only in the page cache would publish an
-    // empty or truncated binary across a crash - the one failure this whole
-    // command exists to avoid.
-    fs::File::open(&staged.binary)
-        .and_then(|handle| handle.sync_all())
-        .with_context(|| format!("could not flush {:?} to disk", staged.binary))?;
     Ok(staged)
 }
 
@@ -479,6 +459,11 @@ fn fetch_and_unpack(
     drop(file);
 
     extract::extract(&archive, &staged.dir, ui)?;
+    // The install verb that takes over this directory removes the binary and
+    // then the directory only if that emptied it, never recursively. A
+    // tarball left in here would keep it standing after every update; failing
+    // to remove it costs that directory and nothing else.
+    let _ = fs::remove_file(&archive);
     if !staged.binary.is_file() {
         bail!("the release archive {package} did not contain a jlo-bin.");
     }
@@ -518,28 +503,30 @@ fn make_executable(binary: &Path) -> Result<()> {
 // Publication
 // ---------------------------------------------------------------------------
 
-/// Hand over to the binary that was just published.
+/// Hand over to the staged binary, which publishes itself.
 ///
 /// `exec`, not a child process: the new `jlo-bin` carries its own shell
 /// templates and its own completions, so it is the only thing that can write a
-/// layout guaranteed to match it. `--reload` is what makes it print the
-/// `. jlo.sh` line on stdout for the wrapper to eval, and the forwarded
-/// wrapped mode is what makes it end that with the marker the wrapper looks
-/// for.
+/// layout guaranteed to match it. `--publish-self` is what makes it rename
+/// itself into place - flushed, under the lock, and only once it is running -
+/// so this process never replaces the binary itself. `--reload` is what makes
+/// it print the `. jlo.sh` line on stdout for the wrapper to eval, and the
+/// forwarded wrapped mode is what makes it end that with the marker the
+/// wrapper looks for.
 ///
-/// `lock` stays alive until the call - `exec` replaces the process image and
-/// runs no destructors, so the fd (and the lock on it) carries into the new
-/// program.
-fn publish(layout: &Layout, lock: Lock, wrapped: bool) -> Result<()> {
+/// `lock` and `staged` stay alive until the call - `exec` replaces the process
+/// image and runs no destructors, so the fd (and the lock on it) carries into
+/// the new program, and the staged binary is still there to be run.
+fn publish(layout: &Layout, lock: Lock, staged: Staged, wrapped: bool) -> Result<(), CommandError> {
     use std::os::unix::process::CommandExt as _;
 
-    let binary = layout.binary();
-    let mut command = std::process::Command::new(&binary);
+    let mut command = std::process::Command::new(&staged.binary);
     if wrapped {
         command.arg(crate::shellenv::WRAPPED);
     }
     let error = command
         .arg(install::VERB)
+        .arg("--publish-self")
         .arg("--reload")
         // We hold the lock; the fd carries across the exec, so the new
         // process must not try to take it again from a second open file
@@ -549,9 +536,13 @@ fn publish(layout: &Layout, lock: Lock, wrapped: bool) -> Result<()> {
         // $JLO_HOME from $HOME, and the two must not disagree across the exec.
         .env("JLO_HOME", layout.home())
         .exec();
+    let binary = staged.binary.clone();
+    // The staging directory goes while the lock is still held.
+    drop(staged);
     drop(lock);
-    Err(anyhow!(
-        "J'Lo {VERSION} was replaced, but the new binary {binary:?} could not be started: {error}."
+    Err(CommandError::with_hint(
+        anyhow!("the new binary {binary:?} could not be started: {error}."),
+        "J'Lo was not changed; the binary you are running is still in place.",
     ))
 }
 
