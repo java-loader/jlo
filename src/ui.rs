@@ -1,6 +1,7 @@
 use crate::adoptium::RemoteJdk;
 use crate::request::{Request, Stream};
 use crate::store::{InstalledJdk, JdkStore, supersedes_every_install};
+use clap::builder::styling::{AnsiColor, Style, Styles};
 use console::style;
 use indicatif::{ProgressBar, ProgressBarIter, ProgressStyle};
 use std::cmp::Ordering;
@@ -412,6 +413,45 @@ fn progress_prefix(label: &str, version: &str) -> String {
     } else {
         version.to_string()
     }
+}
+
+/// The help screens' styles: clap's own, except the "did you mean" pair of a
+/// usage error. clap draws the suggestion green and the typo yellow; here green
+/// means the run succeeded or "copy this" and yellow means a warning, and a
+/// suggestion is neither - it is a command *mentioned*, so it is bold.
+pub(crate) const HELP_STYLES: Styles = Styles::styled()
+    .valid(Style::new().bold())
+    .invalid(Style::new().bold());
+
+// The help helpers below render escape codes unconditionally, unlike every
+// other helper here. Help text is not printed by jlo but handed to clap, which
+// decides on colour by its own check of stdout and strips escape codes from
+// the strings it renders when it decides against - a `console` style would
+// make that decision a second time, against stderr.
+
+/// A section heading in help text, in clap's heading style so the sections jlo
+/// adds cannot drift from the ones clap draws.
+pub(crate) fn help_heading(text: &str) -> String {
+    let style = HELP_STYLES.get_header();
+    format!("{style}{text}{style:#}")
+}
+
+/// A command mentioned in help text: clap's literal style, which is bold.
+pub(crate) fn help_literal(text: &str) -> String {
+    let style = HELP_STYLES.get_literal();
+    format!("{style}{text}{style:#}")
+}
+
+/// The `J'Lo <version>` mark at the head of the help screen.
+pub(crate) fn help_mark(version: &str) -> String {
+    let style = Style::new().fg_color(Some(AnsiColor::Magenta.into()));
+    format!("{style}J'Lo {version}{style:#}")
+}
+
+/// A footnote in help text: dim, like every other footnote.
+pub(crate) fn help_footnote(text: &str) -> String {
+    let style = Style::new().dimmed();
+    format!("{style}{text}{style:#}")
 }
 
 /// A closing note under a block of commands: dim, because it is secondary to

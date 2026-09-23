@@ -5,9 +5,28 @@
 //! hand-maintained strings, which drifted: the shell wrapper accepted `use` as an
 //! alias the binary had never heard of.
 
+use crate::ui;
 use clap::{Parser, Subcommand};
 
-const AFTER_HELP: &str = "\
+/// `jlo -h` and a bare `jlo`: enough to get going, and a pointer to the rest.
+fn after_help() -> String {
+    format!(
+        "\
+{examples}
+
+VERSION is a Java major (25) or a pre-release stream (28-ea). Left out, it
+comes from .jlorc - '--help' has the full lookup.
+
+{docs}",
+        examples = examples(EXAMPLES.iter().filter(|e| e.2)),
+        docs = ui::help_footnote(DOCS),
+    )
+}
+
+/// `jlo --help`: the whole contract.
+fn after_long_help() -> String {
+    format!(
+        "\
 env, home, exec, install, update and init take a Java major version or a
 pre-release stream (28-ea):
 
@@ -23,34 +42,84 @@ release, which is downloaded. --offline stops after the third step rather
 than downloading. update instead takes every installed name, and init pins
 the latest release.
 
-Examples:
-  jlo env 25                       Use Java 25 in this shell
-  jlo init 21                      Pin Java 21 for this project
-  jlo env                          Use the pinned version
-  jlo current                      Show which JDK is active, and why
-  jlo exec 21 -- ./gradlew build   Run a build on Java 21
-  jlo install 25                   Download Java 25 without switching to it
-  jlo install 28-ea                Download the early-access build of Java 28
-  jlo update                       Bring every installed JDK up to date
-  jlo remove 11 17                 Remove every installed Java 11 and 17
-  jlo remove --superseded          Remove every superseded minor release
+{examples}
 
-Environment:
+{environment}
   JLO_HOME   J'Lo's own directory (default ~/.jlo): the shell scripts,
              the generated completions and default.jlorc. This is NOT
              where JDKs are installed - those go to the IntelliJ IDEA
              directory (~/Library/Java/JavaVirtualMachines on macOS,
              ~/.jdks elsewhere), which is not configurable.
 
-Docs: https://github.com/java-loader/jlo";
+{docs}",
+        examples = examples(EXAMPLES.iter()),
+        environment = ui::help_heading("Environment:"),
+        docs = ui::help_footnote(DOCS),
+    )
+}
+
+const DOCS: &str = "Docs: https://github.com/java-loader/jlo";
+
+/// Command, what it does, and whether the short help shows it too.
+const EXAMPLES: &[(&str, &str, bool)] = &[
+    ("jlo env 25", "Use Java 25 in this shell", true),
+    ("jlo init 21", "Pin Java 21 for this project", true),
+    ("jlo env", "Use the pinned version", false),
+    ("jlo current", "Show which JDK is active, and why", false),
+    (
+        "jlo exec 21 -- ./gradlew build",
+        "Run a build on Java 21",
+        true,
+    ),
+    (
+        "jlo install 25",
+        "Download Java 25 without switching to it",
+        false,
+    ),
+    (
+        "jlo install 28-ea",
+        "Download the early-access build of Java 28",
+        false,
+    ),
+    ("jlo update", "Bring every installed JDK up to date", true),
+    (
+        "jlo remove 11 17",
+        "Remove every installed Java 11 and 17",
+        false,
+    ),
+    (
+        "jlo remove --superseded",
+        "Remove every superseded minor release",
+        false,
+    ),
+];
+
+/// The `Examples:` section. Padded by hand, because `format!` width counts
+/// the escape codes around a styled command as characters.
+fn examples<'a>(rows: impl Iterator<Item = &'a (&'a str, &'a str, bool)> + Clone) -> String {
+    let width = rows.clone().map(|(cmd, ..)| cmd.len()).max().unwrap_or(0);
+    let lines = rows.map(|(cmd, what, _)| {
+        let pad = " ".repeat(width - cmd.len());
+        format!("  {}{pad}   {what}", ui::help_literal(cmd))
+    });
+    std::iter::once(ui::help_heading("Examples:"))
+        .chain(lines)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
 
 #[derive(Debug, Parser)]
 #[command(
     name = "jlo",
     bin_name = "jlo",
     version,
-    about = "J'Lo - the Java Loader. Download, manage and switch JDKs.",
-    after_help = AFTER_HELP
+    about = format!(
+        "{} - the Java Loader. Download, manage and switch JDKs.",
+        ui::help_mark(env!("CARGO_PKG_VERSION"))
+    ),
+    after_help = after_help(),
+    after_long_help = after_long_help(),
+    styles = ui::HELP_STYLES
 )]
 pub(crate) struct Cli {
     // Deliberately optional. `arg_required_else_help` would print the help but

@@ -472,21 +472,37 @@ fn exec_passes_hyphen_args_through_to_the_child() {
 
 #[test]
 fn bare_invocation_matches_help_flag_byte_for_byte() {
-    // `jlo` (exploration) and `jlo --help` (usage error convention) must
-    // print the identical overview - only the exit-code handling in `main`
-    // differs. A stray extra `println!()` in either `cli::print_help` call
-    // site would desync them by one trailing newline.
+    // `jlo` (exploration) and `jlo -h` must print the identical overview -
+    // only the exit-code handling in `main` differs. A stray extra
+    // `println!()` in either `cli::print_help` call site would desync them by
+    // one trailing newline.
     let bare = Command::cargo_bin("jlo-bin").unwrap().assert().success();
     let bare_stdout = bare.get_output().stdout.clone();
 
     let help = Command::cargo_bin("jlo-bin")
         .unwrap()
-        .arg("--help")
+        .arg("-h")
         .assert()
         .success();
     let help_stdout = help.get_output().stdout.clone();
 
     assert_eq!(bare_stdout, help_stdout);
+}
+
+#[test]
+fn piped_help_carries_no_escape_codes() {
+    // The help text jlo adds is styled unconditionally and relies on clap to
+    // strip the escape codes when stdout is not a terminal. Styling it with
+    // anything that decides on its own would leak them into a pipe.
+    for flag in ["-h", "--help"] {
+        Command::cargo_bin("jlo-bin")
+            .unwrap()
+            .arg(flag)
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("Examples:"))
+            .stdout(predicate::str::contains("\x1b").not());
+    }
 }
 
 #[test]
