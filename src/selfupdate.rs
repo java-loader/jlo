@@ -442,7 +442,7 @@ fn stage(
         dir,
     };
 
-    let ui = InstallUi::labelled(crate::ui::JLO_LABEL, latest);
+    let ui = InstallUi::jlo(latest);
     let result = fetch_and_unpack(client, &staged, tag, package, &ui);
     if result.is_err() {
         ui.abandon();

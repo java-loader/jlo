@@ -20,34 +20,72 @@ use std::time::{Duration, Instant};
 /// earns a line. Exporting `JAVA_HOME` lasts until the shell exits and is fully
 /// implied by the command the user typed, so it prints nothing at all - which
 /// matters because the autoload hook runs on every `cd`.
+#[derive(Debug)]
 pub(crate) struct InstallUi {
     bar: ProgressBar,
-    /// What is being fetched - "JDK" or "J'Lo". Only the non-tty lines and the
-    /// summary name it; the live bar carries the version in its prefix.
-    label: &'static str,
+    /// What is being fetched. Only the non-tty lines and the summary name it;
+    /// the live bar carries the version in its prefix.
+    subject: Subject,
     version: String,
     started: Instant,
     tty: bool,
 }
 
-impl std::fmt::Debug for InstallUi {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("InstallUi")
-            .field("label", &self.label)
-            .field("version", &self.version)
-            .field("tty", &self.tty)
-            .finish_non_exhaustive()
+/// What an [`InstallUi`] is fetching: a JDK, or J'Lo itself - which wears the
+/// magenta mark wherever it is named.
+#[derive(Debug, Clone, Copy)]
+enum Subject {
+    Jdk,
+    Jlo,
+}
+
+impl Subject {
+    fn label(self) -> &'static str {
+        match self {
+            Subject::Jdk => "JDK",
+            Subject::Jlo => "J'Lo",
+        }
+    }
+
+    /// `<label> <version>` as the install lines say it: the magenta mark for
+    /// J'Lo, plain for a JDK. Name and version together - half a mark in
+    /// colour would read as an accident.
+    fn mark(self, version: &str) -> String {
+        match self {
+            Subject::Jdk => format!("JDK {version}"),
+            Subject::Jlo => jlo_mark(version),
+        }
+    }
+
+    /// The label inside a progress template. Styled, like the prefix beside
+    /// it, so the mark stays whole across the two template slots it occupies.
+    fn progress_label(self) -> String {
+        match self {
+            Subject::Jdk => self.label().to_string(),
+            Subject::Jlo => style(self.label()).magenta().for_stderr().to_string(),
+        }
+    }
+
+    fn progress_prefix(self, version: &str) -> String {
+        match self {
+            Subject::Jdk => version.to_string(),
+            Subject::Jlo => jlo_mark_bare(version),
+        }
     }
 }
 
 impl InstallUi {
     pub(crate) fn new(version: &str) -> Self {
-        Self::labelled("JDK", version)
+        Self::live(Subject::Jdk, version)
     }
 
     /// The same live region for J'Lo's own binary, which `selfupdate`
     /// downloads over the same `ureq` stack as a JDK.
-    pub(crate) fn labelled(label: &'static str, version: &str) -> Self {
+    pub(crate) fn jlo(version: &str) -> Self {
+        Self::live(Subject::Jlo, version)
+    }
+
+    fn live(subject: Subject, version: &str) -> Self {
         let tty = supports_live_region();
         let bar = if tty {
             // Styled via the builder, which does not draw: a bar configured
@@ -55,8 +93,8 @@ impl InstallUi {
             // redraw. "connecting" is literally true here - the caller has the
             // metadata but has not yet opened the download response.
             ProgressBar::new(0)
-                .with_style(spinner_style(&progress_label(label)))
-                .with_prefix(progress_prefix(label, version))
+                .with_style(spinner_style(&subject.progress_label()))
+                .with_prefix(subject.progress_prefix(version))
                 .with_message("connecting")
         } else {
             // Without a terminal there is nothing to redraw over; the plain
@@ -66,18 +104,18 @@ impl InstallUi {
         if tty {
             bar.enable_steady_tick(TICK);
         }
-        Self::with_bar(label, version, bar, tty)
+        Self::with_bar(subject, version, bar, tty)
     }
 
     #[cfg(test)]
     pub(crate) fn hidden(version: &str) -> Self {
-        Self::with_bar("JDK", version, ProgressBar::hidden(), false)
+        Self::with_bar(Subject::Jdk, version, ProgressBar::hidden(), false)
     }
 
-    fn with_bar(label: &'static str, version: &str, bar: ProgressBar, tty: bool) -> Self {
+    fn with_bar(subject: Subject, version: &str, bar: ProgressBar, tty: bool) -> Self {
         Self {
             bar,
-            label,
+            subject,
             version: version.to_string(),
             started: Instant::now(),
             tty,
@@ -91,11 +129,11 @@ impl InstallUi {
             // would flash a completed download on the first frame.
             self.bar.set_length(total_size);
             self.bar
-                .set_style(download_style(&progress_label(self.label)));
+                .set_style(download_style(&self.subject.progress_label()));
         } else {
             eprintln!(
                 "Downloading {} {} ({})",
-                self.label,
+                self.subject.label(),
                 self.version,
                 indicatif::HumanBytes(total_size)
             );
@@ -120,7 +158,7 @@ impl InstallUi {
     fn phase(&self, name: &str) {
         if self.tty {
             self.bar
-                .set_style(spinner_style(&progress_label(self.label)));
+                .set_style(spinner_style(&self.subject.progress_label()));
             self.bar.set_message(name.to_string());
         }
     }
@@ -137,7 +175,7 @@ impl InstallUi {
         eprintln!(
             "{}",
             format_summary(
-                self.label,
+                self.subject,
                 &self.version,
                 &tilde(dest),
                 self.started.elapsed()
@@ -365,10 +403,6 @@ pub(crate) fn command(line: &str) -> String {
     style(line).green().bright().for_stderr().to_string()
 }
 
-/// The label `selfupdate` builds its progress region with. Named, because
-/// three places have to agree on it to keep the identity colour in one piece.
-pub(crate) const JLO_LABEL: &str = "J'Lo";
-
 /// The `J'Lo <version>` mark: the one place the program names itself rather
 /// than a JDK. Magenta belongs to it and to nothing else, and never appears in
 /// an `Error:`/`Warning:` line - a failure is what the reader needs first.
@@ -392,35 +426,6 @@ pub(crate) fn jlo_mark_bare(version: &str) -> String {
 /// two operands.
 pub(crate) fn punctuation_arrow() -> String {
     dim("→")
-}
-
-/// `<label> <version>` as the install lines say it: the magenta mark when the
-/// subject is J'Lo itself, plain when it is a JDK. Name and version together -
-/// half a mark in colour would read as an accident.
-fn install_mark(label: &str, version: &str) -> String {
-    if label == JLO_LABEL {
-        jlo_mark(version)
-    } else {
-        format!("{label} {version}")
-    }
-}
-
-/// The label inside a progress template, and the prefix beside it. Both are
-/// styled so the mark stays whole across the two template slots it occupies.
-fn progress_label(label: &str) -> String {
-    if label == JLO_LABEL {
-        style(label).magenta().for_stderr().to_string()
-    } else {
-        label.to_string()
-    }
-}
-
-fn progress_prefix(label: &str, version: &str) -> String {
-    if label == JLO_LABEL {
-        style(version).magenta().for_stderr().to_string()
-    } else {
-        version.to_string()
-    }
 }
 
 /// The help screens' styles: clap's own, except the "did you mean" pair of a
@@ -1271,7 +1276,7 @@ const TICK: Duration = Duration::from_millis(100);
 ///
 /// `label` is interpolated rather than hard-coded. Both templates said `JDK`
 /// whatever they were downloading, including the one `selfupdate` builds by
-/// calling `InstallUi::labelled("J'Lo", ..)` - the label existed and the live
+/// calling `InstallUi::jlo(..)` - the label existed and the live
 /// region ignored it.
 fn download_style(label: &str) -> ProgressStyle {
     ProgressStyle::default_bar()
@@ -1295,11 +1300,11 @@ fn spinner_style(label: &str) -> ProgressStyle {
 /// emit colour by looking at *stdout*, and the `jlo` shell function runs
 /// `. <(jlo-bin env)` - so stdout is a pipe on the one path that matters and
 /// the default targeting silently strips every colour from this line.
-fn format_summary(label: &str, version: &str, dest: &str, elapsed: Duration) -> String {
+fn format_summary(subject: Subject, version: &str, dest: &str, elapsed: Duration) -> String {
     format!(
         "{} {} {} {}  {}",
         style("✓").green().for_stderr(),
-        install_mark(label, version),
+        subject.mark(version),
         punctuation_arrow(),
         dest,
         dim(format!("({})", format_elapsed(elapsed)))
@@ -1591,7 +1596,12 @@ mod tests {
     fn summary_names_the_exact_version_and_destination() {
         // The major version is what the user typed; the exact version is the
         // one fact the summary exists to record.
-        let line = format_summary("JDK", "21.0.8+9", "~/.jdks/21.0.8", Duration::from_secs(18));
+        let line = format_summary(
+            Subject::Jdk,
+            "21.0.8+9",
+            "~/.jdks/21.0.8",
+            Duration::from_secs(18),
+        );
         assert!(line.contains("JDK 21.0.8+9"), "got: {line}");
         assert!(line.contains("~/.jdks/21.0.8"), "got: {line}");
         assert!(line.contains("(18s)"), "got: {line}");
