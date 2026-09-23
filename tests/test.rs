@@ -1888,6 +1888,30 @@ fn the_online_funnel_warns_about_a_pre_bundle_install_too() {
         .stderr(predicate::str::contains("java_home"));
 }
 
+/// The online `env` path warns too. Only `env --offline` is the autoload hook
+/// and stays silent; a rule that silenced every `env` would pass the pair
+/// above and this would catch it.
+#[test]
+#[serial]
+#[cfg(target_os = "macos")]
+fn online_env_warns_about_a_pre_bundle_install() {
+    let (home, project) = current_fixture("25.0.4+101");
+
+    Command::cargo_bin("jlo-bin")
+        .unwrap()
+        .args(["env", "25"])
+        .current_dir(&project)
+        .env("HOME", home.path())
+        .env("JLO_HOME", home.path().join(".jlo"))
+        .env_remove("JAVA_HOME")
+        .env("PATH", "/usr/bin")
+        .env("JLO_ADOPTIUM_API_URL", "http://127.0.0.1:1")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("export JAVA_HOME="))
+        .stderr(predicate::str::contains("java_home"));
+}
+
 /// The same install, the same flag, the other verb - and silence. `env
 /// --offline` is how the autoload hook runs, on every new shell and every
 /// `cd`; a warning there would print forever and train the user to ignore it.

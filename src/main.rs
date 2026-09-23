@@ -13,9 +13,7 @@ mod version;
 
 use crate::adoptium::AdoptiumClient;
 use crate::request::{Request, Stream};
-use crate::resolve::{
-    offline_java_home, requested_versions, resolve_java_home, resolve_java_version_from,
-};
+use crate::resolve::{Verb, requested_versions};
 use crate::shellenv::{parse_exec_args, restore_leading_separator, shell_quote, update_path};
 use crate::store::{InstalledJdk, JdkStore, RemoveError};
 use anyhow::{Context, anyhow};
@@ -79,9 +77,10 @@ impl From<RemoveError> for CommandError {
 
 /// The one place a command failure turns into a message and a non-zero exit
 /// status. Every `cmd_*` below hands its error back rather than ending the
-/// process; the only other `exit` calls left are the `exec` path, which cannot
-/// return because it has replaced the process image, and `ui`'s `print_lines`,
-/// which fails on the very stream it is writing the output to.
+/// process, including `exec`'s resolution: only `shellenv::exec_command`'s own
+/// launch failure - after the process image is already committed to - and
+/// `ui`'s `print_lines`, which fails on the very stream it is writing the
+/// output to, still call `exit` themselves.
 fn main() {
     if let Err(e) = run() {
         ui::error!("{:#}", e.error);
@@ -178,6 +177,15 @@ fn cmd_completions(shell: clap_complete::Shell) {
     let _ = std::io::stdout().write_all(&cli::completion_script(shell));
 }
 
+/// Nothing is written to stderr on success, even when the environment does
+/// change: the autoload hook calls this from `PROMPT_COMMAND`/`chpwd`, so any
+/// status line here would print on every new shell and every `cd`. Exporting a
+/// variable lasts only as long as the shell and is implied by the command the
+/// user ran - it is the install (a JDK on disk) that earns a line, not this.
+///
+/// `offline` is the whole of the "a `cd` must not start a download" rule, and
+/// deciding it in `resolve::java_home` rather than in `jlo-autoload.sh` keeps
+/// it decided once, in Rust, instead of once per shell dialect.
 fn cmd_env(
     client: &AdoptiumClient,
     version: Option<String>,
@@ -185,15 +193,15 @@ fn cmd_env(
     wrapped: bool,
 ) -> Result<(), CommandError> {
     let store = JdkStore::discover()?;
-    let resolved = resolve_java_version_from(version, &store, client, offline)?;
-    setup(client, &store, resolved.request, offline, wrapped)?;
+    let target = resolve::java_home(client, &store, version, offline, Verb::Env)?;
+    shellenv::emit(&export_lines(&store, &target.java_home)?, wrapped)?;
 
     // The exports on stdout are the whole effect of this command. If stdout is
     // a terminal nothing captured them, so the exit code says success while
     // nothing happened - the failure shape that sends a CI step, a Makefile
     // recipe or an agent looking for the problem somewhere else entirely.
     if std::io::stdout().is_terminal() {
-        ui::hint!("{}", ui::unsourced_env_hint(&resolved.request.to_string()));
+        ui::hint!("{}", ui::unsourced_env_hint(&target.request.to_string()));
     }
 
     Ok(())
@@ -205,20 +213,16 @@ fn cmd_home(
     offline: bool,
 ) -> Result<(), CommandError> {
     let store = JdkStore::discover()?;
-    let request = resolve_java_version_from(version, &store, client, offline)?.request;
-    let java_home = if offline {
-        offline_java_home(&store, request, "home")?
-    } else {
-        resolve_java_home(client, &store, request)?
-    };
+    let java_home = resolve::java_home(client, &store, version, offline, Verb::Home)?.java_home;
     // The bare path on stdout, for `$(jlo home 21)`. Lossy would hand the
     // caller a path that does not exist; see `path_str`.
     println!("{}", path_str(&java_home)?);
     Ok(())
 }
 
-/// Diverges on success: `run_exec` replaces the process image. The `Result` is
-/// for the argument errors that can still be reported the ordinary way.
+/// Diverges on success: `shellenv::exec_command` replaces the process image.
+/// The `Result` is for the argument and resolution errors that can still be
+/// reported the ordinary way, before that happens.
 fn cmd_exec(client: &AdoptiumClient, args: &[String]) -> Result<(), CommandError> {
     let args = restore_leading_separator(args);
 
@@ -247,40 +251,22 @@ fn cmd_exec(client: &AdoptiumClient, args: &[String]) -> Result<(), CommandError
         )
     })?;
 
-    // `-> !`, so this tail expression never produces the `Ok(())` its type
-    // says it does.
-    run_exec(client, version, &command);
-}
-
-/// Resolve the JDK (installing on demand) and replace the current process with
-/// the command. On non-Unix targets `exec` is unsupported, so bail out *before*
-/// downloading anything.
-#[cfg(unix)]
-fn run_exec(client: &AdoptiumClient, version: Option<String>, command: &[String]) -> ! {
-    // This function never returns, so it reports its own failures rather than
-    // handing them back to `main`.
     // No --offline flag on `exec`: the command's whole job is to run
     // something on that JDK, so declining to fetch it would only move the
     // failure. The cascade may therefore reach its last stage here.
-    let java_home = JdkStore::discover()
-        .and_then(|store| {
-            let resolved = resolve_java_version_from(version, &store, client, false)?;
-            resolve_java_home(client, &store, resolved.request)
-        })
-        .unwrap_or_else(|e| {
-            ui::error!("{e:#}");
-            exit(1);
-        });
-
-    shellenv::exec_command(&java_home, command);
-}
-
-// A real `execvp` is Unix-only. A native Windows build would replace this with a
-// spawn-and-wait fallback that propagates the child's exit code.
-#[cfg(not(unix))]
-fn run_exec(_client: &AdoptiumClient, _version: Option<String>, _command: &[String]) -> ! {
-    ui::error!("'jlo exec' is not supported on this platform");
-    exit(1);
+    #[cfg(unix)]
+    {
+        let store = JdkStore::discover()?;
+        let target = resolve::java_home(client, &store, version, false, Verb::Exec)?;
+        shellenv::exec_command(&target.java_home, &command)
+    }
+    // A real `execvp` is Unix-only. Refused here, after the arguments are
+    // checked and before anything is downloaded.
+    #[cfg(not(unix))]
+    {
+        let _ = (client, version, command);
+        Err(anyhow!("'jlo exec' is not supported on this platform").into())
+    }
 }
 
 /// Print the JDKs Adoptium offers for this machine, newest first, annotated
@@ -655,37 +641,6 @@ fn install_names(
         )
         .into());
     }
-    Ok(())
-}
-
-/// Emit the `export` lines for the requested version.
-///
-/// Nothing is written to stderr on this path, even when the environment does
-/// change: the autoload hook calls it from `PROMPT_COMMAND`/`chpwd`, so any
-/// status line here would print on every new shell and every `cd`. Exporting a
-/// variable lasts only as long as the shell and is implied by the command the
-/// user ran - it is the install (a JDK on disk) that earns a line, not this.
-///
-/// `offline` is the whole of the "a `cd` must not start a download" rule, and
-/// it lives here rather than in `jlo-autoload.sh` so it is decided once, in
-/// Rust, instead of once per shell dialect. When it declines, it declines
-/// before anything reaches stdout: the hook sources that stream, so a partial
-/// export would be worse than no export at all.
-fn setup(
-    client: &AdoptiumClient,
-    store: &JdkStore,
-    request: Request,
-    offline: bool,
-    wrapped: bool,
-) -> Result<(), CommandError> {
-    let java_home = if offline {
-        offline_java_home(store, request, "env")?
-    } else {
-        resolve_java_home(client, store, request)?
-    };
-
-    shellenv::emit(&export_lines(store, &java_home)?, wrapped)?;
-
     Ok(())
 }
 

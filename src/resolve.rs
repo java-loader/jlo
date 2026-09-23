@@ -13,7 +13,58 @@ use crate::store::{self, JdkStore};
 use crate::{CommandError, ui};
 use anyhow::{Context, anyhow};
 use std::collections::HashSet;
+use std::fmt;
 use std::path::{Path, PathBuf};
+
+/// The command asking, where the answer differs by who asked: the verb an
+/// offline miss tells the reader to re-run, and whether the legacy-layout
+/// warning may be printed at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Verb {
+    Env,
+    Home,
+    Exec,
+}
+
+impl fmt::Display for Verb {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Env => "env",
+            Self::Home => "home",
+            Self::Exec => "exec",
+        })
+    }
+}
+
+/// A resolved JDK: the version name the cascade settled on, and where that
+/// JDK lives.
+#[derive(Debug)]
+pub(crate) struct Target {
+    pub request: Request,
+    pub java_home: PathBuf,
+}
+
+/// The JDK `verb` runs against: the explicit version or the cascade's answer,
+/// then its java home - from the store alone when `offline`, installing on
+/// demand otherwise.
+///
+/// When `offline` declines, it declines before the caller has written
+/// anything to stdout, so `env` never emits a partial environment.
+pub(crate) fn java_home(
+    client: &AdoptiumClient,
+    store: &JdkStore,
+    explicit: Option<String>,
+    offline: bool,
+    verb: Verb,
+) -> Result<Target, CommandError> {
+    let request = resolve_java_version_from(explicit, store, client, offline)?.request;
+    let java_home = if offline {
+        offline_java_home(store, request, verb)?
+    } else {
+        resolve_java_home(client, store, request)?
+    };
+    Ok(Target { request, java_home })
+}
 
 /// Determine the requested version name: the explicit CLI argument if
 /// present, otherwise the fallback cascade below.
@@ -21,7 +72,7 @@ use std::path::{Path, PathBuf};
 /// Returns where the version came from as well as what it is, because
 /// `jlo current` reports it, and re-deriving it there
 /// would be a second spelling of the same walk.
-pub(crate) fn resolve_java_version_from(
+fn resolve_java_version_from(
     explicit: Option<String>,
     store: &JdkStore,
     client: &AdoptiumClient,
@@ -116,26 +167,26 @@ fn newest_installed(store: &JdkStore) -> Option<conf::Resolved> {
 /// exit status is the answer, so there is no distinct code for "not
 /// installed": 1, like every other failure here.
 ///
-/// `command` is the subcommand to name in the advice line, so `env` does not
+/// `verb` is the subcommand to name in the advice line, so `env` does not
 /// send the reader to `home` (and vice versa).
-pub(crate) fn offline_java_home(
+fn offline_java_home(
     store: &JdkStore,
     request: Request,
-    command: &str,
+    verb: Verb,
 ) -> Result<PathBuf, CommandError> {
     let java_home = store.find_matching(request).ok_or_else(|| {
         CommandError::with_hint(
             anyhow!("no installed JDK matches Java {request}"),
-            format!("Run 'jlo {command} {request}' without --offline to install it."),
+            format!("Run 'jlo {verb} {request}' without --offline to install it."),
         )
     })?;
 
     // `env --offline` is how the autoload hook runs, on every new shell and
-    // every `cd`, and ADR-0001 keeps that path silent - a line here would
-    // print forever. `home --offline` is a person asking a question and gets
-    // the warning. This is the only thing that tells the two apart, which is
-    // why `command` is threaded down here at all.
-    if command != "env" {
+    // every `cd`, so it stays silent - a line here would print forever.
+    // `home --offline` and `exec` are a person asking a question and get the
+    // warning. This is the only place that distinction exists, which is why
+    // `java_home` is its only caller.
+    if verb != Verb::Env {
         warn_legacy_layout(store, &java_home);
     }
 
@@ -202,7 +253,7 @@ pub(crate) fn requested_versions(
 /// Resolve the `JAVA_HOME` for the requested version name, installing the JDK on
 /// demand if it is not already present. Diagnostics go to stderr; this returns
 /// the path so callers decide what (if anything) to print to stdout.
-pub(crate) fn resolve_java_home(
+fn resolve_java_home(
     client: &AdoptiumClient,
     store: &JdkStore,
     request: Request,
@@ -244,9 +295,16 @@ mod tests {
     /// `env` must not send the reader to `home`: the advice line names the
     /// command they actually ran.
     #[test]
-    fn offline_java_home_names_the_calling_command_in_its_hint() {
+    fn java_home_offline_names_the_calling_command_in_its_hint() {
         let store = JdkStore::at(tempdir().unwrap().path());
-        let err = offline_java_home(&store, request("99"), "env").expect_err("the store is empty");
+        let err = java_home(
+            &offline_client(),
+            &store,
+            Some("99".into()),
+            true,
+            Verb::Env,
+        )
+        .expect_err("the store is empty");
         assert_eq!(
             format!("{:#}", err.error),
             "no installed JDK matches Java 99"
@@ -255,6 +313,71 @@ mod tests {
             err.hint.as_deref(),
             Some("Run 'jlo env 99' without --offline to install it.")
         );
+    }
+
+    #[test]
+    fn java_home_offline_answers_from_the_store() {
+        let dir = tempdir().unwrap();
+        let store = store_with(dir.path(), "21.0.3+9");
+
+        let target = java_home(
+            &offline_client(),
+            &store,
+            Some("21".into()),
+            true,
+            Verb::Home,
+        )
+        .expect("21 is installed");
+        assert_eq!(target.java_home, dir.path().join("21.0.3+9"));
+        assert_eq!(target.request, request("21"));
+    }
+
+    /// The exit status is the answer a script wants, and the hint has to name
+    /// the command that would actually install it - the whole point of the
+    /// flag is that this one did not.
+    #[test]
+    fn java_home_offline_fails_without_installing_anything() {
+        let dir = tempdir().unwrap();
+        let store = store_with(dir.path(), "21.0.3+9");
+
+        let err = java_home(
+            &offline_client(),
+            &store,
+            Some("17".into()),
+            true,
+            Verb::Home,
+        )
+        .expect_err("17 is not installed");
+        assert_eq!(
+            format!("{:#}", err.error),
+            "no installed JDK matches Java 17"
+        );
+        assert_eq!(
+            err.hint.as_deref(),
+            Some("Run 'jlo home 17' without --offline to install it.")
+        );
+        assert!(
+            !dir.path().join("17").exists(),
+            "--offline must not create anything"
+        );
+    }
+
+    /// Online, an installed JDK is answered before the client is used: the
+    /// client here points at a port nothing listens on.
+    #[test]
+    fn java_home_online_answers_an_installed_jdk_without_the_network() {
+        let dir = tempdir().unwrap();
+        let store = store_with(dir.path(), "21.0.3+9");
+
+        let target = java_home(
+            &offline_client(),
+            &store,
+            Some("21".into()),
+            false,
+            Verb::Exec,
+        )
+        .expect("21 is installed");
+        assert_eq!(target.java_home, dir.path().join("21.0.3+9"));
     }
 
     // -- cascade --
@@ -447,7 +570,7 @@ mod tests {
         assert_eq!(requested, HashSet::from([request("21")]));
     }
 
-    // -- offline_java_home --
+    // -- java_home --
     //
     // The install directory is not configurable, so `jlo home
     // --offline` is covered here against an injected `JdkStore` rather than
@@ -462,38 +585,5 @@ mod tests {
         std::fs::write(dir.join("bin").join("java"), "").unwrap();
         std::fs::File::create(dir.join(".jlo-managed")).unwrap();
         JdkStore::at(base)
-    }
-
-    #[test]
-    fn offline_java_home_answers_from_the_store() {
-        let dir = tempdir().unwrap();
-        let store = store_with(dir.path(), "21.0.3+9");
-
-        let path = offline_java_home(&store, request("21"), "home").expect("21 is installed");
-        assert_eq!(path, dir.path().join("21.0.3+9"));
-    }
-
-    /// The exit status is the answer a script wants, and the hint has to name
-    /// the command that would actually install it - the whole point of the
-    /// flag is that this one did not.
-    #[test]
-    fn offline_java_home_fails_without_installing_anything() {
-        let dir = tempdir().unwrap();
-        let store = store_with(dir.path(), "21.0.3+9");
-
-        let err =
-            offline_java_home(&store, request("17"), "home").expect_err("17 is not installed");
-        assert_eq!(
-            format!("{:#}", err.error),
-            "no installed JDK matches Java 17"
-        );
-        assert_eq!(
-            err.hint.as_deref(),
-            Some("Run 'jlo home 17' without --offline to install it.")
-        );
-        assert!(
-            !dir.path().join("17").exists(),
-            "--offline must not create anything"
-        );
     }
 }
