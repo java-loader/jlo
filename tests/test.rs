@@ -1039,6 +1039,135 @@ fn update_leaves_a_shell_on_another_jdk_alone() {
     );
 }
 
+/// A `200 []` for the latest build of `major` - Adoptium's answer for a name
+/// it has no build of on this platform.
+fn not_offered_mock(server: &mut mockito::ServerGuard, major: &str) -> mockito::Mock {
+    server
+        .mock(
+            "GET",
+            mockito::Matcher::Regex(format!(r"^/v3/assets/latest/{major}/hotspot")),
+        )
+        .match_query(mockito::Matcher::Any)
+        .with_body("[]")
+        .create()
+}
+
+/// Names are processed sorted, so on Apple silicon `jlo install 8 21` used to
+/// stop at 8 and install nothing. A name Adoptium does not offer is skipped
+/// with a warning, and the ones after it still go.
+#[test]
+fn a_name_adoptium_does_not_offer_is_skipped_not_a_stop() {
+    let mut server = mockito::Server::new();
+    let _no_8 = not_offered_mock(&mut server, "8");
+    let asked_21 = server
+        .mock(
+            "GET",
+            mockito::Matcher::Regex(r"^/v3/assets/latest/21/hotspot".to_string()),
+        )
+        .match_query(mockito::Matcher::Any)
+        .with_body(include_str!("fixtures/assets_latest.json"))
+        .create();
+
+    let home = tempfile::tempdir().unwrap();
+    install_fake_jdk(home.path(), "21.0.11+10.0.LTS");
+
+    Command::cargo_bin("jlo-bin")
+        .unwrap()
+        .args(["install", "8", "21"])
+        .env("HOME", home.path())
+        .env("JLO_ADOPTIUM_API_URL", server.url())
+        .env_remove("JAVA_HOME")
+        .assert()
+        .success()
+        .code(0)
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains(
+            "skipping '8': Adoptium offers no build",
+        ))
+        .stderr(predicate::str::contains("Run 'jlo list'"))
+        .stderr(predicate::str::contains("21.0.11+10.0.LTS"));
+    asked_21.assert();
+}
+
+/// Skipping is for getting on with the rest. With no rest, a command told to
+/// install something must not exit 0 having installed nothing - and it names
+/// every name in one error rather than a warning per name above it.
+#[test]
+fn only_names_adoptium_does_not_offer_is_an_error() {
+    let mut server = mockito::Server::new();
+    let _no_8 = not_offered_mock(&mut server, "8");
+    let _no_30 = not_offered_mock(&mut server, "30");
+
+    let home = tempfile::tempdir().unwrap();
+
+    Command::cargo_bin("jlo-bin")
+        .unwrap()
+        .args(["install", "8", "30"])
+        .env("HOME", home.path())
+        .env("JLO_ADOPTIUM_API_URL", server.url())
+        .env_remove("JAVA_HOME")
+        .assert()
+        .failure()
+        .code(1)
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains(
+            "Adoptium offers no build of '8' or '30' for",
+        ))
+        .stderr(predicate::str::contains("Run 'jlo list'"))
+        .stderr(predicate::str::contains("skipping").not());
+}
+
+/// A lookup that fails says nothing about the name, so it stops the run -
+/// and every name is looked up first, so it stops before 17, which sorts
+/// ahead of the failing 21, is downloaded or has its old build replaced.
+#[test]
+fn a_failed_lookup_stops_the_run_before_anything_changes() {
+    let mut server = mockito::Server::new();
+    let _offers_17 = server
+        .mock(
+            "GET",
+            mockito::Matcher::Regex(r"^/v3/assets/latest/17/hotspot".to_string()),
+        )
+        .match_query(mockito::Matcher::Any)
+        .with_body(format!(
+            r#"[{{"version":{{"semver":"17.0.9+10"}},"binary":{{"package":{{"name":"jdk.tar.gz","link":"{}/jdk.tar.gz","checksum":"00"}}}}}}]"#,
+            server.url()
+        ))
+        .create();
+    let _fails_21 = server
+        .mock(
+            "GET",
+            mockito::Matcher::Regex(r"^/v3/assets/latest/21/hotspot".to_string()),
+        )
+        .match_query(mockito::Matcher::Any)
+        .with_status(500)
+        .create();
+    let download = server.mock("GET", "/jdk.tar.gz").expect(0).create();
+
+    let home = tempfile::tempdir().unwrap();
+    install_fake_jdk(home.path(), "17.0.5+8");
+    install_fake_jdk(home.path(), "21.0.5+11");
+    let store = jdk_store_in(home.path());
+
+    Command::cargo_bin("jlo-bin")
+        .unwrap()
+        .arg("update")
+        .env("HOME", home.path())
+        .env("JLO_ADOPTIUM_API_URL", server.url())
+        .env_remove("JAVA_HOME")
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains("HTTP 500"));
+
+    download.assert();
+    assert!(store.join("17.0.5+8").exists(), "nothing may be replaced");
+    assert!(
+        !store.join("17.0.9+10").exists(),
+        "nothing may be installed"
+    );
+}
+
 #[test]
 fn init_uses_latest_version_from_api() {
     let mut server = mockito::Server::new();

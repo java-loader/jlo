@@ -630,7 +630,7 @@ fn install_names(
     ui::update_report(&run, !std::io::stdout().is_terminal());
 
     if let Some(e) = run.error {
-        return Err(e.into());
+        return Err(e);
     }
     let failures = run.failures.len();
     if failures > 0 {

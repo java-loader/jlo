@@ -1,9 +1,10 @@
+use crate::CommandError;
 use crate::adoptium::{AdoptiumClient, JdkMetadata};
 use crate::extract;
 use crate::request::{Request, Stream};
 use crate::ui::{self, InstallUi};
 use crate::version::compare;
-use anyhow::{Context, bail};
+use anyhow::{Context, anyhow, bail};
 use std::cmp::Ordering;
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
@@ -813,9 +814,11 @@ pub(crate) struct InstallRun {
     /// The java home of the new build, when the build `$JAVA_HOME` pointed
     /// at was among those deleted - the shell has to follow it there.
     pub(crate) repointed: Option<PathBuf>,
-    /// The download or install that stopped the run; the names after it
-    /// were not attempted.
-    pub(crate) error: Option<anyhow::Error>,
+    /// What stopped the run: a lookup that failed, which stops it before
+    /// anything is downloaded; no name left that Adoptium offers; or a
+    /// download or install, after which the names that follow were not
+    /// attempted.
+    pub(crate) error: Option<CommandError>,
 }
 
 impl InstallRun {
@@ -847,14 +850,22 @@ pub(crate) fn install_each(
     requests.sort_unstable();
 
     let mut run = InstallRun::default();
+    let offered = match resolve_offered(client, &requests) {
+        Ok(offered) => offered,
+        Err(e) => {
+            run.error = Some(e);
+            return run;
+        }
+    };
+
     let mut installed_any = false;
-    for &request in &requests {
-        let installed = match update(client, store, request) {
+    for (request, metadata) in offered {
+        let installed = match install_latest(client, store, request, metadata) {
             Ok(installed) => installed,
             Err(e) => {
                 // Stop, as a failed download always has - but keep what the
                 // names before it did, which may include a deletion.
-                run.error = Some(e);
+                run.error = Some(e.into());
                 break;
             }
         };
@@ -921,15 +932,58 @@ fn count_superseded(store: &JdkStore) -> usize {
     store.superseded_count().unwrap_or(0)
 }
 
+/// The first phase of [`install_each`]: what Adoptium offers for every name,
+/// asked before anything is downloaded or deleted.
+///
+/// A name it does not offer is skipped with a warning, the rule `remove` and
+/// `requested_versions` already follow: it cannot be acted on, so stopping
+/// the others on its account protects nothing - and names are processed
+/// sorted, so `jlo install 8 21` on Apple silicon would otherwise install
+/// nothing. It is an error only when it leaves nothing at all, and then the
+/// store is untouched.
+///
+/// A lookup that *fails* - network, HTTP, a response that does not parse -
+/// is different: it says nothing about the name, so it stops the run, and
+/// asking every name first is what lets it stop before anything changed.
+/// No extra request either way: this is the lookup the download needs.
+fn resolve_offered(
+    client: &AdoptiumClient,
+    requests: &[Request],
+) -> Result<Vec<(Request, JdkMetadata)>, CommandError> {
+    let mut offered = Vec::new();
+    let mut not_offered = Vec::new();
+    for &request in requests {
+        match client.fetch_metadata(request)? {
+            Some(metadata) => offered.push((request, metadata)),
+            None => not_offered.push(request),
+        }
+    }
+
+    if offered.is_empty() {
+        return Err(CommandError::with_hint(
+            anyhow!("{}", ui::not_offered(&not_offered)),
+            ui::NOT_OFFERED_HINT,
+        ));
+    }
+    // Said only when something is left to do: with nothing left, the error
+    // above names every skipped name in one line instead.
+    for &request in &not_offered {
+        ui::skipping_not_offered(request);
+    }
+    if !not_offered.is_empty() {
+        ui::hint!("{}", ui::NOT_OFFERED_HINT);
+    }
+    Ok(offered)
+}
+
 /// The version and java home of the build installed, or `None` when the name
 /// was already current - so the caller can tell a real update from a no-op.
-fn update(
+fn install_latest(
     client: &AdoptiumClient,
     store: &JdkStore,
     request: Request,
+    jdk_metadata: JdkMetadata,
 ) -> anyhow::Result<Option<(String, PathBuf)>> {
-    let jdk_metadata = client.fetch_metadata(request)?;
-
     if store.find_exact(&jdk_metadata).is_some() {
         ui::up_to_date(&request.to_string(), &jdk_metadata.semver);
         Ok(None)

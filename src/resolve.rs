@@ -211,7 +211,9 @@ pub(crate) fn resolve_java_home(
         warn_legacy_layout(store, &path);
         Ok(path)
     } else {
-        let metadata = client.fetch_metadata(request)?;
+        let metadata = client
+            .fetch_metadata(request)?
+            .ok_or_else(|| anyhow!("{}", ui::not_offered(&[request])))?;
         store::install_jdk(client, store, &metadata)
     }
 }

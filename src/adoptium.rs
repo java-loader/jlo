@@ -179,25 +179,26 @@ impl AdoptiumClient {
         }
     }
 
-    pub(crate) fn fetch_metadata(&self, request: Request) -> anyhow::Result<JdkMetadata> {
+    /// The newest build of `request` for this OS and architecture, or `None`
+    /// when Adoptium offers none.
+    ///
+    /// "Not offered" is a value, not an error: Adoptium answers it with `200`
+    /// and an empty array, and it is a fact about the name - no JDK 8 for
+    /// macOS on Apple silicon - that a caller handling several names skips
+    /// past, where a network or HTTP failure is one it has to stop at.
+    pub(crate) fn fetch_metadata(&self, request: Request) -> anyhow::Result<Option<JdkMetadata>> {
         match request.stream {
             Stream::Ga => {
                 let api_url = self.latest_asset_url(&request.major.to_string())?;
-                let asset = self.fetch_latest_asset(&api_url)?.with_context(|| {
-                    format!(
-                        "No matching JDK found for the specified version and system architecture.\nTried to fetch metadata from: {api_url}"
-                    )
-                })?;
-                asset.try_into()
+                self.fetch_latest_asset(&api_url)?
+                    .map(JdkMetadata::try_from)
+                    .transpose()
             }
             Stream::Ea => {
                 let api_url = self.ea_release_url(request.major)?;
-                let release = self.fetch_first_release(&api_url)?.with_context(|| {
-                    format!(
-                        "Adoptium offers no {request} build for this OS and architecture.\nTried to fetch metadata from: {api_url}"
-                    )
-                })?;
-                release.try_into()
+                self.fetch_first_release(&api_url)?
+                    .map(JdkMetadata::try_from)
+                    .transpose()
             }
         }
     }
@@ -426,6 +427,17 @@ impl AdoptiumClient {
     }
 }
 
+/// This machine as Adoptium names it - `mac/aarch64` - for the messages that
+/// say a build is not offered here. Falls back to Rust's own names for a
+/// platform Adoptium has no name for, which no request can have reached.
+pub(crate) fn platform() -> String {
+    format!(
+        "{}/{}",
+        jdk_os().unwrap_or(env::consts::OS),
+        jdk_arch().unwrap_or(env::consts::ARCH)
+    )
+}
+
 fn jdk_os() -> anyhow::Result<&'static str> {
     match env::consts::OS {
         "linux" | "windows" | "solaris" | "aix" => Ok(env::consts::OS),
@@ -574,7 +586,8 @@ mod client_tests {
                 major: 21,
                 stream: Stream::Ga,
             })
-            .unwrap();
+            .unwrap()
+            .expect("the fixture offers a build");
 
         assert_eq!(metadata.semver, "21.0.11+10.0.LTS");
         assert_eq!(
@@ -627,23 +640,23 @@ mod client_tests {
         );
     }
 
+    /// `200 []` is how Adoptium says it has no build of a name for this
+    /// platform - JDK 8 on Apple silicon. A value rather than an error, so a
+    /// run over several names can skip it and stop only at a real failure.
     #[test]
-    fn fetch_metadata_empty_array_means_no_matching_jdk() {
+    fn fetch_metadata_empty_array_means_not_offered() {
         let mut server = mockito::Server::new();
         let _m = metadata_mock(&mut server, 200, "[]");
 
         let client = AdoptiumClient::new(server.url());
-        let err = client
+        let metadata = client
             .fetch_metadata(Request {
                 major: 21,
                 stream: Stream::Ga,
             })
-            .unwrap_err();
+            .expect("an empty array is not a failure");
 
-        assert!(
-            format!("{err:#}").contains("No matching JDK found"),
-            "got: {err:#}"
-        );
+        assert!(metadata.is_none(), "{metadata:?}");
     }
 
     #[test]
@@ -1000,7 +1013,8 @@ mod client_tests {
                 major: 28,
                 stream: Stream::Ea,
             })
-            .expect("the EA fixture is a complete release");
+            .expect("the EA fixture is a complete release")
+            .expect("the EA fixture offers a build");
 
         mock.assert();
         assert!(
@@ -1040,7 +1054,7 @@ mod client_tests {
     /// build for this major on this OS/arch. Saying so beats a silent GA
     /// substitution, which would hand back a different JDK than was asked for.
     #[test]
-    fn an_empty_ea_stream_is_an_error_naming_the_request() {
+    fn an_empty_ea_stream_is_not_offered_rather_than_the_ga_build() {
         let mut server = mockito::Server::new();
         let _mock = server
             .mock(
@@ -1051,17 +1065,15 @@ mod client_tests {
             .with_body("[]")
             .create();
 
+        // Only the EA endpoint is mocked, so a fallback to the GA one would
+        // come back as an error rather than as `None`.
         let client = AdoptiumClient::new(server.url());
-        let error = client
+        let metadata = client
             .fetch_metadata(Request {
                 major: 11,
                 stream: Stream::Ea,
             })
-            .expect_err("no EA build means no metadata");
-        let message = format!("{error:#}");
-        assert!(
-            message.contains("11-ea"),
-            "should name the request: {message}"
-        );
+            .expect("an empty stream is not a failure");
+        assert!(metadata.is_none(), "{metadata:?}");
     }
 }

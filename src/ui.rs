@@ -162,6 +162,33 @@ pub(crate) fn up_to_date(name: &str, version: &str) {
     );
 }
 
+/// That Adoptium offers no build of any of `requests` for this machine - the
+/// error when nothing else is left to do. Names the platform because that is
+/// the half of the fact the user may not know: Adoptium does publish JDK 8,
+/// just not for macOS on Apple silicon.
+pub(crate) fn not_offered(requests: &[crate::request::Request]) -> String {
+    let names: Vec<String> = requests.iter().map(ToString::to_string).collect();
+    format!(
+        "Adoptium offers no build of {} for {}",
+        crate::store::quoted_list(&names),
+        crate::adoptium::platform()
+    )
+}
+
+/// A name `install`/`update` passes over because Adoptium offers no build of
+/// it here, while other names still go ahead. Worded like the warning for a
+/// version that does not parse, which is skipped the same way.
+pub(crate) fn skipping_not_offered(request: crate::request::Request) {
+    warning!(
+        "skipping '{request}': Adoptium offers no build of it for {}",
+        crate::adoptium::platform()
+    );
+}
+
+/// The advice under a name Adoptium does not offer: the listing is what it
+/// does offer for this machine.
+pub(crate) const NOT_OFFERED_HINT: &str = "Run 'jlo list' to see what is available.";
+
 /// What a new build replaced, printed under its install summary.
 ///
 /// A pre-release says so. Its stream publishes weekly and a bare `jlo update`
