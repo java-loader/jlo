@@ -1009,8 +1009,7 @@ fn name_row(
         return None;
     }
     // Stable, so two spellings of one version keep the store's order.
-    builds
-        .sort_by(|a, b| crate::version::compare(&b.version, &a.version).unwrap_or(Ordering::Equal));
+    builds.sort_by(|a, b| crate::version::cmp_desc(&a.version, &b.version));
 
     // LATEST and `update` answer different questions. LATEST is anything
     // Adoptium offers that is not already on disk, so a catalogue that sits

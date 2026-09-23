@@ -48,6 +48,12 @@ pub(crate) fn compare(a: &str, b: &str) -> Result<Ordering> {
     Ok(parse(a)?.cmp(&parse(b)?))
 }
 
+/// [`compare`] reversed, for sorting newest first. A name that is not semver
+/// compares equal, so a stable sort leaves it where it was.
+pub(crate) fn cmp_desc(a: &str, b: &str) -> Ordering {
+    compare(b, a).unwrap_or(Ordering::Equal)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

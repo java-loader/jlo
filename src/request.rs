@@ -22,7 +22,7 @@ const EA_SUFFIX: &str = "-ea";
 
 /// The oldest major J'Lo will address. Adoptium offers 8 and up, and the floor
 /// is also what keeps a prefix match from making `1` select `17`.
-const OLDEST_MAJOR: i64 = 8;
+pub(crate) const OLDEST_MAJOR: i64 = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum Stream {

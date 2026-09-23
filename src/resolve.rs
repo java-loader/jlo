@@ -236,8 +236,8 @@ fn offline_java_home(
 /// later cannot forget it. Only ever a warning: the install works, and the fix
 /// costs a download, so it is the user's to make.
 fn warn_legacy_layout(store: &JdkStore, java_home: &Path) {
-    if let Some((version, request)) = store.legacy_layout(java_home) {
-        ui::legacy_layout(&version, request);
+    if let Some(jdk) = store.legacy_layout(java_home) {
+        ui::legacy_layout(&jdk.version, jdk.request());
     }
 }
 

@@ -1,9 +1,9 @@
 use crate::CommandError;
 use crate::adoptium::{AdoptiumClient, JdkMetadata};
 use crate::extract;
-use crate::request::{Request, Stream};
+use crate::request::{OLDEST_MAJOR, Request, Stream};
 use crate::ui::{self, InstallUi};
-use crate::version::compare;
+use crate::version::{cmp_desc, compare};
 use anyhow::{Context, anyhow, bail};
 use std::cmp::Ordering;
 use std::collections::hash_map::Entry;
@@ -212,7 +212,7 @@ impl InstalledJdk {
 pub(crate) fn supersedes_every_install(offered: &str, builds: &[&InstalledJdk]) -> bool {
     builds
         .iter()
-        .all(|jdk| compare(offered, &jdk.version).is_ok_and(Ordering::is_gt))
+        .all(|jdk| is_older_than(&jdk.version, offered))
 }
 
 /// The install cascade stage 3 picks: the newest *released* build at or above
@@ -230,7 +230,7 @@ pub(crate) fn supersedes_every_install(offered: &str, builds: &[&InstalledJdk]) 
 pub(crate) fn newest_ga(installed: &[InstalledJdk]) -> Option<&InstalledJdk> {
     installed
         .iter()
-        .find(|jdk| jdk.stream == Stream::Ga && Request::parse(&jdk.major.to_string()).is_ok())
+        .find(|jdk| jdk.stream == Stream::Ga && jdk.major >= OLDEST_MAJOR)
 }
 
 /// One directory found in the store, with everything a single walk can say
@@ -300,7 +300,7 @@ impl JdkStore {
                 })
             })
             .collect();
-        installed.sort_by(|a, b| compare(&b.version, &a.version).unwrap_or(Ordering::Equal));
+        installed.sort_by(|a, b| cmp_desc(&a.version, &b.version));
         Ok(installed)
     }
 
@@ -355,12 +355,13 @@ impl JdkStore {
     /// excluded deliberately - jlo did not put them there and cannot offer
     /// `jlo remove` as the fix, and README already says the bundle is the
     /// better shape to drop in by hand.
-    /// Returns the version and its name, the name being what `jlo install`
-    /// takes in the advice line - read off the install rather than reparsed
-    /// from the directory name, which has already been parsed once to get
-    /// here. The whole name, not the major: under a flat early-access install
-    /// a major-only hint would advise installing the released stream.
-    pub(crate) fn legacy_layout(&self, java_home: &Path) -> Option<(String, Request)> {
+    ///
+    /// Returns the install, whose name is what `jlo install` takes in the
+    /// advice line - read off the install rather than reparsed from the
+    /// directory name, which has already been parsed once to get here. The
+    /// whole name, not the major: under a flat early-access install a
+    /// major-only hint would advise installing the released stream.
+    pub(crate) fn legacy_layout(&self, java_home: &Path) -> Option<InstalledJdk> {
         if env::consts::OS != "macos" || java_home.parent() != Some(self.base.as_path()) {
             return None;
         }
@@ -370,10 +371,6 @@ impl JdkStore {
             .ok()?
             .into_iter()
             .find(|jdk| jdk.version == name && jdk.managed)
-            .map(|jdk| {
-                let request = jdk.request();
-                (jdk.version, request)
-            })
     }
 
     /// The name of the newest *released* JDK in the store, or `None` when
@@ -868,8 +865,8 @@ pub(crate) fn install_each(
 
     // Only when a pre-release name is in play, and then once for the whole
     // run: it is one document, the same for every major. A failed lookup is
-    // swallowed for the reason `count_superseded` swallows its own - a note is
-    // not worth failing an otherwise successful command over.
+    // swallowed, as the superseded count below is - a note is not worth
+    // failing an otherwise successful command over.
     if requests.iter().any(|request| request.is_ea()) {
         let released = client.released_majors().unwrap_or_default();
         ui::announce_released_ea(&requests, &released);
@@ -877,9 +874,12 @@ pub(crate) fn install_each(
 
     // Every name this run moved has had its superseded builds deleted, so
     // what is counted here are leftovers from before this run, or builds a
-    // deletion failed on. A kept live build has a hint of its own.
+    // deletion failed on. A kept live build has a hint of its own. A hint is
+    // not worth failing an otherwise successful run, so an unreadable JDK
+    // directory just means no hint.
     if run.kept_active.is_none()
-        && let Some(hint) = ui::superseded_hint(!installed.is_empty(), count_superseded(store))
+        && let Some(hint) =
+            ui::superseded_hint(!installed.is_empty(), store.superseded_count().unwrap_or(0))
     {
         ui::hint!("{hint}");
     }
@@ -912,13 +912,6 @@ fn replace(
         run.replaced.push((request, removed));
     }
     run.failures.extend(failures);
-}
-
-/// How many installs `jlo remove --superseded` would remove, or 0 if that
-/// cannot be determined. A hint is not worth failing an otherwise successful
-/// run, so an unreadable JDK directory just means no hint.
-fn count_superseded(store: &JdkStore) -> usize {
-    store.superseded_count().unwrap_or(0)
 }
 
 /// The first phase of [`install_each`]: what Adoptium offers for every name,
@@ -990,7 +983,7 @@ fn install_latest(
     match builds.first() {
         // `list` is newest first.
         Some(newest) if !supersedes_every_install(&jdk_metadata.semver, &builds) => {
-            let older = compare(&jdk_metadata.semver, &newest.version).is_ok_and(Ordering::is_lt);
+            let older = is_older_than(&jdk_metadata.semver, &newest.version);
             ui::up_to_date(
                 &request.to_string(),
                 &newest.version,
@@ -1060,8 +1053,7 @@ fn install_jdk_inner(
 /// different one routinely: every distribution that mounts `/tmp` as tmpfs
 /// (Fedora, Arch, Debian 13) turns every install into an `EXDEV` failure
 /// raised after the whole archive has been downloaded and unpacked.
-/// `install.rs::write_atomic` stages beside its target for exactly this
-/// reason; the store had never been given the same treatment.
+/// `install.rs::write_atomic` stages beside its target for the same reason.
 ///
 /// A sibling of the installs, and one `scan` passes over: its name does not
 /// parse as a version, so an interrupted install leaves a `.tmpXXXXXX` the
@@ -1127,22 +1119,24 @@ fn base_dir_for(os: &str, home: &Path) -> PathBuf {
     }
 }
 
-/// Whether `version` is superseded by `newest`, the build of its name that
-/// [`JdkStore::prune`] keeps. The single definition behind both `prune` and
-/// [`JdkStore::superseded_count`], so the hint that offers the deletion and
-/// the deletion itself can never disagree about how many there are.
-///
-/// A name that does not parse never reaches here: both callers filter on the
-/// parsed name first.
+/// Whether `version` is strictly older than `newest`. The single definition
+/// behind every "superseded" decision - [`JdkStore::prune`],
+/// [`JdkStore::superseded_count`], the builds `install`/`update` replace,
+/// [`supersedes_every_install`] and `install_latest`'s "the offer is behind
+/// the store" - so the hint that offers a deletion, the listing and the
+/// deletion itself can never disagree. Two spellings of one version compare
+/// equal, so neither is older; a name that does not parse is never older,
+/// and nothing is older than it.
 fn is_older_than(version: &str, newest: &str) -> bool {
     compare(version, newest).is_ok_and(Ordering::is_lt)
 }
 
 fn sort_by_semver_desc(candidates: &mut [Candidate]) {
     candidates.sort_by(|a, b| {
-        let a_str = a.name.as_deref().unwrap_or("");
-        let b_str = b.name.as_deref().unwrap_or("");
-        compare(b_str, a_str).unwrap_or(Ordering::Equal)
+        cmp_desc(
+            a.name.as_deref().unwrap_or(""),
+            b.name.as_deref().unwrap_or(""),
+        )
     });
 }
 
@@ -1418,7 +1412,9 @@ mod tests {
         create_jdk_dir(dir.path(), "21.0.3+9", true);
         let store = JdkStore::at(dir.path());
 
-        let verdict = store.legacy_layout(&dir.path().join("21.0.3+9"));
+        let verdict = store
+            .legacy_layout(&dir.path().join("21.0.3+9"))
+            .map(|jdk| (jdk.version.clone(), jdk.request()));
 
         if cfg!(target_os = "macos") {
             assert_eq!(verdict, Some(("21.0.3+9".to_string(), request("21"))));
@@ -1436,7 +1432,7 @@ mod tests {
         create_jdk_dir(dir.path(), "21.0.3+9", false);
 
         let verdict = JdkStore::at(dir.path()).legacy_layout(&dir.path().join("21.0.3+9"));
-        assert_eq!(verdict, None);
+        assert!(verdict.is_none());
     }
 
     /// A bundle is the current layout, so it is never the thing being warned
@@ -1447,7 +1443,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let java_home = create_bundle_jdk_dir(dir.path(), "21.0.3+9", true);
 
-        assert_eq!(JdkStore::at(dir.path()).legacy_layout(&java_home), None);
+        assert!(JdkStore::at(dir.path()).legacy_layout(&java_home).is_none());
     }
 
     // -- the two marker spellings --
@@ -1792,8 +1788,8 @@ mod tests {
         assert_eq!(JdkStore::at(dir.path()).newest_ga_request(), None);
     }
 
-    /// The floor the old `newest_installed` filter applied, now inside the
-    /// selector so `jlo current` cannot answer differently from the cascade.
+    /// The version floor sits inside the selector, so `jlo current` cannot
+    /// answer differently from the cascade.
     #[test]
     fn newest_ga_request_skips_a_store_below_the_floor() {
         let dir = tempdir().unwrap();
@@ -1925,7 +1921,7 @@ mod tests {
     // -- superseded_count --
 
     #[test]
-    fn superseded_count_counts_all_but_newest_per_major() {
+    fn superseded_count_counts_all_but_newest_per_name() {
         let dir = tempdir().unwrap();
         create_jdk_dir(dir.path(), "21.0.1+12", true);
         create_jdk_dir(dir.path(), "21.0.3+9", true);
@@ -2057,7 +2053,7 @@ mod tests {
 
         JdkStore::at(dir.path()).prune(None).unwrap();
 
-        // 21.0.3+9 kept, 21.0.1+12 removed, 17.0.2+8 kept (only version for major 17)
+        // 21.0.3+9 kept, 21.0.1+12 removed, 17.0.2+8 kept (only build of the name 17)
         assert!(dir.path().join("21.0.3+9").exists());
         assert!(!dir.path().join("21.0.1+12").exists());
         assert!(dir.path().join("17.0.2+8").exists());

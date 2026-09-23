@@ -1,10 +1,9 @@
 use crate::request::{Request, Stream};
 use crate::ui::InstallUi;
-use crate::version::compare;
+use crate::version::cmp_desc;
 use anyhow::{Context, bail};
 use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
-use std::cmp::Ordering;
 use std::env;
 use std::fs::File;
 use std::io::{Read, Write};
@@ -368,7 +367,7 @@ impl AdoptiumClient {
             }
         }
 
-        jdks.sort_by(|a, b| compare(&b.version, &a.version).unwrap_or(Ordering::Equal));
+        jdks.sort_by(|a, b| cmp_desc(&a.version, &b.version));
         Ok(Catalogue {
             jdks,
             released_majors: releases.available_releases,
