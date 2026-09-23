@@ -2,6 +2,7 @@ use crate::request::{Request, Stream};
 use crate::ui::InstallUi;
 use crate::version::compare;
 use anyhow::{Context, bail};
+use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
 use std::env;
@@ -157,6 +158,15 @@ struct Release {
     binaries: Vec<AssetBinary>,
 }
 
+impl From<Asset> for Release {
+    fn from(asset: Asset) -> Self {
+        Release {
+            version_data: asset.version,
+            binaries: vec![asset.binary],
+        }
+    }
+}
+
 impl TryFrom<Release> for JdkMetadata {
     type Error = anyhow::Error;
 
@@ -259,20 +269,27 @@ impl AdoptiumClient {
     /// macOS on Apple silicon - that a caller handling several names skips
     /// past, where a network or HTTP failure is one it has to stop at.
     pub(crate) fn fetch_metadata(&self, request: Request) -> anyhow::Result<Option<JdkMetadata>> {
-        match request.stream {
+        self.fetch_newest(request)?
+            .map(JdkMetadata::try_from)
+            .transpose()
+    }
+
+    /// The newest build of `request`, in release shape whichever endpoint
+    /// answered: the GA endpoint's asset is a release with its one binary.
+    /// Both endpoints answer "nothing on offer" with `200` and an empty array.
+    fn fetch_newest(&self, request: Request) -> anyhow::Result<Option<Release>> {
+        Ok(match request.stream {
             Stream::Ga => {
-                let api_url = self.latest_asset_url(&request.major.to_string())?;
-                self.fetch_latest_asset(&api_url)?
-                    .map(JdkMetadata::try_from)
-                    .transpose()
+                let url = self.latest_asset_url(&request.major.to_string())?;
+                let assets: Vec<Asset> = self.get_json(&url, "metadata")?;
+                assets.into_iter().next().map(Release::from)
             }
             Stream::Ea => {
-                let api_url = self.ea_release_url(request.major)?;
-                self.fetch_first_release(&api_url)?
-                    .map(JdkMetadata::try_from)
-                    .transpose()
+                let url = self.ea_release_url(request.major)?;
+                let releases: Vec<Release> = self.get_json(&url, "metadata")?;
+                releases.into_iter().next()
             }
-        }
+        })
     }
 
     /// `sort_order=DESC` with `page_size=1` asks the API for the newest
@@ -287,31 +304,6 @@ impl AdoptiumClient {
         ))
     }
 
-    /// Like [`Self::fetch_latest_asset`], for the release-shaped endpoint. An
-    /// empty array is a `200` here too, and means the same thing: nothing on
-    /// offer.
-    fn fetch_first_release(&self, api_url: &str) -> anyhow::Result<Option<Release>> {
-        let mut response = self
-            .agent
-            .get(api_url)
-            .call()
-            .context("could not fetch metadata from the Adoptium API")?;
-
-        if !response.status().is_success() {
-            bail!(
-                "Failed to fetch metadata from API: HTTP {}",
-                response.status()
-            );
-        }
-
-        let releases: Vec<Release> = response
-            .body_mut()
-            .read_json()
-            .context("could not parse the Adoptium API response")?;
-
-        Ok(releases.into_iter().next())
-    }
-
     fn latest_asset_url(&self, java_version: &str) -> anyhow::Result<String> {
         Ok(format!(
             "{base_url}/v3/assets/latest/{java_version}/hotspot?architecture={arch}&image_type=jdk&os={os}&vendor=eclipse",
@@ -319,31 +311,6 @@ impl AdoptiumClient {
             arch = jdk_arch()?,
             os = jdk_os()?
         ))
-    }
-
-    /// Fetch the newest asset for a major version, or `None` when Adoptium has
-    /// no build for this OS/architecture. That case is *not* an HTTP error: the
-    /// API answers `200` with an empty array.
-    fn fetch_latest_asset(&self, api_url: &str) -> anyhow::Result<Option<Asset>> {
-        let mut response = self
-            .agent
-            .get(api_url)
-            .call()
-            .context("could not fetch metadata from the Adoptium API")?;
-
-        if !response.status().is_success() {
-            bail!(
-                "Failed to fetch metadata from API: HTTP {}",
-                response.status()
-            );
-        }
-
-        let assets: Vec<Asset> = response
-            .body_mut()
-            .read_json()
-            .context("could not parse the Adoptium API response")?;
-
-        Ok(assets.into_iter().next())
     }
 
     /// Every JDK Adoptium can install on this machine, newest first: the
@@ -408,31 +375,33 @@ impl AdoptiumClient {
         })
     }
 
+    /// Only the version: a pre-release with no binary for this platform still
+    /// has one to list, where [`Self::fetch_metadata`] would refuse it.
     fn latest_version(&self, name: Request) -> anyhow::Result<Option<String>> {
-        Ok(match name.stream {
-            Stream::Ga => {
-                let api_url = self.latest_asset_url(&name.major.to_string())?;
-                self.fetch_latest_asset(&api_url)?
-                    .map(|asset| asset.version.semver)
-            }
-            Stream::Ea => {
-                let api_url = self.ea_release_url(name.major)?;
-                self.fetch_first_release(&api_url)?
-                    .map(|release| release.version_data.semver)
-            }
-        })
+        Ok(self
+            .fetch_newest(name)?
+            .map(|release| release.version_data.semver))
     }
 
     fn fetch_available_releases(&self) -> anyhow::Result<ReleaseInfo> {
+        self.get_json(
+            &format!("{}/v3/info/available_releases", self.base_url),
+            "available releases",
+        )
+    }
+
+    /// GET `url` and parse the JSON body. `what` names the document in the
+    /// failure messages.
+    fn get_json<T: DeserializeOwned>(&self, url: &str, what: &str) -> anyhow::Result<T> {
         let mut response = self
             .agent
-            .get(format!("{}/v3/info/available_releases", self.base_url))
+            .get(url)
             .call()
-            .context("could not fetch available releases from the Adoptium API")?;
+            .with_context(|| format!("could not fetch {what} from the Adoptium API"))?;
 
         if !response.status().is_success() {
             bail!(
-                "Failed to fetch available releases from API: HTTP {}",
+                "Failed to fetch {what} from API: HTTP {}",
                 response.status()
             );
         }
