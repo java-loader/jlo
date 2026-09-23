@@ -241,10 +241,11 @@ struct Candidate {
     /// The directory name, or `None` when it is not valid UTF-8.
     name: Option<String>,
     /// The name as a *request*: its major and its stream, or `None` when the
-    /// name is not a semver - see [`is_jdk_version_dir`]. This is the key
-    /// every "one build per ..." rule groups by - keyed on the major alone,
-    /// a pre-release would supersede the released build it previews, because
-    /// it sorts above it.
+    /// name is not a semver. That is what jlo names its installs, and `None`
+    /// is what keeps a hand-placed `temurin-21.0.5` out of the listing. This
+    /// is the key every "one build per ..." rule groups by - keyed on the
+    /// major alone, a pre-release would supersede the released build it
+    /// previews, because it sorts above it.
     request: Option<Request>,
     /// Whether the directory carries the `.jlo-managed` marker.
     managed: bool,
@@ -279,16 +280,15 @@ impl JdkStore {
     /// first. A missing base directory is not an error - it just means nothing
     /// has been installed yet.
     pub(crate) fn list(&self) -> anyhow::Result<Vec<InstalledJdk>> {
-        let mut candidates = match self.scan() {
+        let candidates = match self.scan() {
             Ok(candidates) => candidates,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(e) => return Err(e).with_context(|| self.read_failure()),
         };
 
-        candidates.retain(|candidate| candidate.name.as_deref().is_some_and(is_jdk_version_dir));
-        sort_by_semver_desc(&mut candidates);
-
-        Ok(candidates
+        // Filtered before sorting: a name that does not parse compares equal
+        // to everything, which is no total order to sort by.
+        let mut installed: Vec<InstalledJdk> = candidates
             .into_iter()
             .filter_map(|candidate| {
                 let request = candidate.request?;
@@ -299,7 +299,9 @@ impl JdkStore {
                     managed: candidate.managed,
                 })
             })
-            .collect())
+            .collect();
+        installed.sort_by(|a, b| compare(&b.version, &a.version).unwrap_or(Ordering::Equal));
+        Ok(installed)
     }
 
     /// The installed version `$JAVA_HOME` currently points at, if that is one
@@ -331,15 +333,11 @@ impl JdkStore {
     /// a GA request: it sorts above the build it previews, so a major-only
     /// filter would hand `jlo env 26` a beta.
     pub(crate) fn find_matching(&self, request: Request) -> Option<PathBuf> {
-        let mut matching_versions = self.scan().ok()?;
-        matching_versions.retain(|candidate| candidate.request == Some(request));
-
-        sort_by_semver_desc(&mut matching_versions);
-
-        matching_versions
+        self.list()
+            .ok()?
             .into_iter()
-            .next()
-            .map(|candidate| java_home_in(&candidate.path))
+            .find(|jdk| jdk.request() == request)
+            .map(|jdk| java_home_in(&self.base.join(jdk.version)))
     }
 
     /// The version name when `java_home` is one of ours still in the
@@ -1290,13 +1288,6 @@ fn java_home_in(dir: &Path) -> PathBuf {
 /// is no longer there".
 fn owns(dir: &Path, active: &Path) -> bool {
     same_path(dir, active) || same_path(&dir.join(BUNDLE_HOME[0]).join(BUNDLE_HOME[1]), active)
-}
-
-/// A directory counts as a JDK when its name parses as a version. That is what
-/// jlo names its installs, and it is what keeps a hand-placed `temurin-21.0.5`
-/// out of the listing.
-fn is_jdk_version_dir(name: &str) -> bool {
-    crate::version::parse(name).is_ok()
 }
 
 /// What to move into the store: the root of the extracted archive.
