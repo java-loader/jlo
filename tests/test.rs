@@ -349,6 +349,7 @@ fn init_without_force_hints_at_force() {
         .assert()
         .failure()
         .code(1)
+        .stdout("")
         .stderr(predicate::str::contains("already exists"))
         .stderr(predicate::str::contains("--force"));
 
@@ -578,58 +579,6 @@ fn init_with_version() {
     let content = std::fs::read_to_string(temp_dir.path().join(".jlorc")).unwrap();
     let lines: Vec<_> = content.lines().collect();
     assert_eq!(lines[1], "21");
-}
-
-/// A bare `jlo init` pins the latest release, which is the one thing it asks
-/// Adoptium for - so mockito answers, rather than this being a fourth
-/// real-network test. ADR-0002 names three, and now there are three.
-#[test]
-fn init() {
-    let mut server = mockito::Server::new();
-    let _r = server
-        .mock("GET", "/v3/info/available_releases")
-        .with_body(include_str!("fixtures/available_releases.json"))
-        .create();
-
-    let temp_dir = tempfile::tempdir().unwrap();
-
-    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
-    cmd.arg("init")
-        .current_dir(temp_dir.path())
-        .env("JLO_ADOPTIUM_API_URL", server.url())
-        .assert()
-        .success()
-        .code(0)
-        // Status goes to stderr; stdout stays reserved for eval-able shell
-        // output, so `jlo init` contributes nothing to it.
-        .stderr(predicate::str::is_match(r"Created config file '.jlorc'").unwrap())
-        .stdout("");
-
-    // check if .jlorc contains a valid major version
-    let content = std::fs::read_to_string(temp_dir.path().join(".jlorc")).unwrap();
-    let lines: Vec<_> = content.lines().collect();
-    assert_eq!(
-        lines[0],
-        "# Java version configured by J'Lo - https://github.com/java-loader/jlo"
-    );
-    let version: u32 = lines[1].parse().expect("expected numeric version");
-    assert!(version >= 8, "expected version >= 8, got {version}");
-
-    // run init again to check for existing file error
-    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
-    cmd.arg("init")
-        .current_dir(temp_dir.path())
-        .env("JLO_ADOPTIUM_API_URL", server.url())
-        .assert()
-        .failure()
-        .code(1)
-        .stderr(
-            predicate::str::is_match(
-                r"Error: could not create config file: file '.jlorc' already exists",
-            )
-            .unwrap(),
-        )
-        .stdout("");
 }
 
 #[test]
@@ -1141,10 +1090,18 @@ fn init_uses_latest_version_from_api() {
         .current_dir(temp_dir.path())
         .env("JLO_ADOPTIUM_API_URL", server.url())
         .assert()
-        .success();
+        .success()
+        // Status goes to stderr; stdout stays reserved for eval-able shell
+        // output, so `jlo init` contributes nothing to it.
+        .stderr(predicate::str::contains("Created config file '.jlorc'"))
+        .stdout("");
 
     let content = std::fs::read_to_string(temp_dir.path().join(".jlorc")).unwrap();
     let lines: Vec<_> = content.lines().collect();
+    assert_eq!(
+        lines[0],
+        "# Java version configured by J'Lo - https://github.com/java-loader/jlo"
+    );
     assert_eq!(lines[1], "26");
 }
 

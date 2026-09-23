@@ -102,35 +102,6 @@ fn run_in(sh: &str, home: &Path, body: &str) -> Output {
         .unwrap_or_else(|e| panic!("failed to run {sh}: {e}"))
 }
 
-/// Source the bash wrapper and run `jlo $args` against the real binary.
-fn run_wrapper(args: &str) -> Output {
-    let home = jlo_home();
-    run_in(&bash_bin(), home.path(), &format!("jlo {args}"))
-}
-
-// ---------------------------------------------------------------------------
-// Outside the eval branch, stdout is passed through
-// ---------------------------------------------------------------------------
-
-#[test]
-fn top_level_help_still_works_through_the_wrapper() {
-    let out = run_wrapper("--help");
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("Usage: jlo"), "got {stdout:?}");
-}
-
-#[test]
-fn exec_does_not_intercept_child_help_flags() {
-    // `--help` here belongs to `echo`, not to jlo. If the wrapper hijacked it,
-    // jlo's own exec help would appear instead.
-    let out = run_wrapper("exec -- echo --help");
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        !stdout.contains("Usage: jlo exec"),
-        "wrapper intercepted a child's --help: {stdout:?}"
-    );
-}
-
 // ---------------------------------------------------------------------------
 // The exports must actually land in the calling shell, under every shell
 // ---------------------------------------------------------------------------
@@ -505,6 +476,7 @@ fn a_marked_payload_is_evaluated_without_interactive_comments() {
 
 /// Help and version text is on stdout without the marker: printed, never
 /// evaluated, status 0 - the argument scan that used to guard this is gone.
+/// A bare `--help` takes the other branch, and has to reach the terminal too.
 #[test]
 fn help_through_the_eval_branch_is_printed_not_evaluated() {
     let home = jlo_home();
@@ -513,6 +485,7 @@ fn help_through_the_eval_branch_is_printed_not_evaluated() {
         INTERPRETERS,
     ) {
         for args in [
+            "--help",
             "env --help",
             "env -h",
             "use -h",
