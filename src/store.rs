@@ -678,16 +678,11 @@ impl JdkStore {
         let extracted_jdk_path =
             find_jdk_path(source_dir).context("could not find the extracted JDK directory")?;
 
-        // Create destination directory
         ui.start_install();
-        std::fs::create_dir_all(
-            dest_dir
-                .parent()
-                .context("destination directory has no parent")?,
-        )
-        .context("could not create destination directory")?;
 
-        // Move extracted JDK to final location
+        // No directory to create first: `source_dir` is staged inside the
+        // store, so the store exists, and `semver` is a single path
+        // component, so the store is `dest_dir`'s parent.
         std::fs::rename(extracted_jdk_path, &dest_dir)
             .context("could not move JDK to destination")?;
 
