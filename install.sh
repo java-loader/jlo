@@ -47,7 +47,11 @@ main() {
   # to decide where to write the layout.
   export JLO_HOME
   JLO_BIN_DIR="$JLO_HOME/bin"
-  JLO_BASE_URL="https://github.com/java-loader/jlo/releases/latest/download"
+  # Overridable so the download half of this script can be pointed at a local
+  # server, the way JLO_ADOPTIUM_API_URL and JLO_RELEASE_API_URL are for the
+  # binary's two remotes. Without it the only testable part of an install is
+  # the layout the binary writes afterwards.
+  JLO_BASE_URL="${JLO_INSTALL_BASE_URL:-https://github.com/java-loader/jlo/releases/latest/download}"
 
   OS="$(uname | tr '[:upper:]' '[:lower:]')"
   ARCH="$(uname -m)"
@@ -64,11 +68,31 @@ main() {
 
   mkdir -p "$JLO_BIN_DIR"
 
-  FQ_JLO_BUNDLE="$JLO_BIN_DIR/jlo.tar.gz"
+  # Everything transient lives in one directory, and that directory is a
+  # *sibling* of the file it will become: the binary is published by a rename,
+  # which is atomic only within one filesystem, so $TMPDIR is not an option.
+  #
+  # Nothing here writes $JLO_BIN_DIR/jlo-bin. That write belongs to the install
+  # verb, which takes the publication lock first - an installer that unpacked
+  # over the live binary would be a second publisher outside the lock, and on
+  # Linux would hit ETXTBSY against a jlo that is still running.
+  JLO_STAGE="$JLO_BIN_DIR/.jlo-install-$$"
+  rm -rf "$JLO_STAGE"
+  mkdir -p "$JLO_STAGE"
+  # While the shell owns the staging directory, the shell removes it - on the
+  # explicit failures below, on an unguarded command failing under `set -e`,
+  # and on an interrupt. The successful `exec` hands that responsibility over:
+  # it replaces this process image, so no trap of ours can run afterwards, and
+  # from that point the binary sweeps its own staging directory. An `exec` that
+  # *fails* - a package built for another architecture, a missing loader -
+  # leaves this shell running, and the trap still fires.
+  trap 'rm -rf "$JLO_STAGE"' EXIT HUP INT TERM
+
+  FQ_JLO_BUNDLE="$JLO_STAGE/jlo.tar.gz"
   FQ_JLO_SUM="$FQ_JLO_BUNDLE.sha256"
   if ! curl -fsSL "$JLO_URL" -o "$FQ_JLO_BUNDLE"; then
     echo "Failed to download jlo binary from $JLO_URL" >&2
-    rm -f "$FQ_JLO_BUNDLE"
+    rm -rf "$JLO_STAGE"
     exit 1
   fi
 
@@ -100,7 +124,7 @@ main() {
     esac
     if [ "$JLO_WELL_FORMED" = 0 ] || [ -n "$JLO_NOT_HEX" ]; then
       echo "Checksum file for $JLO_PACKAGE is not a SHA256; refusing to install." >&2
-      rm -f "$FQ_JLO_BUNDLE"
+      rm -rf "$JLO_STAGE"
       exit 1
     fi
     if JLO_ACTUAL="$(jlo_sha256 "$FQ_JLO_BUNDLE")"; then
@@ -112,7 +136,7 @@ main() {
         echo "Checksum mismatch for $JLO_PACKAGE" >&2
         echo "  expected $JLO_EXPECTED" >&2
         echo "  got      $JLO_ACTUAL" >&2
-        rm -f "$FQ_JLO_BUNDLE"
+        rm -rf "$JLO_STAGE"
         exit 1
       fi
     else
@@ -134,23 +158,33 @@ main() {
   # carry a user-supplied path. bsdtar does not unquote, which is why this only
   # ever showed up on Linux. cd is a shell builtin and does no such thing, and
   # the subshell keeps the working directory change local.
-  if ! (cd "$JLO_BIN_DIR" && tar -xzf jlo.tar.gz); then
+  if ! (cd "$JLO_STAGE" && tar -xzf jlo.tar.gz); then
     echo "Failed to extract jlo binary from $FQ_JLO_BUNDLE" >&2
-    rm -f "$FQ_JLO_BUNDLE"
+    rm -rf "$JLO_STAGE"
     exit 1
   fi
+  # Removed before the hand-over, which never returns here: what is left in the
+  # staging directory afterwards is the binary alone, so the install verb can
+  # take the directory away with the rename that empties it.
   rm -f "$FQ_JLO_BUNDLE"
 
-  JLO_TARGET="$JLO_BIN_DIR/jlo-bin"
+  JLO_TARGET="$JLO_STAGE/jlo-bin"
   if [ ! -x "$JLO_TARGET" ]; then
     echo "The downloaded archive did not contain an executable jlo-bin." >&2
+    rm -rf "$JLO_STAGE"
     exit 1
   fi
 
   # Hand over. 'exec' rather than a call: the binary owns the rest of the
   # install and its exit status is the installer's, with no line of this script
   # left to run after it and get that wrong.
-  exec "$JLO_TARGET" __install
+  #
+  # --publish-self is what moves the staged binary to $JLO_BIN_DIR/jlo-bin, and
+  # it happens under the lock the verb takes. It also owns the staging
+  # directory from here on: no line of this script runs after the exec, so the
+  # binary is the only thing left that can remove it - which it does whether
+  # the publication succeeds or fails.
+  exec "$JLO_TARGET" __install --publish-self
 }
 
 main "$@"

@@ -45,6 +45,30 @@ fn stub_gnu_tar(bin: &Path) {
     std::fs::set_permissions(&tar, perms).unwrap();
 }
 
+/// Runs a binary this thread has just written, waiting out `ETXTBSY`.
+///
+/// These tests run as parallel threads of one process. `Command` forks, and a
+/// fork taken by *another* thread while this one is between `open` and `close`
+/// on the file inherits that writable descriptor - so `execve` of the file
+/// fails with "Text file busy" even though this thread closed it long ago.
+/// `O_CLOEXEC` does not help: the kernel checks for writers before it clears
+/// the child's descriptors.
+///
+/// Nothing here can close somebody else's inherited copy, so waiting is the
+/// only answer. Linux only; on macOS the exec succeeds the first time.
+fn run_staged(command: &mut Command) -> Output {
+    for _ in 0..100 {
+        match command.output() {
+            Ok(out) => return out,
+            Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Err(e) => panic!("could not run {command:?}: {e}"),
+        }
+    }
+    panic!("{command:?} reported ETXTBSY for two seconds");
+}
+
 fn manifest() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
@@ -118,6 +142,9 @@ fn stub_curl(dir: &Path, tarball: &Path, checksum: Checksum) -> PathBuf {
             "#!/bin/sh\n\
              # Ignores every flag but -o, which is all install.sh passes.\n\
              out=\n\
+             for a in \"$@\"; do\n\
+             \x20 case \"$a\" in *://*) echo \"$a\" >> '{log}' ;; esac\n\
+             done\n\
              while [ $# -gt 0 ]; do\n\
              \x20 case \"$1\" in -o) shift; out=\"$1\" ;; esac\n\
              \x20 shift\n\
@@ -127,7 +154,8 @@ fn stub_curl(dir: &Path, tarball: &Path, checksum: Checksum) -> PathBuf {
              \x20 *.sha256) {serve_sum} ;;\n\
              \x20 *) cp '{tar}' \"$out\" ;;\n\
              esac\n",
-            tar = tarball.display()
+            tar = tarball.display(),
+            log = dir.join("curl-urls").display(),
         ),
     )
     .unwrap();
@@ -425,13 +453,13 @@ fn a_jlo_home_that_spells_the_terminator_does_not_end_the_heredoc() {
     )
     .unwrap();
 
-    let out = Command::new(hostile.join("bin").join("jlo-bin"))
-        .arg("__install")
-        .env("HOME", &home)
-        .env("JLO_HOME", &hostile)
-        .env("SHELL", "/bin/zsh")
-        .output()
-        .unwrap();
+    let out = run_staged(
+        Command::new(hostile.join("bin").join("jlo-bin"))
+            .arg("__install")
+            .env("HOME", &home)
+            .env("JLO_HOME", &hostile)
+            .env("SHELL", "/bin/zsh"),
+    );
     assert!(
         out.status.success(),
         "{}",
@@ -1969,12 +1997,12 @@ fn a_reload_that_cannot_load_a_stub_fails_the_selfupdate() {
 
     // The payload the freshly published binary prints, replayed by a stand-in
     // so the run needs neither a network nor a second release.
-    let payload = Command::new(&binary)
-        .args(["__wrapped", "__install", "--reload"])
-        .env("HOME", &home)
-        .env("JLO_HOME", &jlo)
-        .output()
-        .unwrap();
+    let payload = run_staged(
+        Command::new(&binary)
+            .args(["__wrapped", "__install", "--reload"])
+            .env("HOME", &home)
+            .env("JLO_HOME", &jlo),
+    );
     assert!(payload.status.success());
     let replay = dir.path().join("payload");
     std::fs::write(&replay, &payload.stdout).unwrap();
@@ -2321,5 +2349,367 @@ fn the_old_block_outside_the_login_profile_is_named_but_replaces_nothing() {
         printed.contains("To activate"),
         "a block in a file the login shell does not read suppressed the \
          instructions: {printed}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Staged publication
+// ---------------------------------------------------------------------------
+
+/// The installer must not write `bin/jlo-bin` itself.
+///
+/// It unpacks into a staging directory beside the destination and hands the
+/// staged binary to the install verb, which renames it into place *under the
+/// publication lock*. Writing it directly is how two publishers fail to
+/// serialise: only one of them is inside the gate, and on Linux overwriting a
+/// running executable is `ETXTBSY` besides.
+///
+/// Beside the destination, not under `$TMPDIR`: `rename` is atomic only
+/// within one filesystem.
+#[test]
+fn publish_self_renames_the_staged_binary_into_the_layout() {
+    let (dir, _) = install(None);
+    let home = dir.path().join("home");
+    let jlo_home = home.join(".jlo");
+    let binary = jlo_home.join("bin").join("jlo-bin");
+
+    let stage = jlo_home.join("bin").join(".jlo-install-test");
+    std::fs::create_dir_all(&stage).unwrap();
+    let staged = stage.join("jlo-bin");
+    std::fs::copy(&binary, &staged).unwrap();
+    // Identity, not just contents: a `copy` would leave the destination
+    // looking right while giving up the atomic replacement, and would put
+    // `ETXTBSY` back on the table against a binary that is still running.
+    let staged_inode = std::fs::metadata(&staged).unwrap().ino();
+
+    // A sentinel at the destination: if the publish is a no-op the assertions
+    // below cannot tell a working install from an untouched one.
+    std::fs::write(&binary, "not a binary\n").unwrap();
+
+    let out = run_staged(
+        Command::new(&staged)
+            .args(["__install", "--publish-self"])
+            .env("HOME", &home)
+            .env("JLO_HOME", &jlo_home)
+            .env("SHELL", "/bin/zsh"),
+    );
+    assert!(
+        out.status.success(),
+        "__install --publish-self failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    assert!(
+        !staged.exists(),
+        "the staged binary is still at {staged:?}; it was copied, not renamed"
+    );
+    assert_eq!(
+        std::fs::metadata(&binary).unwrap().ino(),
+        staged_inode,
+        "{binary:?} is not the file that was staged, so it was copied rather \
+         than renamed into place"
+    );
+    let version = Command::new(&binary).arg("--version").output().unwrap();
+    assert!(
+        version.status.success(),
+        "{binary:?} is not runnable after the publish: {}",
+        String::from_utf8_lossy(&version.stderr)
+    );
+}
+
+/// `install-local.sh` and the self-heal both run the binary that is *already*
+/// published. Renaming it onto itself would be a no-op at best, so the verb
+/// has to recognise that case rather than trip over it.
+#[test]
+fn publish_self_is_a_no_op_when_the_binary_is_already_in_place() {
+    let (dir, _) = install(None);
+    let home = dir.path().join("home");
+    let jlo_home = home.join(".jlo");
+    let binary = jlo_home.join("bin").join("jlo-bin");
+
+    let out = run_staged(
+        Command::new(&binary)
+            .args(["__install", "--publish-self"])
+            .env("HOME", &home)
+            .env("JLO_HOME", &jlo_home)
+            .env("SHELL", "/bin/zsh"),
+    );
+    assert!(
+        out.status.success(),
+        "__install --publish-self failed on an in-place binary: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(binary.is_file(), "{binary:?} went missing");
+}
+
+/// A completed install leaves nothing transient behind.
+#[test]
+fn install_sh_leaves_no_staging_directory_behind() {
+    let (dir, _) = install(None);
+    let bin = dir.path().join("home").join(".jlo").join("bin");
+
+    let leftovers: Vec<_> = std::fs::read_dir(&bin)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with(".jlo-install"))
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "the installer left staging directories in {bin:?}: {leftovers:?}"
+    );
+}
+
+/// Runs the real `install.sh` a second time against the same `HOME`, reusing
+/// the stubbed `curl` and `tar` the first run was given.
+fn reinstall_with_installer(dir: &Path, home: &Path) -> Output {
+    let path = format!(
+        "{}:{}",
+        dir.join("stubbin").display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    Command::new("/bin/sh")
+        .arg(manifest().join("install.sh"))
+        .env("HOME", home)
+        .env("PATH", path)
+        .env("SHELL", "/bin/zsh")
+        .env_remove("JLO_HOME")
+        .output()
+        .unwrap()
+}
+
+/// The binary must not be replaced outside the publication lock.
+///
+/// `install.sh` used to unpack straight over `$JLO_HOME/bin/jlo-bin` and only
+/// then hand over to the install verb, which is where the lock is first taken.
+/// The one file every other part of the layout is generated *from* was
+/// therefore written by a publisher standing outside the gate: a concurrent
+/// `selfupdate` holding the lock could have the executable swapped under it.
+///
+/// With the lock held by somebody else, a correct installer changes nothing at
+/// the destination.
+///
+/// The holder is a `python3` one-liner rather than `flock(1)`, which is a
+/// util-linux tool and absent on macOS - a test that silently skips on the
+/// developer's own machine is not a test.
+#[test]
+fn a_held_lock_leaves_the_installed_binary_untouched() {
+    let (dir, _) = install(None);
+    let home = dir.path().join("home");
+    let jlo_home = home.join(".jlo");
+    let binary = jlo_home.join("bin").join("jlo-bin");
+
+    // A sentinel rather than the real binary: anything that reaches the
+    // destination while the lock is held overwrites it, and that is the whole
+    // assertion.
+    let sentinel = b"held by somebody else\n";
+    std::fs::write(&binary, sentinel).unwrap();
+
+    let lock = jlo_home.join(".selfupdate.lock");
+    let ready = dir.path().join("lock-held");
+    let holder = Command::new("python3")
+        .arg("-c")
+        .arg(
+            "import fcntl, pathlib, sys, time\n\
+             f = open(sys.argv[1], 'w')\n\
+             fcntl.flock(f, fcntl.LOCK_EX)\n\
+             pathlib.Path(sys.argv[2]).write_text('held')\n\
+             time.sleep(30)\n",
+        )
+        .arg(&lock)
+        .arg(&ready)
+        .spawn();
+    let Ok(mut holder) = holder else {
+        eprintln!(
+            "SKIP a_held_lock_leaves_the_installed_binary_untouched: python3 is not installed here."
+        );
+        return;
+    };
+
+    let mut held = false;
+    for _ in 0..100 {
+        if ready.exists() {
+            held = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+
+    let out = held.then(|| reinstall_with_installer(dir.path(), &home));
+    let _ = holder.kill();
+    let _ = holder.wait();
+    assert!(held, "the holder never took the lock");
+
+    let out = out.unwrap();
+    assert!(
+        !out.status.success(),
+        "the installer ignored the lock: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // Compared as a boolean: a mismatch here means the real binary landed,
+    // and printing a few megabytes of Mach-O helps nobody.
+    assert!(
+        std::fs::read(&binary).unwrap() == sentinel,
+        "{binary:?} was replaced although another publisher held the lock"
+    );
+
+    // The installer `exec`s the staged binary and has no line left to run, so
+    // a refused publish can only be cleaned up by the process that was
+    // refused. Otherwise every failed install leaves a copy of J'Lo in `bin/`.
+    let bin = jlo_home.join("bin");
+    let leftovers: Vec<_> = std::fs::read_dir(&bin)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with(".jlo-install"))
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "the refused install left staging directories in {bin:?}: {leftovers:?}"
+    );
+}
+
+/// The download origin is injectable, the way `JLO_ADOPTIUM_API_URL` and
+/// `JLO_RELEASE_API_URL` are for the binary's two remotes.
+///
+/// Without it nothing can drive the half of this script that talks to the
+/// network against anything but GitHub, so the only part these tests could
+/// ever reach is the layout the binary writes afterwards.
+#[test]
+fn the_download_origin_is_overridable() {
+    let dir = tempfile::tempdir().unwrap();
+    let tarball = release_tarball(dir.path());
+    let stubbin = stub_curl(dir.path(), &tarball, Checksum::Correct);
+    stub_gnu_tar(&stubbin);
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+
+    let path = format!(
+        "{}:{}",
+        stubbin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let out = Command::new("/bin/sh")
+        .arg(manifest().join("install.sh"))
+        .env("HOME", &home)
+        .env("PATH", path)
+        .env("SHELL", "/bin/zsh")
+        .env_remove("JLO_HOME")
+        .env("JLO_INSTALL_BASE_URL", "https://example.invalid/jlo")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "install.sh failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // The exact assets, not just the origin: the stub serves the fixture by
+    // *output* file name, so an installer that asked for the wrong package -
+    // or skipped the checksum entirely - would still produce a working install
+    // and satisfy a prefix check.
+    let os = if cfg!(target_os = "macos") {
+        "macos"
+    } else {
+        "linux"
+    };
+    let package = format!("jlo-{os}-{}.tar.gz", uname_m());
+    let asked: Vec<String> = std::fs::read_to_string(dir.path().join("curl-urls"))
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(
+        asked,
+        vec![
+            format!("https://example.invalid/jlo/{package}"),
+            format!("https://example.invalid/jlo/{package}.sha256"),
+        ],
+        "the installer did not fetch exactly the overridden tarball and its checksum"
+    );
+}
+
+/// `uname -m`, which is what `install.sh` interpolates unfiltered, and which
+/// is not Rust's `consts::ARCH`: the same machine is `aarch64` to Rust on both
+/// platforms, but `uname` calls it `aarch64` on Linux and `arm64` on macOS.
+/// That difference is why the published package names differ, so the test has
+/// to ask the same question the installer asks.
+fn uname_m() -> String {
+    let out = Command::new("uname").arg("-m").output().unwrap();
+    String::from_utf8_lossy(&out.stdout).trim().to_owned()
+}
+
+/// The cleanup guard deletes a staging directory, so what counts as one must
+/// be established rather than guessed from a name.
+///
+/// Here the directory is named like a staging directory and holds a binary,
+/// but belongs to a different install: the verb was pointed at another
+/// `JLO_HOME` entirely. Deleting it would take somebody else's files with it.
+#[test]
+fn a_staging_name_outside_the_install_directory_is_left_alone() {
+    let (dir, _) = install(None);
+    let home = dir.path().join("home");
+    let jlo_home = home.join(".jlo");
+
+    let impostor = dir.path().join(".jlo-install-backups");
+    std::fs::create_dir_all(&impostor).unwrap();
+    std::fs::copy(
+        jlo_home.join("bin").join("jlo-bin"),
+        impostor.join("jlo-bin"),
+    )
+    .unwrap();
+    let bystander = impostor.join("please-keep-me");
+    std::fs::write(&bystander, "not jlo's\n").unwrap();
+
+    let elsewhere = dir.path().join("other-home");
+    let out = run_staged(
+        Command::new(impostor.join("jlo-bin"))
+            .args(["__install", "--publish-self"])
+            .env("HOME", &home)
+            .env("JLO_HOME", &elsewhere)
+            .env("SHELL", "/bin/zsh"),
+    );
+    assert!(
+        out.status.success(),
+        "the install verb failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    assert!(
+        bystander.is_file(),
+        "{bystander:?} was deleted: a directory was treated as staging on the \
+         strength of its name alone"
+    );
+}
+
+/// Even a real staging directory is only swept of what was staged in it. A
+/// file nobody here put there stops the removal rather than going with it.
+#[test]
+fn staging_cleanup_stops_at_anything_it_did_not_put_there() {
+    let (dir, _) = install(None);
+    let home = dir.path().join("home");
+    let jlo_home = home.join(".jlo");
+    let binary = jlo_home.join("bin").join("jlo-bin");
+
+    let stage = jlo_home.join("bin").join(".jlo-install-test");
+    std::fs::create_dir_all(&stage).unwrap();
+    std::fs::copy(&binary, stage.join("jlo-bin")).unwrap();
+    let bystander = stage.join("unexpected");
+    std::fs::write(&bystander, "somebody else's\n").unwrap();
+
+    let out = run_staged(
+        Command::new(stage.join("jlo-bin"))
+            .args(["__install", "--publish-self"])
+            .env("HOME", &home)
+            .env("JLO_HOME", &jlo_home)
+            .env("SHELL", "/bin/zsh"),
+    );
+    assert!(
+        out.status.success(),
+        "the install verb failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    assert!(
+        bystander.is_file(),
+        "{bystander:?} was swept away with the staging directory"
     );
 }

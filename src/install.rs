@@ -29,7 +29,7 @@
 use crate::ui;
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
-use std::fs;
+use std::fs::{self, File};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
@@ -41,6 +41,15 @@ pub(crate) const VERB: &str = "__install";
 /// Where the install came from. Recorded in the receipt so a later
 /// `selfupdate` can tell an install it owns from one a package manager placed.
 const DEFAULT_METHOD: &str = "installer";
+
+/// The published binary's file name, which the installers also give the file
+/// they stage - so the staging sweep knows exactly which file was its own.
+const BINARY_NAME: &str = "jlo-bin";
+
+/// What `install.sh` and `install-local.sh` name the directory they unpack
+/// into, beside the binary they are about to publish. Matched rather than
+/// reconstructed: the pid in the real name belongs to the shell, not to us.
+const STAGING_PREFIX: &str = ".jlo-install";
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -150,7 +159,7 @@ impl Layout {
     /// refreshed when it already points at exactly this path, so renaming the
     /// file would leave every existing user's symlink dangling.
     pub(crate) fn binary(&self) -> PathBuf {
-        self.bin.join("jlo-bin")
+        self.bin.join(BINARY_NAME)
     }
 }
 
@@ -330,6 +339,7 @@ pub(crate) fn cmd_install(args: &[String], wrapped: bool) -> Result<()> {
     let mut method = DEFAULT_METHOD.to_string();
     let mut reload = false;
     let mut locked = false;
+    let mut publish_self = false;
     let mut rest = args.iter();
     while let Some(arg) = rest.next() {
         match arg.as_str() {
@@ -341,11 +351,18 @@ pub(crate) fn cmd_install(args: &[String], wrapped: bool) -> Result<()> {
             }
             "--reload" => reload = true,
             "--locked" => locked = true,
+            "--publish-self" => publish_self = true,
             other => return Err(anyhow!("unknown option {other:?} for {VERB}")),
         }
     }
 
     let layout = Layout::new(crate::jlo_home_dir()?);
+    // Armed before the lock, because a lock we do not get is the likeliest
+    // reason this run ends early - and the installer that `exec`d us has no
+    // line left to run, so nothing else can clear the directory we came out
+    // of. Dropping it removes the directory on every path, including the
+    // successful one, where the rename has already emptied it.
+    let _staging = Staging::around(&layout, publish_self);
     // `selfupdate` `exec`s this verb while already holding the lock, and the
     // fd came across the exec with it. Taking it again from a second open file
     // description would deadlock against ourselves, so the caller says so.
@@ -358,6 +375,9 @@ pub(crate) fn cmd_install(args: &[String], wrapped: bool) -> Result<()> {
     // receipt was already there, and the new one is about to replace it.
     let had_receipt = read_receipt(&layout).is_some();
 
+    if publish_self {
+        publish_binary(&layout)?;
+    }
     write_layout(&layout)?;
     let symlink = ensure_symlink(&layout);
     write_receipt(&layout, &method, symlink.as_deref())?;
@@ -367,6 +387,111 @@ pub(crate) fn cmd_install(args: &[String], wrapped: bool) -> Result<()> {
         print_reload(&layout, wrapped)?;
     }
     Ok(())
+}
+
+/// Move the running executable to its published path.
+///
+/// The installers unpack into a staging directory *beside* the destination and
+/// run the staged binary from there, so that this - the write that replaces
+/// `bin/jlo-bin` - happens under the lock with every other part of the
+/// publication, rather than before the lock exists. An installer that wrote
+/// the binary itself would be a second publisher standing outside the gate: it
+/// could swap the executable out from under a `selfupdate` that holds the
+/// lock, and on Linux it would hit `ETXTBSY` trying to overwrite a binary that
+/// is still running.
+///
+/// Beside the destination, and not under `$TMPDIR`, because `rename` is atomic
+/// only within one filesystem and fails outright across two.
+///
+/// On Unix the process keeps its inode across the rename, so from here on this
+/// process *is* the published binary - which is what makes it safe for the
+/// same run to go on and write the layout from its own `include_str!`
+/// templates. There is no second `exec`.
+///
+/// A binary that is already at the published path - `install-local.sh`, a
+/// re-run, the self-heal - is left alone rather than renamed onto itself.
+fn publish_binary(layout: &Layout) -> Result<()> {
+    let exe = std::env::current_exe().context("could not find the running J'Lo binary")?;
+    let target = layout.binary();
+    if same_path(&exe, &target) {
+        return Ok(());
+    }
+
+    fs::create_dir_all(layout.bin_dir())
+        .with_context(|| format!("could not create {:?}", layout.bin_dir()))?;
+    // The staged file's *contents* first. The installers wrote it with `tar`
+    // or `cp` and neither flushed it, so a crash just after the rename could
+    // leave a durable directory entry - and a receipt vouching for it - in
+    // front of a binary that is still only in the page cache. `sync_dir`
+    // below flushes the entry, not the data behind it.
+    File::open(&exe)
+        .and_then(|handle| handle.sync_all())
+        .with_context(|| format!("could not flush {exe:?} to disk"))?;
+    fs::rename(&exe, &target)
+        .with_context(|| format!("could not publish {exe:?} to {target:?}"))?;
+    // The rename is only durable once the directory entry is, and the receipt
+    // written at the end of this run vouches for the binary published here.
+    sync_dir(layout.bin_dir());
+
+    Ok(())
+}
+
+/// The installer's staging directory, swept when this value is dropped.
+///
+/// `install.sh` unpacks into `bin/.jlo-install-<pid>/` and `exec`s the binary
+/// from there, so from that moment the staged process is the only one that can
+/// still tidy up: a refused publish would otherwise leave a whole copy of J'Lo
+/// in `bin/` for every failed install.
+///
+/// What it removes is the file it knows was staged, and then the directory
+/// *only if that emptied it*. Never a recursive delete: this runs on a path
+/// derived from `current_exe()`, and a wrong answer there must cost nothing
+/// that belongs to somebody else.
+#[derive(Debug)]
+struct Staging(Option<PathBuf>);
+
+impl Staging {
+    /// `None` unless this executable is demonstrably a staged one.
+    ///
+    /// Three things have to hold, and the name is the weakest of them: the
+    /// caller must have asked to publish, the executable must not already be
+    /// the published binary - `install-local.sh`, a re-run, the self-heal -
+    /// and the directory it sits in must be a child of *this* install's
+    /// `bin/`. Without that last test a binary parked in any directory whose
+    /// name happens to start with `.jlo-install` would be swept while the verb
+    /// was pointed at an unrelated `$JLO_HOME`.
+    fn around(layout: &Layout, publish_self: bool) -> Self {
+        if !publish_self {
+            return Self(None);
+        }
+        let Ok(exe) = std::env::current_exe() else {
+            return Self(None);
+        };
+        if same_path(&exe, &layout.binary()) {
+            return Self(None);
+        }
+        let dir = exe.parent().filter(|dir| {
+            dir.file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with(STAGING_PREFIX))
+                && dir
+                    .parent()
+                    .is_some_and(|up| same_path(up, layout.bin_dir()))
+        });
+        Self(dir.map(Path::to_path_buf))
+    }
+}
+
+impl Drop for Staging {
+    fn drop(&mut self) {
+        let Some(dir) = self.0.take() else {
+            return;
+        };
+        // Gone already on the happy path: publishing renamed it out.
+        let _ = fs::remove_file(dir.join(BINARY_NAME));
+        // Not `remove_dir_all`. Anything still in here was not put there by
+        // this run, and keeping it costs an empty directory at worst.
+        let _ = fs::remove_dir(&dir);
+    }
 }
 
 /// The one thing this verb writes to **stdout** (ADR-0001): shell code for the
@@ -835,22 +960,26 @@ pub(crate) fn self_heal() {
         return;
     };
     let layout = Layout::new(home);
-    let Some(receipt) = read_receipt(&layout) else {
-        return;
-    };
-    if receipt.version == VERSION {
-        return;
-    }
-    if !same_path(Path::new(&receipt.jlo_home), &layout.home) {
-        return;
-    }
-    if !is_current_exe(Path::new(&receipt.binary)) {
+    // Cheap first, so the common case - a receipt that already agrees - costs
+    // a single read and never touches the lock.
+    if stale_receipt(&layout).is_none() {
         return;
     }
 
     // Somebody else is publishing. They will leave a consistent layout behind,
     // so there is nothing here worth waiting - or racing - for.
     let Ok(Some(_lock)) = Lock::try_acquire(&layout.home) else {
+        return;
+    };
+
+    // Asked again, now that nobody else can be writing. Between the check
+    // above and this line a publisher can have finished a *newer* version in
+    // full and released the lock; the receipt then names a version this binary
+    // does not have, which reads exactly like the incomplete upgrade this
+    // function repairs. Healing it would write this binary's older scripts and
+    // stamp its own version over the newer one - the heal causing the
+    // disagreement it exists to clear.
+    let Some(receipt) = stale_receipt(&layout) else {
         return;
     };
 
@@ -864,6 +993,59 @@ pub(crate) fn self_heal() {
         ui::warning!("could not refresh the generated shell files: {e:#}");
         ui::hint!("Re-run the installer to repair this install.");
     }
+}
+
+/// The receipt this binary would heal, or `None` when there is nothing to do.
+///
+/// Separated out because the answer has to be obtained twice - see the call
+/// sites in [`self_heal`] - and two spellings of it would be two chances to
+/// diverge.
+fn stale_receipt(layout: &Layout) -> Option<Receipt> {
+    let receipt = read_receipt(layout)?;
+    // Older than this binary, not merely different. The receipt is written
+    // last, so an interrupted upgrade leaves one describing the version that
+    // came *before* the binary now running - that is the state worth
+    // repairing. A receipt that is newer means the opposite: a publication
+    // finished while this executable was already running, and this process is
+    // the previous binary rather than the published one. Rewriting the layout
+    // then downgrades it, which is what the two path-based guards below cannot
+    // detect, because a new binary is published at the very path the old one
+    // was running from.
+    //
+    // A version neither side can parse is not a guess worth making.
+    //
+    // The bound this draws, stated because it is a real one: a publication
+    // that moved *downwards* - an older build put in place over a newer
+    // receipt, then cut off before the receipt was rewritten - is not healed
+    // either. From the version alone it looks exactly like the case above,
+    // because both leave a receipt newer than the running binary.
+    //
+    // They could be told apart, and the means is not exotic: under the lock,
+    // run `layout.binary() --version` and see whether the published file is
+    // this build or another one - the same probe `selfupdate` already performs
+    // on a staged binary. It is left out on purpose. That puts a subprocess
+    // spawn in a path every single command passes through, and the child's own
+    // self-heal is kept from recursing only by the lock this process is
+    // holding, which is a coupling that would have to be maintained as
+    // carefully as the lock itself. The states below are not worth it.
+    //
+    // How they are reached: not by anything that moves on its own.
+    // `selfupdate` refuses to put a name on an older build, and `install.sh`
+    // defaults to the latest release - though it compares no versions, so an
+    // older one it is *pointed* at (a pinned JLO_INSTALL_BASE_URL, a cached
+    // installer, a local build) publishes without complaint. Re-running the
+    // installer repairs it, as it already does for every other state the
+    // receipt does not speak to.
+    if std::cmp::Ordering::Less != crate::version::compare(&receipt.version, VERSION).ok()? {
+        return None;
+    }
+    if !same_path(Path::new(&receipt.jlo_home), &layout.home) {
+        return None;
+    }
+    if !is_current_exe(Path::new(&receipt.binary)) {
+        return None;
+    }
+    Some(receipt)
 }
 
 pub(crate) fn is_current_exe(path: &Path) -> bool {
@@ -1342,6 +1524,115 @@ mod tests {
 
     fn layout_at(home: &Path) -> Layout {
         Layout::new(home.to_path_buf())
+    }
+
+    /// Writes a receipt naming this executable and `home`, at `version`.
+    fn receipt_at(layout: &Layout, version: &str) -> Receipt {
+        let receipt = Receipt {
+            version: version.to_string(),
+            method: DEFAULT_METHOD.to_string(),
+            jlo_home: display(layout.home()),
+            binary: display(&std::env::current_exe().unwrap()),
+            symlink: None,
+        };
+        fs::create_dir_all(layout.home()).unwrap();
+        let mut json = serde_json::to_string_pretty(&receipt).unwrap();
+        json.push('\n');
+        fs::write(layout.receipt(), json).unwrap();
+        receipt
+    }
+
+    /// The decision `self_heal` makes, isolated so it can be made twice: once
+    /// cheaply, and once again under the lock.
+    ///
+    /// The second read is what keeps the heal from causing the very
+    /// disagreement it repairs. A publisher that finishes while this process
+    /// is between its first check and the lock leaves a receipt that is
+    /// *current*; healing anyway would write this binary's older scripts and
+    /// stamp its own version over the newer one.
+    #[test]
+    fn a_receipt_that_matches_this_binary_is_not_stale() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = layout_at(dir.path());
+        receipt_at(&layout, VERSION);
+        assert!(
+            stale_receipt(&layout).is_none(),
+            "a receipt naming this very version asked to be healed"
+        );
+    }
+
+    /// The interleaving the self-heal must not join in with: this binary is
+    /// the *old* one, still running, while a newer one has already been
+    /// published in full at the same path. The receipt disagrees with
+    /// `VERSION` exactly as an interrupted upgrade would, and the binary path
+    /// it names is this one - so neither of those tests can tell the two
+    /// apart. Only the direction can: an interrupted upgrade leaves a receipt
+    /// *older* than the running binary, because the receipt is written last.
+    ///
+    /// Healing here would write this binary's older scripts beside the newer
+    /// binary and stamp its own version over the newer receipt - a downgrade
+    /// performed by the function that exists to repair downgrades.
+    #[test]
+    fn a_receipt_naming_a_newer_version_is_not_stale() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = layout_at(dir.path());
+        receipt_at(&layout, "999.0.0");
+        assert!(
+            stale_receipt(&layout).is_none(),
+            "a receipt from a newer publication was treated as an interrupted upgrade"
+        );
+    }
+
+    #[test]
+    fn a_receipt_whose_version_cannot_be_compared_is_not_stale() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = layout_at(dir.path());
+        receipt_at(&layout, "not-a-version");
+        assert!(
+            stale_receipt(&layout).is_none(),
+            "an unreadable receipt version was healed on a guess"
+        );
+    }
+
+    #[test]
+    fn a_receipt_naming_an_older_version_is_stale() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = layout_at(dir.path());
+        receipt_at(&layout, "0.0.1-not-this-build");
+        assert!(
+            stale_receipt(&layout).is_some(),
+            "the incomplete-upgrade state went unnoticed"
+        );
+    }
+
+    #[test]
+    fn a_receipt_describing_another_jlo_home_is_not_stale() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = layout_at(dir.path());
+        receipt_at(&layout, "0.0.1-not-this-build");
+
+        let elsewhere = layout_at(&dir.path().join("copied"));
+        fs::create_dir_all(elsewhere.home()).unwrap();
+        fs::copy(layout.receipt(), elsewhere.receipt()).unwrap();
+        assert!(
+            stale_receipt(&elsewhere).is_none(),
+            "a receipt carried over from another install was treated as ours"
+        );
+    }
+
+    #[test]
+    fn a_receipt_naming_another_binary_is_not_stale() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = layout_at(dir.path());
+        let mut receipt = receipt_at(&layout, "0.0.1-not-this-build");
+        receipt.binary = display(&dir.path().join("somewhere-else").join("jlo-bin"));
+        let mut json = serde_json::to_string_pretty(&receipt).unwrap();
+        json.push('\n');
+        fs::write(layout.receipt(), json).unwrap();
+        assert!(
+            stale_receipt(&layout).is_none(),
+            "a receipt describing a different executable was treated as ours"
+        );
     }
 
     /// ADR-0006: the lock lives on the open file description, so it survives
