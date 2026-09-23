@@ -391,20 +391,59 @@ mod tests {
         assert_eq!(payload(&[]), "# jlo'end\n");
     }
 
-    /// Unlike `print_lines`, which treats a closed pipe as an ending, a
-    /// payload that did not arrive whole is a failure.
-    #[test]
-    fn a_broken_pipe_fails_the_payload() {
-        struct Closed;
-        impl std::io::Write for Closed {
-            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
-                Err(std::io::ErrorKind::BrokenPipe.into())
+    /// Fails the `fail_at`-th call to `write` (counting from 0) and, when
+    /// `flush_fails`, the flush; every other call succeeds. A fault that does
+    /// not repeat, so a write whose error is dropped is not rescued by the
+    /// next one failing too.
+    struct Faulty {
+        calls: usize,
+        fail_at: Option<usize>,
+        flush_fails: bool,
+    }
+
+    impl std::io::Write for Faulty {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            let call = self.calls;
+            self.calls += 1;
+            if self.fail_at == Some(call) {
+                return Err(std::io::ErrorKind::BrokenPipe.into());
             }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
+            Ok(buf.len())
         }
-        let err = write_payload(&mut Closed, &owned(&["a"])).expect_err("the reader is gone");
+        fn flush(&mut self) -> std::io::Result<()> {
+            if self.flush_fails {
+                return Err(std::io::ErrorKind::BrokenPipe.into());
+            }
+            Ok(())
+        }
+    }
+
+    /// Unlike `print_lines`, which treats a closed pipe as an ending, a
+    /// payload that did not arrive whole is a failure - wherever the write
+    /// fails, the marker included, and when only the flush does.
+    #[test]
+    fn a_payload_that_does_not_arrive_whole_fails() {
+        let statements = owned(&["a", "b"]);
+        let faulty = |fail_at, flush_fails| Faulty {
+            calls: 0,
+            fail_at,
+            flush_fails,
+        };
+
+        let mut clean = faulty(None, false);
+        write_payload(&mut clean, &statements).unwrap();
+        assert!(clean.calls >= 3, "one write per line at least");
+
+        for fail_at in 0..clean.calls {
+            let err = write_payload(&mut faulty(Some(fail_at), false), &statements)
+                .expect_err("a write failed");
+            assert_eq!(
+                err.kind(),
+                std::io::ErrorKind::BrokenPipe,
+                "write {fail_at}"
+            );
+        }
+        let err = write_payload(&mut faulty(None, true), &statements).expect_err("flush failed");
         assert_eq!(err.kind(), std::io::ErrorKind::BrokenPipe);
     }
 

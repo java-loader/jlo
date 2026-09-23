@@ -461,20 +461,91 @@ fn probe(sh: &str, home: &Path, args: &str) -> String {
 
 /// `install` and `update` write the exports that move the shell before they
 /// delete the build it is on, so a later name failing must not stop them
-/// being evaluated - and the failure still reaches the caller.
+/// being evaluated - and the binary's own status reaches the caller, not a
+/// generic 1, whether the eval succeeds or fails.
 #[test]
 fn a_marked_payload_is_evaluated_even_when_the_run_fails() {
     for sh in INTERPRETERS {
         if skip_missing("a_marked_payload_is_evaluated_even_when_the_run_fails", sh) {
             continue;
         }
-        let home = jlo_home_with_stub(&format!(
-            "echo 'export JLO_PROBE=moved'\n{MARK}\necho boom >&2\nexit 1"
-        ));
-        for verb in ["update", "install 21"] {
-            let out = probe(sh, home.path(), verb);
-            assert!(out.contains("status=1"), "{sh} {verb}: {out:?}");
-            assert!(out.contains("probe=[moved]"), "{sh} {verb}: {out:?}");
+        for (first, moved) in [("true", "moved"), ("false", "")] {
+            let home = jlo_home_with_stub(&format!(
+                "echo '{first} &&'\necho 'export JLO_PROBE=moved'\n{MARK}\necho boom >&2\nexit 7"
+            ));
+            for verb in ["update", "install 21"] {
+                let out = probe(sh, home.path(), verb);
+                assert!(out.contains("status=7"), "{sh} {verb} {first}: {out:?}");
+                assert!(
+                    out.contains(&format!("probe=[{moved}]")),
+                    "{sh} {verb} {first}: {out:?}"
+                );
+            }
+        }
+    }
+}
+
+/// Source the wrapper into an interactive `sh`, switch comments off (bash's
+/// `interactive_comments`, zsh's `interactivecomments`), then run `body`
+/// under `set -eu`, which exits on the first failing `jlo`. [`run_in`]'s
+/// shells are not interactive, and those always honour `#`. `+m`: no job
+/// control, so the shell leaves the terminal running the tests alone.
+fn run_interactive_without_comments(sh: &str, home: &Path, body: &str) -> Output {
+    let (flags, comments_off): (&[&str], _) = if dialect(sh) == "zsh" {
+        (&["-f", "+m", "-i"], "unsetopt interactivecomments")
+    } else {
+        (&["--norc", "+m", "-i"], "shopt -u interactive_comments")
+    };
+    let script = format!(
+        r#"
+        export JLO_HOME="{}"
+        . "$JLO_HOME/bin/jlo-init.{}"
+        {comments_off}
+        set -eu
+        {body}
+        "#,
+        home.display(),
+        dialect(sh),
+    );
+    Command::new(sh)
+        .args(flags)
+        .arg("-c")
+        .arg(script)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run {sh}: {e}"))
+}
+
+/// Without comments, the marker line is code - an unterminated quote - so
+/// the wrapper must not hand it to `eval`, or every successful `jlo env`
+/// fails after applying its exports and a `set -e` shell exits.
+#[test]
+fn a_marked_payload_is_evaluated_without_interactive_comments() {
+    for sh in INTERPRETERS {
+        if skip_missing(
+            "a_marked_payload_is_evaluated_without_interactive_comments",
+            sh,
+        ) {
+            continue;
+        }
+        for (stub, reached) in [
+            (
+                format!("echo 'export JLO_PROBE=reached'\n{MARK}"),
+                "reached",
+            ),
+            (MARK.to_string(), ""),
+        ] {
+            let home = jlo_home_with_stub(&stub);
+            let out = run_interactive_without_comments(
+                sh,
+                home.path(),
+                "jlo env\necho \"status=$? probe=[${JLO_PROBE-}]\"",
+            );
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            assert!(
+                stdout.contains(&format!("status=0 probe=[{reached}]")),
+                "{sh} {stub:?}: {stdout:?} {:?}",
+                String::from_utf8_lossy(&out.stderr)
+            );
         }
     }
 }

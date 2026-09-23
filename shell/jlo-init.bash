@@ -24,10 +24,11 @@ jlo() {
       # Only a payload ending in the marker is evaluated: help, an older
       # binary's refusal and a cut-short payload lack it. A marked payload is
       # evaluated even on failure - the binary writes it before deleting.
+      # The marker is cut first: without interactive_comments it is code.
       # `>&1`: zsh's printf reports success on a closed stdout, the
       # redirection does not.
       case "$out" in
-        *"# jlo'end") eval "$out" || [ "$rc" -ne 0 ] || rc=1 ;;
+        *"# jlo'end") eval "${out%"# jlo'end"}" || [ "$rc" -ne 0 ] || rc=1 ;;
         *) [ "$rc" -ne 0 ] || printf '%s\n' "$out" >&1 || rc=1 ;;
       esac
       return "$rc"
