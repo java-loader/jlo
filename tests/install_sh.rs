@@ -1814,6 +1814,234 @@ fn the_reload_line_re_sources_only_what_this_shell_had_enabled() {
     }
 }
 
+/// Every stub `__install` writes, paired with the file it loads under `sh`
+/// (both relative to `$JLO_HOME`), and whether it needs `jlo.sh` sourced
+/// first - the autoload stubs are inert without the wrapper, by design.
+fn stub_targets(sh: &str) -> [(&'static str, String, bool); 5] {
+    let d = if sh.ends_with("zsh") { "zsh" } else { "bash" };
+    let completion = if d == "zsh" {
+        "completions/_jlo"
+    } else {
+        "completions/jlo.bash"
+    };
+    [
+        ("jlo.sh", format!("bin/jlo-init.{d}"), false),
+        ("bin/jlo-init.sh", format!("bin/jlo-init.{d}"), false),
+        ("autoload.sh", format!("bin/jlo-autoload.{d}"), true),
+        ("bin/jlo-autoload.sh", format!("bin/jlo-autoload.{d}"), true),
+        ("completions.sh", completion.to_string(), false),
+    ]
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Breakage {
+    Missing,
+    Unreadable,
+    /// Present and readable, but its own `.` fails.
+    FailsToLoad,
+}
+
+/// A stub's exit status is the reload's only signal. Trailing cleanup (an
+/// `unset`, a marker assignment) must not turn a load that did not happen into
+/// a success, and the marker the reload reads must not claim it did.
+#[test]
+fn a_stub_whose_target_cannot_be_loaded_fails_when_sourced() {
+    let (dir, _) = install(None);
+    let home = dir.path().join("home");
+    let jlo = home.join(".jlo");
+
+    for sh in INTERPRETERS {
+        if skip_missing(
+            "a_stub_whose_target_cannot_be_loaded_fails_when_sourced",
+            sh,
+        ) {
+            continue;
+        }
+        for (stub, target, needs_wrapper) in stub_targets(sh) {
+            let target = jlo.join(target);
+            for how in [
+                Breakage::Missing,
+                Breakage::Unreadable,
+                Breakage::FailsToLoad,
+            ] {
+                // zsh's `_jlo` is autoloaded on the first Tab, never sourced.
+                if matches!(how, Breakage::FailsToLoad) && target.ends_with("_jlo") {
+                    continue;
+                }
+                let original = std::fs::read(&target).unwrap();
+                let mode = std::fs::metadata(&target).unwrap().mode();
+                match how {
+                    Breakage::Missing => std::fs::remove_file(&target).unwrap(),
+                    Breakage::Unreadable => {
+                        let mut perms = std::fs::metadata(&target).unwrap().permissions();
+                        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o000);
+                        std::fs::set_permissions(&target, perms).unwrap();
+                    }
+                    Breakage::FailsToLoad => std::fs::write(&target, "return 7\n").unwrap(),
+                }
+                // Root reads a mode-000 file anyway, so there is nothing to test.
+                let untestable =
+                    matches!(how, Breakage::Unreadable) && std::fs::File::open(&target).is_ok();
+
+                let out = if untestable {
+                    eprintln!("SKIP {stub} with an unreadable target: this user reads it anyway.");
+                    None
+                } else {
+                    let pre = if needs_wrapper {
+                        format!(". {}\n", squote(&jlo.join("jlo.sh")))
+                    } else {
+                        String::new()
+                    };
+                    Some(
+                        Command::new(sh)
+                            .arg("-c")
+                            .arg(format!(
+                                "{pre}. {}\n\
+                                 echo \"status=$?\"\n\
+                                 echo \"markers=[${{_JLO_AUTOLOAD-}}${{_JLO_COMPLETIONS-}}]\"",
+                                squote(&jlo.join(stub))
+                            ))
+                            .env("HOME", &home)
+                            .env_remove("JLO_HOME")
+                            .output()
+                            .unwrap(),
+                    )
+                };
+
+                let _ = std::fs::remove_file(&target);
+                std::fs::write(&target, original).unwrap();
+                let mut perms = std::fs::metadata(&target).unwrap().permissions();
+                std::os::unix::fs::PermissionsExt::set_mode(&mut perms, mode);
+                std::fs::set_permissions(&target, perms).unwrap();
+
+                let Some(out) = out else { continue };
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                assert!(
+                    stdout.contains("status=") && !stdout.contains("status=0"),
+                    "{sh}: {stub} reported success with its target {how:?}: {stdout:?} \
+                     stderr={:?}",
+                    String::from_utf8_lossy(&out.stderr)
+                );
+                assert!(
+                    stdout.contains("markers=[]"),
+                    "{sh}: {stub} set its marker although nothing loaded ({how:?}): {stdout:?}"
+                );
+            }
+
+            // A `set -e` profile must still finish starting up: there the
+            // failure is dropped rather than turned into a dead login shell.
+            let original = std::fs::read(&target).unwrap();
+            std::fs::remove_file(&target).unwrap();
+            let pre = if needs_wrapper {
+                format!(". {}\n", squote(&jlo.join("jlo.sh")))
+            } else {
+                String::new()
+            };
+            let out = Command::new(sh)
+                .arg("-c")
+                .arg(format!(
+                    "set -e\n{pre}. {}\necho survived",
+                    squote(&jlo.join(stub))
+                ))
+                .env("HOME", &home)
+                .env_remove("JLO_HOME")
+                .output()
+                .unwrap();
+            std::fs::write(&target, original).unwrap();
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            assert!(
+                stdout.contains("survived"),
+                "{sh}: {stub} with a missing target aborted a set -e shell: {stdout:?}"
+            );
+        }
+    }
+}
+
+/// The end-to-end form of the above: `jlo selfupdate` through the resident
+/// wrapper, whose reload re-sources a stub that can no longer load what it
+/// points at. The `&&` in the payload only helps if the stub reports it.
+#[test]
+fn a_reload_that_cannot_load_a_stub_fails_the_selfupdate() {
+    let (dir, _) = install(None);
+    let home = dir.path().join("home");
+    let jlo = home.join(".jlo");
+    let binary = jlo.join("bin").join("jlo-bin");
+
+    // The payload the freshly published binary prints, replayed by a stand-in
+    // so the run needs neither a network nor a second release.
+    let payload = Command::new(&binary)
+        .args(["__wrapped", "__install", "--reload"])
+        .env("HOME", &home)
+        .env("JLO_HOME", &jlo)
+        .output()
+        .unwrap();
+    assert!(payload.status.success());
+    let replay = dir.path().join("payload");
+    std::fs::write(&replay, &payload.stdout).unwrap();
+    std::fs::remove_file(&binary).unwrap();
+    std::fs::write(&binary, format!("#!/bin/sh\ncat {}\n", squote(&replay))).unwrap();
+    let mut perms = std::fs::metadata(&binary).unwrap().permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+    std::fs::set_permissions(&binary, perms).unwrap();
+
+    for sh in INTERPRETERS {
+        if skip_missing("a_reload_that_cannot_load_a_stub_fails_the_selfupdate", sh) {
+            continue;
+        }
+        // `errexit` too: the stubs drop a failure under it when a profile
+        // sources them, and must not when the reload does.
+        let run = |options: &str, breakage: &str| {
+            let out = Command::new(sh)
+                .arg("-c")
+                .arg(format!(
+                    "set {options}\n. {jlo_sh}\n. {autoload}\n. {completions}\n\
+                     {breakage}\n\
+                     if jlo selfupdate; then echo status=0; else echo \"status=$?\"; fi",
+                    jlo_sh = squote(&jlo.join("jlo.sh")),
+                    autoload = squote(&jlo.join("autoload.sh")),
+                    completions = squote(&jlo.join("completions.sh")),
+                ))
+                .env("HOME", &home)
+                .env_remove("JLO_HOME")
+                .output()
+                .unwrap();
+            (
+                String::from_utf8_lossy(&out.stdout).into_owned(),
+                String::from_utf8_lossy(&out.stderr).into_owned(),
+            )
+        };
+        // Without this the failures below could be the stand-in's.
+        for options in ["+e", "-eu"] {
+            let (stdout, stderr) = run(options, ":");
+            assert!(
+                stdout.contains("status=0"),
+                "{sh} (set {options}): an intact reload failed: {stdout:?} stderr={stderr:?}"
+            );
+        }
+
+        // Only the three entry files: the reload never sources the shims.
+        for (stub, target, _) in stub_targets(sh)
+            .into_iter()
+            .filter(|(stub, _, _)| !stub.starts_with("bin/"))
+        {
+            let target = jlo.join(target);
+            let away = target.with_extension("away");
+            for options in ["+e", "-eu"] {
+                let (stdout, stderr) = run(
+                    options,
+                    &format!("mv {} {}", squote(&target), squote(&away)),
+                );
+                std::fs::rename(&away, &target).unwrap();
+                assert!(
+                    stdout.contains("status=") && !stdout.contains("status=0"),
+                    "{sh} (set {options}): a reload that could not load {stub}'s target \
+                     reported success: {stdout:?} stderr={stderr:?}"
+                );
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The 0.2.0/0.3.0 compatibility shims
 // ---------------------------------------------------------------------------

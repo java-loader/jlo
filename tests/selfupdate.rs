@@ -266,13 +266,14 @@ fn a_newer_release_is_verified_published_and_reloaded() {
         3,
         "stdout is not just the reload block: {stdout:?}"
     );
-    assert_eq!(lines[0], format!(". '{home}/jlo.sh'"));
+    assert_eq!(lines[0], format!(". '{home}/jlo.sh' __jlo_reload"));
     assert!(
-        lines[1].contains("_JLO_AUTOLOAD") && lines[1].ends_with("autoload.sh'; fi"),
+        lines[1].contains("_JLO_AUTOLOAD") && lines[1].ends_with("autoload.sh' __jlo_reload; fi"),
         "{stdout:?}"
     );
     assert!(
-        lines[2].contains("_JLO_COMPLETIONS") && lines[2].ends_with("completions.sh'; fi"),
+        lines[2].contains("_JLO_COMPLETIONS")
+            && lines[2].ends_with("completions.sh' __jlo_reload; fi"),
         "{stdout:?}"
     );
 
@@ -365,9 +366,15 @@ fn a_wrapped_update_forwards_the_mode_to_the_new_binary() {
     let home = install.path().to_string_lossy();
     let lines: Vec<&str> = stdout.lines().collect();
     assert_eq!(lines.len(), 4, "{stdout:?}");
-    assert_eq!(lines[0], format!(". '{home}/jlo.sh' &&"));
-    assert!(lines[1].ends_with("autoload.sh'; fi &&"), "{stdout:?}");
-    assert!(lines[2].ends_with("completions.sh'; fi"), "{stdout:?}");
+    assert_eq!(lines[0], format!(". '{home}/jlo.sh' __jlo_reload &&"));
+    assert!(
+        lines[1].ends_with("autoload.sh' __jlo_reload; fi &&"),
+        "{stdout:?}"
+    );
+    assert!(
+        lines[2].ends_with("completions.sh' __jlo_reload; fi"),
+        "{stdout:?}"
+    );
     assert_eq!(lines[3], "# jlo'end");
 }
 
