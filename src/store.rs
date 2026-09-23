@@ -1032,7 +1032,7 @@ fn staging_dir(store: &JdkStore) -> anyhow::Result<tempfile::TempDir> {
     // gigabyte of it, in the user's JDK directory rather than in `$TMPDIR`
     // where the system would eventually clear it. Nothing else will ever
     // remove it, so the next install does, before adding one of its own.
-    sweep_stale_staging(store.base());
+    sweep_stale_staging(store.base(), STAGING_PREFIX);
 
     tempfile::tempdir_in(store.base())
         .context("could not create a staging directory in the JDK install directory")
@@ -1047,20 +1047,28 @@ fn is_staging_dir(name: Option<&str>) -> bool {
     name.is_some_and(|name| name.starts_with(STAGING_PREFIX))
 }
 
-/// Delete staging directories left by an earlier, interrupted install.
+/// Delete the directories under `base` whose name starts with `prefix` that
+/// an earlier, interrupted install left behind. Shared with `selfupdate`,
+/// which stages its download the same way under `$JLO_HOME/bin`.
 ///
 /// Best effort in both directions: a failure is not worth a word (the install
 /// that follows is what the user asked for, and this is housekeeping), and a
 /// staging directory belonging to an install running *right now* is left
 /// alone - it is in use, so removing its contents would break a command that
-/// is working. There is no pid in the name to test, so "in use" is read as
-/// "modified in the last hour", which is far longer than any install takes.
-fn sweep_stale_staging(base: &Path) {
+/// is working. Holding a lock does not settle that, because not every stager
+/// takes one (`install.sh` unpacks before it hands over to the locked verb),
+/// so "in use" is read as "modified in the last hour", which is far longer
+/// than any install takes.
+pub(crate) fn sweep_stale_staging(base: &Path, prefix: &str) {
     let Ok(entries) = std::fs::read_dir(base) else {
         return;
     };
     for entry in entries.flatten() {
-        if !is_staging_dir(entry.file_name().to_str()) {
+        if !entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.starts_with(prefix))
+        {
             continue;
         }
         let recently_touched = entry

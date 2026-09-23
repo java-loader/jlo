@@ -173,6 +173,12 @@ impl Layout {
         self.bin.join(format!("{STAGING_PREFIX}-{pid}"))
     }
 
+    /// Remove staging directories an earlier run abandoned; see
+    /// [`crate::store::sweep_stale_staging`] for why that is judged by age.
+    pub(crate) fn sweep_stale_staging(&self) {
+        crate::store::sweep_stale_staging(&self.bin, STAGING_PREFIX);
+    }
+
     /// The binary's path, which is also the symlink target.
     ///
     /// The name `jlo-bin` is load-bearing: `~/.local/bin/jlo` is only ever

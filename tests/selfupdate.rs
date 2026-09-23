@@ -22,10 +22,11 @@
 #![allow(clippy::unwrap_used)]
 
 use sha2::{Digest, Sha256};
-use std::fs;
+use std::fs::{self, File};
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, SystemTime};
 
 /// A version no real release will ever carry, so the "is it newer?" check has
 /// an unambiguous answer whatever the crate version happens to be.
@@ -346,6 +347,34 @@ fn a_new_binary_that_fails_to_install_leaves_the_binary_alone() {
         "a failed install verb was reported as success"
     );
     assert_eq!(fs::read(install.binary()).unwrap(), before);
+
+    // The staged copy outlived its own run, and only a later one can take it
+    // away - but never while it may still belong to an install in progress.
+    let bin = install.path().join("bin");
+    let leftovers = || -> Vec<PathBuf> {
+        fs::read_dir(&bin)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.to_string_lossy().contains("/.jlo-install-"))
+            .collect()
+    };
+    let abandoned = leftovers();
+    assert_eq!(abandoned.len(), 1, "{abandoned:?}");
+    let abandoned = &abandoned[0];
+    let two_hours_ago = SystemTime::now() - Duration::from_hours(2);
+    File::open(abandoned)
+        .unwrap()
+        .set_modified(two_hours_ago)
+        .unwrap();
+    let in_progress = bin.join(".jlo-install-in-progress");
+    fs::create_dir(&in_progress).unwrap();
+
+    install.selfupdate(&release.url());
+    assert!(
+        !abandoned.exists(),
+        "an abandoned staging directory survived"
+    );
+    assert!(in_progress.exists(), "a fresh staging directory was swept");
 }
 
 /// Invariant 3, asserted rather than assumed: the staging directory is a

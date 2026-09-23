@@ -418,6 +418,10 @@ fn stage(
     latest: &str,
     package: &str,
 ) -> Result<Staged> {
+    // A staged binary that verified but then died before its install verb
+    // could clean up leaves a whole copy of J'Lo here, and nothing else ever
+    // comes back for it: `install.sh` sweeps only its own directory.
+    layout.sweep_stale_staging();
     let dir = layout.staging_dir(std::process::id());
     // A directory left behind by a killed run would otherwise make the unpack
     // below read as a success with stale contents.
