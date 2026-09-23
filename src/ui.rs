@@ -1,6 +1,11 @@
-use crate::adoptium::RemoteJdk;
+use crate::adoptium::{RemoteJdk, platform};
+use crate::conf::{Resolved, Source};
 use crate::request::{Request, Stream};
-use crate::store::{InstalledJdk, JdkStore, supersedes_every_install};
+use crate::resolve::Active;
+use crate::store::{
+    InstallRun, InstalledJdk, JdkStore, PruneReport, RemoveReport, quoted_list,
+    supersedes_every_install,
+};
 use clap::builder::styling::{AnsiColor, Style, Styles};
 use console::style;
 use indicatif::{ProgressBar, ProgressBarIter, ProgressStyle};
@@ -216,22 +221,22 @@ pub(crate) fn up_to_date(name: &str, version: &str, older_offer: Option<&str>) {
 /// error when nothing else is left to do. Names the platform because that is
 /// the half of the fact the user may not know: Adoptium does publish JDK 8,
 /// just not for macOS on Apple silicon.
-pub(crate) fn not_offered(requests: &[crate::request::Request]) -> String {
+pub(crate) fn not_offered(requests: &[Request]) -> String {
     let names: Vec<String> = requests.iter().map(ToString::to_string).collect();
     format!(
         "Adoptium offers no build of {} for {}",
-        crate::store::quoted_list(&names),
-        crate::adoptium::platform()
+        quoted_list(&names),
+        platform()
     )
 }
 
 /// A name `install`/`update` passes over because Adoptium offers no build of
 /// it here, while other names still go ahead. Worded like the warning for a
 /// version that does not parse, which is skipped the same way.
-pub(crate) fn skipping_not_offered(request: crate::request::Request) {
+pub(crate) fn skipping_not_offered(request: Request) {
     warning!(
         "skipping '{request}': Adoptium offers no build of it for {}",
-        crate::adoptium::platform()
+        platform()
     );
 }
 
@@ -244,14 +249,14 @@ pub(crate) const NOT_OFFERED_HINT: &str = "Run 'jlo list' to see what is availab
 /// A pre-release says so. Its stream publishes weekly and a bare `jlo update`
 /// moves it, so these lines recur on every run - one that did not read as a
 /// preview being swapped for the next would pass for a patch release.
-pub(crate) fn replaced(request: crate::request::Request, removed: &[String], failures: &[String]) {
+pub(crate) fn replaced(request: Request, removed: &[String], failures: &[String]) {
     if !removed.is_empty() {
         note(replaced_line(request, removed));
     }
     print_failures(failures);
 }
 
-fn replaced_line(request: crate::request::Request, removed: &[String]) -> String {
+fn replaced_line(request: Request, removed: &[String]) -> String {
     format!(
         "  replaced {}{}",
         if request.is_ea() { "pre-release " } else { "" },
@@ -261,7 +266,7 @@ fn replaced_line(request: crate::request::Request, removed: &[String]) -> String
 
 /// The lines `install` and `update` end on: how many builds they deleted,
 /// and whether the shell moved - or why the build it is on was kept.
-pub(crate) fn update_report(run: &crate::store::InstallRun) {
+pub(crate) fn update_report(run: &InstallRun) {
     let count = run.removed_count();
     if count > 0 {
         print_removed(count, "superseded JDK");
@@ -360,7 +365,7 @@ fn print_failures(failures: &[String]) {
 /// exact build may no longer be offered, which is also why this asks rather
 /// than migrating anything by itself. The whole name, so a flat early-access
 /// install is not told to reinstall the released stream.
-pub(crate) fn legacy_layout(version: &str, request: crate::request::Request) {
+pub(crate) fn legacy_layout(version: &str, request: Request) {
     warning!(
         "{version} predates J'Lo's macOS bundle layout, so '/usr/libexec/java_home' cannot see it."
     );
@@ -506,22 +511,22 @@ fn partial_line(removed: usize, failures: usize) -> String {
 ///
 /// Deletion is the one thing jlo does that cannot be undone, so unlike `jlo
 /// env` it always says what it did - including when the answer is "nothing".
-pub(crate) fn prune_report(report: &crate::store::PruneReport) {
+pub(crate) fn prune_report(report: &PruneReport) {
     // Styling adds invisible escape bytes, so pad the plain number first and
     // style the padded string - the same rule the `jlo list` columns follow.
     // `Display for Request` writes straight to the formatter and so ignores a
     // width; render first, pad second.
-    let width = report
+    let names: Vec<String> = report
         .removed
         .iter()
-        .map(|(request, _)| request.to_string().len())
-        .max()
-        .unwrap_or(0);
+        .map(|(request, _)| request.to_string())
+        .collect();
+    let width = names.iter().map(String::len).max().unwrap_or(0);
 
-    for (request, versions) in &report.removed {
+    for (name, (_, versions)) in names.iter().zip(&report.removed) {
         eprintln!(
             "{}  {} {}",
-            dim(format!("{:<width$}", request.to_string())),
+            dim(format!("{name:<width$}")),
             dim("removed"),
             versions.join(", ")
         );
@@ -583,7 +588,7 @@ pub(crate) fn prune_report(report: &crate::store::PruneReport) {
 /// returns an error rather than an empty report, so reaching here means at
 /// least one JDK was deleted or failed to delete. The trailing notes cover
 /// the targets that did not contribute one.
-pub(crate) fn remove_report(report: &crate::store::RemoveReport) {
+pub(crate) fn remove_report(report: &RemoveReport) {
     for version in &report.removed {
         eprintln!("{}  {}", dim("removed"), version);
     }
@@ -612,7 +617,7 @@ pub(crate) fn remove_report(report: &crate::store::RemoveReport) {
     if !report.not_installed.is_empty() {
         note(format!(
             "  nothing installed matched {}",
-            crate::store::quoted_list(&report.not_installed)
+            quoted_list(&report.not_installed)
         ));
     }
 
@@ -699,7 +704,7 @@ fn print_listing(rows: &[Row]) {
 /// `jlo current`'s whole stdout line. A formatter rather than a `println!` at
 /// the call site so it can be unit-tested against every state it
 /// distinguishes: pure - no filesystem, no environment.
-pub(crate) fn provenance_line(active: &crate::resolve::Active) -> String {
+pub(crate) fn provenance_line(active: &Active) -> String {
     // A JDK jlo did not install has no version to name, so the path is the
     // answer: it says "not mine" completely, and the version is usually in it
     // anyway.
@@ -709,7 +714,7 @@ pub(crate) fn provenance_line(active: &crate::resolve::Active) -> String {
     };
 
     let note = match &active.source {
-        Some(crate::conf::Source::Foreign) => "$JAVA_HOME, set outside jlo".to_string(),
+        Some(Source::Foreign) => "$JAVA_HOME, set outside jlo".to_string(),
         Some(source) => format!("from {}", source.label()),
         // Active, and a config pins something else. The stdout line still
         // answers the question asked; the disagreement is the warning below.
@@ -725,7 +730,7 @@ pub(crate) fn provenance_line(active: &crate::resolve::Active) -> String {
 /// Unconditional - deliberately not gated on `is_terminal()` the way the
 /// unsourced-`env` hint is. That gate exists because the autoload hook sources
 /// the `env` path; nothing hooks this.
-pub(crate) fn pin_mismatch(pinned: &crate::conf::Resolved) {
+pub(crate) fn pin_mismatch(pinned: &Resolved) {
     warning!(
         "{} pins Java {}; run 'jlo env' to switch.",
         pinned.source.label(),
@@ -795,7 +800,7 @@ pub(crate) fn superseded_hint(installed_any: bool, superseded: usize) -> Option<
 /// Also said on every bare `jlo update` while such a stream is installed,
 /// since it moves pre-release names too - so it names the way to stop that as
 /// well as the way to switch.
-pub(crate) fn ea_is_now_released(request: crate::request::Request) -> String {
+pub(crate) fn ea_is_now_released(request: Request) -> String {
     format!(
         "{request} still tracks pre-release builds; Java {major} has since been released. \
          Pin '{major}' to follow the released builds instead, or 'jlo remove {request}' \
@@ -809,11 +814,8 @@ pub(crate) fn ea_is_now_released(request: crate::request::Request) -> String {
 ///
 /// Split out from the printing so the rule is testable without a server: it is
 /// the *selection* that is easy to get wrong, not the sentence.
-fn released_ea_names(
-    requests: &[crate::request::Request],
-    released: &[i64],
-) -> Vec<crate::request::Request> {
-    let mut names: Vec<crate::request::Request> = Vec::new();
+fn released_ea_names(requests: &[Request], released: &[i64]) -> Vec<Request> {
+    let mut names: Vec<Request> = Vec::new();
     for request in requests.iter().filter(|r| r.is_ea()) {
         if released.contains(&request.major) && !names.contains(request) {
             names.push(*request);
@@ -826,7 +828,7 @@ fn released_ea_names(
 ///
 /// Pure: the caller supplies the released majors from whatever it already
 /// holds, so neither emit site owes this an extra request.
-pub(crate) fn announce_released_ea(requests: &[crate::request::Request], released: &[i64]) {
+pub(crate) fn announce_released_ea(requests: &[Request], released: &[i64]) {
     for request in released_ea_names(requests, released) {
         hint!("{}", ea_is_now_released(request));
     }
@@ -1134,10 +1136,13 @@ fn push_name<'a>(out: &mut Vec<Cells<'a>>, row: &'a NameRow) {
 /// Pre-release names get a line of their own like any other: the section,
 /// not an indent, now says whether a name is on disk.
 fn render_rows(rows: &[Row]) -> Listing {
-    let names: Vec<&NameRow> = rows.iter().flat_map(Row::names).collect();
+    let (on_disk, not_installed): (Vec<&NameRow>, Vec<&NameRow>) = rows
+        .iter()
+        .flat_map(Row::names)
+        .partition(|row| is_installed(row));
 
     let mut cells = Vec::new();
-    for row in names.iter().copied().filter(|row| is_installed(row)) {
+    for row in on_disk {
         push_name(&mut cells, row);
     }
 
@@ -1149,9 +1154,8 @@ fn render_rows(rows: &[Row]) -> Listing {
         .map(|c| render_line(c, name_width, version_width))
         .collect();
 
-    let not_installed: Vec<String> = names
+    let not_installed: Vec<String> = not_installed
         .iter()
-        .filter(|row| !is_installed(row))
         .map(|row| row.name.to_string())
         .collect();
     let available = (!not_installed.is_empty())
@@ -1337,7 +1341,6 @@ fn tilde(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::resolve::Active;
     use std::path::PathBuf;
 
     // -- ea_is_now_released --
@@ -1347,8 +1350,6 @@ mod tests {
     /// an unreleased 28 is the ordinary case and must stay silent.
     #[test]
     fn only_a_released_major_earns_the_notice() {
-        use crate::request::{Request, Stream};
-
         let ea = |major| Request {
             major,
             stream: Stream::Ea,
@@ -1371,8 +1372,6 @@ mod tests {
     /// repeats it - is still one thing to say.
     #[test]
     fn a_repeated_name_is_announced_once() {
-        use crate::request::{Request, Stream};
-
         let ea = Request {
             major: 21,
             stream: Stream::Ea,
@@ -1385,8 +1384,6 @@ mod tests {
     /// therefore a note, not a warning - but it must name the way out.
     #[test]
     fn the_notice_names_the_major_and_the_plain_name() {
-        use crate::request::{Request, Stream};
-
         let notice = ea_is_now_released(Request {
             major: 28,
             stream: Stream::Ea,
@@ -1408,8 +1405,6 @@ mod tests {
     /// next, not as a patch release.
     #[test]
     fn a_replaced_pre_release_says_so() {
-        use crate::request::{Request, Stream};
-
         let removed = vec!["28.0.0-beta+14.0.ea".to_string()];
         assert_eq!(
             replaced_line(
@@ -1488,8 +1483,8 @@ mod tests {
     // have no answer to print - so they are covered by the integration
     // suite's exit codes instead.
 
-    fn request(name: &str) -> crate::request::Request {
-        crate::request::Request::parse(name).expect("the fixture names a valid version")
+    fn request(name: &str) -> Request {
+        Request::parse(name).expect("the fixture names a valid version")
     }
 
     fn active(version: &str, major: i64) -> Active {
@@ -1502,10 +1497,10 @@ mod tests {
         }
     }
 
-    fn pinned(version: &str, file: &str) -> crate::conf::Resolved {
-        crate::conf::Resolved {
+    fn pinned(version: &str, file: &str) -> Resolved {
+        Resolved {
             request: request(version),
-            source: crate::conf::Source::ProjectConfig(PathBuf::from(file)),
+            source: Source::ProjectConfig(PathBuf::from(file)),
         }
     }
 
@@ -1546,7 +1541,7 @@ mod tests {
             path: PathBuf::from("/opt/jdk-21"),
             version: None,
             request: None,
-            source: Some(crate::conf::Source::Foreign),
+            source: Some(Source::Foreign),
             pinned_elsewhere: None,
         };
         assert_eq!(
@@ -1559,7 +1554,7 @@ mod tests {
     #[test]
     fn provenance_line_names_the_command_line_as_a_source() {
         let mut a = active("21.0.5+11", 21);
-        a.source = Some(crate::conf::Source::Argument);
+        a.source = Some(Source::Argument);
         assert_eq!(provenance_line(&a), "21.0.5+11  (from the command line)");
     }
 
