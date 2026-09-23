@@ -190,6 +190,26 @@ impl InstalledJdk {
     }
 }
 
+/// Whether `offered` is newer than every one of `builds` - the installs of
+/// one name. The single rule behind both `jlo list` calling an offer an
+/// `update` and `install`/`update` downloading it, so the listing and the
+/// command cannot disagree about what counts as moving a name forward.
+///
+/// The catalogue can sit *behind* the store - an install that came from
+/// somewhere else, or a major Adoptium has since rolled back - and following
+/// it would be a downgrade. Unmanaged installs count too: an offer no newer
+/// than one of them is not an improvement on what is already on disk. Two
+/// spellings of one version (`v21.0.11+9`, `21.0.11+9`) compare equal, so
+/// neither supersedes the other.
+///
+/// True when `builds` is empty: nothing installed is superseded by anything.
+/// The listing does not call that an update, and checks for it itself.
+pub(crate) fn supersedes_every_install(offered: &str, builds: &[&InstalledJdk]) -> bool {
+    builds
+        .iter()
+        .all(|jdk| compare(offered, &jdk.version).is_ok_and(Ordering::is_gt))
+}
+
 /// The install cascade stage 3 picks: the newest *released* build at or above
 /// the version floor.
 ///
@@ -351,16 +371,6 @@ impl JdkStore {
                 let request = jdk.request();
                 (jdk.version, request)
             })
-    }
-
-    /// The path of the exact build `metadata` describes, if it is installed.
-    pub(crate) fn find_exact(&self, metadata: &JdkMetadata) -> Option<PathBuf> {
-        let extracted_jdk_path = self.base.join(&metadata.semver);
-        if extracted_jdk_path.exists() {
-            Some(extracted_jdk_path)
-        } else {
-            None
-        }
     }
 
     /// The name of the newest *released* JDK in the store, or `None` when
@@ -788,11 +798,11 @@ impl InstallRun {
 }
 
 /// The one operation behind both `install` and `update`: per name, download
-/// the latest build if it is not already here, then delete the builds of that
-/// name it supersedes. The two verbs differ only in how they arrive at this
-/// set of names. The on-demand install behind `env`, `home` and `exec` does
-/// not come through here: it only fills a missing name, so it has nothing to
-/// supersede.
+/// the latest build if it supersedes every install of the name, then delete
+/// the builds of that name it supersedes. A name moves forward, never back.
+/// The two verbs differ only in how they arrive at this set of names. The
+/// on-demand install behind `env`, `home` and `exec` does not come through
+/// here: it only fills a missing name, so it has nothing to supersede.
 ///
 /// `active` is `$JAVA_HOME` of the calling shell, if set. Its build is
 /// deleted only when `shell_follows`; otherwise it is kept and named in
@@ -974,19 +984,42 @@ fn resolve_offered(
 
 /// The version and java home of the build installed, or `None` when the name
 /// was already current - so the caller can tell a real update from a no-op.
+///
+/// Downloads only an offer that supersedes every install of the name. Asking
+/// "is this exact build on disk?" instead would follow a catalogue that sits
+/// behind the store: the older build would land beside the newer one, which
+/// it does not supersede, so nothing would be replaced and the name would
+/// hold two builds.
 fn install_latest(
     client: &AdoptiumClient,
     store: &JdkStore,
     request: Request,
     jdk_metadata: JdkMetadata,
 ) -> anyhow::Result<Option<(String, PathBuf)>> {
-    if store.find_exact(&jdk_metadata).is_some() {
-        ui::up_to_date(&request.to_string(), &jdk_metadata.semver);
-        Ok(None)
-    } else {
-        let java_home =
-            install_jdk(client, store, &jdk_metadata).context("could not install JDK")?;
-        Ok(Some((jdk_metadata.semver, java_home)))
+    let installed = store.list()?;
+    // Only this name: a pre-release sorts above the release it previews, so
+    // measured against `21-ea` an offer for `21` would never be newer.
+    let builds: Vec<&InstalledJdk> = installed
+        .iter()
+        .filter(|jdk| jdk.request() == request)
+        .collect();
+
+    match builds.first() {
+        // `list` is newest first.
+        Some(newest) if !supersedes_every_install(&jdk_metadata.semver, &builds) => {
+            let older = compare(&jdk_metadata.semver, &newest.version).is_ok_and(Ordering::is_lt);
+            ui::up_to_date(
+                &request.to_string(),
+                &newest.version,
+                older.then_some(jdk_metadata.semver.as_str()),
+            );
+            Ok(None)
+        }
+        _ => {
+            let java_home =
+                install_jdk(client, store, &jdk_metadata).context("could not install JDK")?;
+            Ok(Some((jdk_metadata.semver, java_home)))
+        }
     }
 }
 
@@ -1723,31 +1756,6 @@ mod tests {
                 stream: Stream::Ea
             }),
             Some(dir.path().join("26.0.2-beta+101.0.ea"))
-        );
-    }
-
-    // -- find_exact --
-
-    #[test]
-    fn find_exact_exists() {
-        let dir = tempdir().unwrap();
-        create_jdk_dir(dir.path(), "21.0.3+9", true);
-
-        assert!(
-            JdkStore::at(dir.path())
-                .find_exact(&metadata("21.0.3+9"))
-                .is_some()
-        );
-    }
-
-    #[test]
-    fn find_exact_not_exists() {
-        let dir = tempdir().unwrap();
-
-        assert!(
-            JdkStore::at(dir.path())
-                .find_exact(&metadata("21.0.3+9"))
-                .is_none()
         );
     }
 

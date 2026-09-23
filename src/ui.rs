@@ -1,6 +1,6 @@
 use crate::adoptium::RemoteJdk;
 use crate::request::{Request, Stream};
-use crate::store::{InstalledJdk, JdkStore};
+use crate::store::{InstalledJdk, JdkStore, supersedes_every_install};
 use console::style;
 use indicatif::{ProgressBar, ProgressBarIter, ProgressStyle};
 use std::cmp::Ordering;
@@ -154,13 +154,28 @@ impl InstallUi {
 /// `jlo install` and `jlo update` exist to answer "is anything newer
 /// available?", so the answer is their output - unlike `jlo env`, where
 /// silence is the answer.
-pub(crate) fn up_to_date(name: &str, version: &str) {
+///
+/// `version` is the newest build installed. `older_offer` is what Adoptium
+/// offers when that is older still: without the note, a user who has just
+/// seen the listing show that build under LATEST would read "up to date" as
+/// jlo not having looked.
+pub(crate) fn up_to_date(name: &str, version: &str, older_offer: Option<&str>) {
     eprintln!(
         "{} JDK {} is up to date {}",
         style("✓").green().for_stderr(),
         name,
         style(format!("({version})")).dim().for_stderr()
     );
+    if let Some(offered) = older_offer {
+        eprintln!(
+            "{}",
+            style(format!(
+                "  Adoptium currently offers an older build ({offered})"
+            ))
+            .dim()
+            .for_stderr()
+        );
+    }
 }
 
 /// That Adoptium offers no build of any of `requests` for this machine - the
@@ -977,13 +992,13 @@ fn name_row(
     // LATEST and `update` answer different questions. LATEST is anything
     // Adoptium offers that is not already on disk, so a catalogue that sits
     // behind the store is still visible; only `update` claims the offer is
-    // an improvement. Presence is the exact directory name, as `jlo update`
-    // checks it before reporting "up to date".
+    // an improvement - by the rule `jlo update` downloads by. Presence is the
+    // exact directory name.
     let latest = offered
         .filter(|jdk| !builds.iter().any(|build| build.version == jdk.version))
         .map(|jdk| jdk.version.clone());
-    let update =
-        !builds.is_empty() && offered.is_some_and(|jdk| supersedes_every_install(jdk, &builds));
+    let update = !builds.is_empty()
+        && offered.is_some_and(|jdk| supersedes_every_install(&jdk.version, &builds));
 
     // Only a managed build can be the one the name reports, because only
     // managed builds are what `jlo remove --superseded` sorts: it filters on
@@ -1013,21 +1028,6 @@ fn name_row(
         lts: offered.is_some_and(|jdk| jdk.lts),
         active: head.is_some_and(|jdk| is_active(&jdk.version)),
         others,
-    })
-}
-
-/// Whether an offered build is newer than every install of its name - the
-/// condition for calling it an `update`.
-///
-/// The catalogue can sit *behind* the store - an install that came from
-/// somewhere else, or a major Adoptium has since rolled back - and calling
-/// that offer an update would be recommending a downgrade. Unmanaged installs
-/// count too: an offer no newer than one of them is not an improvement on
-/// what is already on disk.
-fn supersedes_every_install(offered: &RemoteJdk, builds: &[&InstalledJdk]) -> bool {
-    builds.iter().all(|jdk| {
-        crate::version::compare(&offered.version, &jdk.version)
-            .is_ok_and(|ord| ord == Ordering::Greater)
     })
 }
 

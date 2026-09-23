@@ -264,8 +264,9 @@ Install JDKs; without a version, the one jlo env would use
 
 Downloads the latest build Adoptium offers of every name given - a
 major (21) or a pre-release stream (28-ea), not an exact build: 21, not
-21.0.5. A name already on its latest build is reported and left alone;
-one Adoptium has no build of for this machine is skipped with a warning.
+21.0.5. A name already on that build or a newer one is reported and
+left alone - never moved back; one Adoptium has no build of for this
+machine is skipped with a warning.
 
 install and update are one operation. They differ only when no version
 is given: install resolves one in four steps - the nearest .jlorc at or
@@ -298,8 +299,9 @@ Update JDKs; without a version, every installed one
 
 Downloads the latest build Adoptium offers of every name given - a
 major (21) or a pre-release stream (28-ea), not an exact build: 21, not
-21.0.5. A name already on its latest build is reported and left alone;
-one Adoptium has no build of for this machine is skipped with a warning.
+21.0.5. A name already on that build or a newer one is reported and
+left alone - never moved back; one Adoptium has no build of for this
+machine is skipped with a warning.
 
 install and update are one operation. They differ only when no version
 is given: update takes every installed name, pre-release streams
