@@ -548,18 +548,20 @@ fn list_remote_shows_available_versions() {
         .env("JLO_ADOPTIUM_API_URL", server.url())
         .assert()
         .success()
-        // The major version leads the row, after the gutter column that marks
-        // which install `$JAVA_HOME` points at - the major is what
-        // `jlo update` takes.
-        .stdout(predicate::str::starts_with("    21  21.0.11+10.0.LTS"))
-        .stdout(predicate::str::contains("LTS"));
+        // The name leads the row, after the gutter column that marks which
+        // install `$JAVA_HOME` points at - the name is what `jlo install`
+        // takes. Nothing is installed, so the build sits under LATEST.
+        .stdout("    21               21.0.11+10.0.LTS  LTS\n")
+        // The column names go to stderr with the tip, so a pipe sees rows only.
+        .stderr("    NAME  INSTALLED  LATEST\n");
 }
 
 /// The case `jlo remove 17.0.11+10` had nowhere to read its argument from:
-/// a build older than the catalogue's used to collapse into a parenthetical
-/// on the row above it.
+/// a build older than the newest of its name used to collapse into a
+/// parenthetical on the row above it. It is an indented line of its own, and
+/// the active mark follows it there.
 #[test]
-fn list_remote_gives_a_superseded_build_its_own_row() {
+fn list_remote_gives_a_superseded_build_its_own_line() {
     let mut server = mockito::Server::new();
     let _r = server
         .mock("GET", "/v3/info/available_releases")
@@ -588,7 +590,7 @@ fn list_remote_gives_a_superseded_build_its_own_row() {
         .assert()
         .success()
         .stdout(
-            "    21  21.0.11+10.0.LTS  LTS  installed\n \u{2192}  21  21.0.9+10.0.LTS   LTS  superseded\n",
+            "    21    21.0.11+10.0.LTS  LTS\n \u{2192}        21.0.9+10.0.LTS        superseded\n",
         )
         // The advice belongs on stderr, so a pipe sees only the rows.
         .stderr(predicate::str::contains(
@@ -1830,11 +1832,16 @@ fn a_listing_reads_the_same_with_colour_off() {
         );
     }
 
-    // The distinctions survive as text: a status word per row, and the active
-    // row marked by the gutter column rather than by a colour.
+    // The distinctions survive as text: a column per fact and a status word
+    // per exception, and the active line marked by the gutter column rather
+    // than by a colour.
     assert_eq!(
-        stdout, "    21  21.0.11+10  installed\n \u{2192}  21  21.0.9+10   superseded\n",
+        stdout, "    21    21.0.11+10\n \u{2192}        21.0.9+10   superseded\n",
         "with colour off the rows must still say which is which"
+    );
+    assert!(
+        stderr.starts_with("    NAME  INSTALLED\n"),
+        "the column names head stderr, with no LATEST offline: {stderr:?}"
     );
     assert!(
         stderr.contains("`jlo remove --superseded` (1 superseded)"),

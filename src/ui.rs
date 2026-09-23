@@ -1,4 +1,5 @@
 use crate::adoptium::RemoteJdk;
+use crate::request::{Request, Stream};
 use crate::store::{InstalledJdk, JdkStore};
 use console::style;
 use indicatif::{ProgressBar, ProgressBarIter, ProgressStyle};
@@ -622,22 +623,14 @@ pub(crate) fn offline_list(
     print_listing(&build_rows(&[], installed, active_version));
 }
 
-/// Width of the leading major-version column. Styling adds invisible escape
-/// bytes, so the width has to come from the plain numbers.
-fn major_column_width(majors: impl IntoIterator<Item = i64>) -> usize {
-    majors
-        .into_iter()
-        .map(|major| major.to_string().len())
-        .max()
-        .unwrap_or(0)
-}
-
 /// The `jlo list` listing: what Adoptium offers for this machine, merged with
 /// what is installed locally.
 ///
-/// One row per version, not per major: an install that is not the newest of
-/// its major used to collapse into a parenthetical on the row above, which
-/// left `jlo remove 17.0.11+10` with nowhere to read its argument from.
+/// One row per major, led by the name `install`, `update` and `env` take.
+/// Since every verb keeps one build per name, a row per *build* was mostly
+/// the same name twice; the builds that do still sit beside the newest - a
+/// leftover, an unmanaged install - get an indented line of their own, so
+/// `jlo remove <build>` still finds its argument here.
 pub(crate) fn remote_list(
     available: &[RemoteJdk],
     installed: &[InstalledJdk],
@@ -655,12 +648,15 @@ pub(crate) fn remote_list(
     print_listing(&build_rows(available, installed, active_version));
 }
 
-/// The rows, then at most one line of advice.
+/// The header, the rows, then at most one line of advice.
 fn print_listing(rows: &[Row]) {
-    print_lines(render_rows(rows));
+    let listing = render_rows(rows);
 
-    // stderr, so neither the tip nor the blank line above it lands in a pipe
-    // alongside the listing.
+    // The header and the tip go to stderr, so a pipe sees only the rows -
+    // `jlo list | grep` should not have to step over a line of column names.
+    eprintln!("{}", listing.header);
+    print_lines(listing.lines);
+
     if let Some(tip) = tip_line(rows) {
         eprintln!("\n{tip}");
     }
@@ -850,225 +846,346 @@ pub(crate) fn print_lines(lines: impl IntoIterator<Item = String>) {
     }
 }
 
-/// What one row of `jlo list` says about a single JDK version.
+/// What an indented line of `jlo list` says about a build beside the one its
+/// name reports.
 ///
-/// Exactly one token per row: the statuses are ordered by how much they
-/// constrain what the user can do with the install, so a build that is both
-/// unmanaged and superseded reports `unmanaged` - the fact that decides
-/// whether `jlo remove --superseded` will touch it at all.
+/// Exactly one token per line, ordered by how much it constrains what the
+/// user can do with the install: a build that is both unmanaged and older
+/// reports `unmanaged` - the fact that decides whether `jlo remove
+/// --superseded` will touch it at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Status {
-    /// Adoptium offers it and it is not installed - either nothing of this
-    /// name is, or what is installed is newer than this build.
-    Available,
-    /// Adoptium offers it, it is not installed, and it is newer than every
-    /// build of this name that is.
-    Update,
-    /// Installed, and the newest build of its major that is installed.
+enum Status {
+    /// As new as the build its name reports: two spellings of one version
+    /// (`v21.0.11+9` beside `21.0.11+9`). Neither will be deleted, so neither
+    /// is called superseded.
     Installed,
-    /// Installed, but a newer build of the same major is installed too.
+    /// Managed, and older than the newest managed build of its name.
     Superseded,
     /// Installed without a `.jlo-managed` marker: jlo will not delete it.
     Unmanaged,
 }
 
-/// One line of the listing: a version, plus what jlo knows about it.
+/// An installed build that is not the one its name reports, on a line of its
+/// own so its exact version is there to pass to `jlo remove`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Row {
-    pub(crate) major: i64,
-    pub(crate) version: String,
-    pub(crate) lts: bool,
-    pub(crate) status: Status,
+struct Build {
+    version: String,
+    status: Status,
     /// `$JAVA_HOME` points at this install.
-    pub(crate) active: bool,
-    /// A pre-release build: an install of an EA name, or the newest build of
-    /// the pre-release stream of a major not yet released.
-    pub(crate) ea: bool,
+    active: bool,
 }
 
-/// Merge the remote catalogue and the local installs into one row per version.
+/// One name - `27` or `28-ea` - and what jlo knows about it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NameRow {
+    name: Request,
+    /// The newest managed build of the name: the one `jlo env <name>` picks
+    /// and the one `jlo update` measures against.
+    installed: Option<String>,
+    /// The build Adoptium offers, only when it is not already here: nothing
+    /// of the name is installed, or it is newer than everything that is.
+    latest: Option<String>,
+    /// `latest` is newer than an install of this name, so `jlo update` would
+    /// download it.
+    update: bool,
+    lts: bool,
+    /// `$JAVA_HOME` points at `installed`.
+    active: bool,
+    /// Every other install of the name, newest first.
+    others: Vec<Build>,
+}
+
+/// One major of the listing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Row {
+    head: NameRow,
+    /// The pre-release name of the major, when its released name heads the
+    /// row - typically a `27-ea` left over from before 27 shipped.
+    pre_release: Option<NameRow>,
+}
+
+impl Row {
+    fn names(&self) -> impl Iterator<Item = &NameRow> {
+        std::iter::once(&self.head).chain(self.pre_release.as_ref())
+    }
+}
+
+/// Merge the remote catalogue and the local installs into one row per major,
+/// newest first.
 fn build_rows(
     available: &[RemoteJdk],
     installed: &[InstalledJdk],
     active_version: Option<&str>,
 ) -> Vec<Row> {
-    let mut rows: Vec<Row> = available
+    let mut majors: Vec<i64> = available
         .iter()
-        .map(|jdk| Row {
-            major: jdk.major,
+        .map(|jdk| jdk.major)
+        .chain(installed.iter().map(|jdk| jdk.major))
+        .collect();
+    majors.sort_unstable_by(|a, b| b.cmp(a));
+    majors.dedup();
+
+    majors
+        .into_iter()
+        .filter_map(|major| {
+            let row = |stream| {
+                name_row(
+                    Request { major, stream },
+                    available,
+                    installed,
+                    active_version,
+                )
+            };
+            // The released name leads whenever the major has one: once a
+            // major ships, `27` is the name anyone reaches for, and a `27-ea`
+            // beside it is the exception worth an indented line.
+            match (row(Stream::Ga), row(Stream::Ea)) {
+                (Some(head), pre_release) => Some(Row { head, pre_release }),
+                (None, head) => head.map(|head| Row {
+                    head,
+                    pre_release: None,
+                }),
+            }
+        })
+        .collect()
+}
+
+/// The line for one name, or `None` when Adoptium offers nothing of it and
+/// nothing of it is installed.
+///
+/// Only builds of this name are compared, never the other stream of the same
+/// major: a pre-release sorts above the release it previews, so across
+/// streams an offered beta would read as an update to an installed release,
+/// and following it would change streams - which `jlo update` never does.
+fn name_row(
+    name: Request,
+    available: &[RemoteJdk],
+    installed: &[InstalledJdk],
+    active_version: Option<&str>,
+) -> Option<NameRow> {
+    let offered = available.iter().find(|jdk| jdk.request() == name);
+    let mut builds: Vec<&InstalledJdk> = installed
+        .iter()
+        .filter(|jdk| jdk.request() == name)
+        .collect();
+    if offered.is_none() && builds.is_empty() {
+        return None;
+    }
+    // Stable, so two spellings of one version keep the store's order.
+    builds
+        .sort_by(|a, b| crate::version::compare(&b.version, &a.version).unwrap_or(Ordering::Equal));
+
+    let latest = offered
+        .filter(|jdk| supersedes_every_install(jdk, &builds))
+        .map(|jdk| jdk.version.clone());
+    let update = latest.is_some() && !builds.is_empty();
+
+    // Only a managed build can be the one the name reports, because only
+    // managed builds are what `jlo remove --superseded` sorts: it filters on
+    // the marker before it picks the newest of a name. An unmanaged 21.0.3
+    // beside a managed 21.0.1 would otherwise make the managed one read as
+    // superseded, recommending a command that removes nothing.
+    let head = builds
+        .iter()
+        .position(|jdk| jdk.managed)
+        .map(|index| builds.remove(index));
+    let is_active = |version: &str| active_version == Some(version);
+
+    let others = builds
+        .iter()
+        .map(|jdk| Build {
             version: jdk.version.clone(),
-            lts: jdk.lts,
-            status: match installed.iter().find(|i| i.version == jdk.version) {
-                Some(local) => local_status(local, installed),
-                None if supersedes_every_install(jdk, installed) => Status::Update,
-                None => Status::Available,
-            },
-            active: false,
-            ea: jdk.stream == crate::request::Stream::Ea,
+            status: other_status(jdk, head),
+            active: is_active(&jdk.version),
         })
         .collect();
 
-    // Installs Adoptium does not offer under that exact version still get a
-    // row: they are removable, and a listing that hides them is the reason
-    // `jlo remove <build>` had nowhere to read its argument from.
-    rows.extend(
-        installed
-            .iter()
-            .filter(|i| !available.iter().any(|a| a.version == i.version))
-            .map(|i| Row {
-                major: i.major,
-                version: i.version.clone(),
-                // LTS is a property of the major, so an older build keeps the
-                // tag even once Adoptium stops offering that exact version -
-                // but only for a GA install: "LTS" is a promise about a
-                // released build, and gating on GA keeps an EA row from
-                // printing both marks.
-                lts: i.stream == crate::request::Stream::Ga
-                    && available.iter().any(|a| a.major == i.major && a.lts),
-                status: local_status(i, installed),
-                active: false,
-                ea: i.stream == crate::request::Stream::Ea,
-            }),
-    );
-
-    // A version, not a path: the caller has already resolved `$JAVA_HOME`
-    // against the store, so a row only has to match the name.
-    if let Some(active) = active_version {
-        for row in &mut rows {
-            row.active = row.version == active && row.status != Status::Available;
-        }
-    }
-
-    rows.sort_by(|a, b| {
-        b.major.cmp(&a.major).then_with(|| {
-            crate::version::compare(&b.version, &a.version).unwrap_or(Ordering::Equal)
-        })
-    });
-    rows
-}
-
-/// Whether an offered build is newer than every install of its name.
-///
-/// The catalogue can sit *behind* the store - an install that came from
-/// somewhere else, or a major Adoptium has since rolled back - and `update`
-/// there would be offering a downgrade.
-///
-/// Only installs of the same name are compared. A pre-release sorts above the
-/// release it previews, so across streams an offered beta would read as an
-/// update to an installed release - and following it would change streams,
-/// which `jlo update` never does. A name with nothing installed falls through
-/// to `Available`.
-fn supersedes_every_install(jdk: &RemoteJdk, installed: &[InstalledJdk]) -> bool {
-    let mut same_name = installed
-        .iter()
-        .filter(|i| i.request() == jdk.request())
-        .peekable();
-    if same_name.peek().is_none() {
-        return false;
-    }
-    same_name.all(|i| {
-        crate::version::compare(&jdk.version, &i.version).is_ok_and(|ord| ord == Ordering::Greater)
+    Some(NameRow {
+        name,
+        installed: head.map(|jdk| jdk.version.clone()),
+        latest,
+        update,
+        lts: offered.is_some_and(|jdk| jdk.lts),
+        active: head.is_some_and(|jdk| is_active(&jdk.version)),
+        others,
     })
 }
 
-/// The status of a row backed by an install.
+/// Whether an offered build is newer than every install of its name - true
+/// when nothing of the name is installed.
 ///
-/// `Superseded` is a property of the *build* - a newer build of the same major
-/// is installed alongside it - which is what `jlo remove --superseded` acts
-/// on. Being older
-/// than something Adoptium offers is a different fact, and it lands on the
-/// remote row as `Update`, where `jlo update <major>` is the command that
-/// answers it.
+/// The catalogue can sit *behind* the store - an install that came from
+/// somewhere else, or a major Adoptium has since rolled back - and showing it
+/// there would be offering a downgrade. Unmanaged installs count too: `jlo
+/// update` finds the exact build already on disk and does nothing, so
+/// offering it would name an action that does not happen.
+fn supersedes_every_install(offered: &RemoteJdk, builds: &[&InstalledJdk]) -> bool {
+    builds.iter().all(|jdk| {
+        crate::version::compare(&offered.version, &jdk.version)
+            .is_ok_and(|ord| ord == Ordering::Greater)
+    })
+}
+
+/// The status of an install that is not the newest managed build of its name.
 ///
 /// `Unmanaged` comes first because it decides whether jlo will act on the
 /// install at all: both of `remove`'s selectors leave a marker-less directory
 /// alone, so `superseded` there would name an action that cannot happen.
-fn local_status(jdk: &InstalledJdk, installed: &[InstalledJdk]) -> Status {
+fn other_status(jdk: &InstalledJdk, head: Option<&InstalledJdk>) -> Status {
     if !jdk.managed {
         return Status::Unmanaged;
     }
-    // Only managed builds are compared, because only managed builds are what
-    // `jlo remove --superseded` sorts: it filters on the marker before it
-    // picks the newest of a major. An unmanaged 21.0.3 beside a managed
-    // 21.0.1 would otherwise mark the managed one superseded and recommend a
-    // command that removes nothing, the managed build still being the newest
-    // of the set pruning actually looks at.
-    // Also filtered to the same stream: the two streams of one major are two
-    // names, so a pre-release and the release it previews never supersede
-    // each other, however their version strings would otherwise compare.
-    let superseded = installed.iter().filter(|other| other.managed).any(|other| {
-        other.major == jdk.major
-            && other.stream == jdk.stream
-            && crate::version::compare(&other.version, &jdk.version)
-                .is_ok_and(|ord| ord == Ordering::Greater)
+    let older = head.is_some_and(|head| {
+        crate::version::compare(&head.version, &jdk.version)
+            .is_ok_and(|ord| ord == Ordering::Greater)
     });
-    if superseded {
+    if older {
         Status::Superseded
     } else {
         Status::Installed
     }
 }
 
-/// Render the rows as aligned columns: active gutter, major, version, LTS tag,
-/// EA tag, status.
+/// A listing rendered: the column header, and one line per name or build.
+struct Listing {
+    header: String,
+    lines: Vec<String>,
+}
+
+/// One printed line before padding: the cells of a name, or of a build under
+/// it.
+struct Cells<'a> {
+    active: bool,
+    name: String,
+    installed: &'a str,
+    latest: &'a str,
+    lts: bool,
+    status: String,
+}
+
+fn cells(rows: &[Row]) -> Vec<Cells<'_>> {
+    let mut out = Vec::new();
+    for row in rows {
+        push_name(&mut out, &row.head, "");
+        if let Some(pre_release) = &row.pre_release {
+            push_name(&mut out, pre_release, "  ");
+        }
+    }
+    out
+}
+
+/// A name's line, then its other builds. A build's name cell is left empty:
+/// the build sits in the INSTALLED column, where the exact version `jlo
+/// remove` takes is read from, and the blank is what marks it as belonging to
+/// the name above.
+fn push_name<'a>(out: &mut Vec<Cells<'a>>, row: &'a NameRow, indent: &str) {
+    out.push(Cells {
+        active: row.active,
+        name: format!("{indent}{}", row.name),
+        installed: row.installed.as_deref().unwrap_or(""),
+        latest: row.latest.as_deref().unwrap_or(""),
+        lts: row.lts,
+        status: if row.update {
+            style("update").yellow().to_string()
+        } else {
+            String::new()
+        },
+    });
+    for build in &row.others {
+        out.push(Cells {
+            active: build.active,
+            name: String::new(),
+            installed: &build.version,
+            latest: "",
+            lts: false,
+            status: render_status(build.status),
+        });
+    }
+}
+
+const NAME_HEADER: &str = "NAME";
+const INSTALLED_HEADER: &str = "INSTALLED";
+const LATEST_HEADER: &str = "LATEST";
+
+/// Render the rows as aligned columns: active gutter, name, installed build,
+/// latest build, LTS tag, status.
 ///
 /// The gutter is emitted on every line whether or not anything is active, so
 /// the columns sit in the same place from one run to the next - a listing that
 /// shifted sideways the moment `$JAVA_HOME` was set would be worse than one
 /// that never marked anything.
-fn render_rows(rows: &[Row]) -> Vec<String> {
-    let major_width = major_column_width(rows.iter().map(|row| row.major));
-    let version_width = rows.iter().map(|row| row.version.len()).max().unwrap_or(0);
-    // `jlo list --offline` has no catalogue to read LTS out of, so the column
-    // would be three blank characters on every line of it.
-    let any_lts = rows.iter().any(|row| row.lts);
-    // Same reasoning for the EA column: most listings have no pre-release
-    // install at all.
-    let any_ea = rows.iter().any(|row| row.ea);
+fn render_rows(rows: &[Row]) -> Listing {
+    let cells = cells(rows);
+    let width = |header: &str, cell: fn(&Cells) -> usize| {
+        cells
+            .iter()
+            .map(cell)
+            .chain([header.len()])
+            .max()
+            .unwrap_or(0)
+    };
+    let name_width = width(NAME_HEADER, |c| c.name.len());
+    let installed_width = width(INSTALLED_HEADER, |c| c.installed.len());
+    let latest_width = width(LATEST_HEADER, |c| c.latest.len());
+    // `jlo list --offline` has no catalogue, so it has neither a latest build
+    // nor an LTS tag to show, and either column would be blank on every line.
+    let any_latest = cells.iter().any(|c| !c.latest.is_empty());
+    let any_lts = cells.iter().any(|c| c.lts);
 
-    rows.iter()
-        .map(|row| {
-            // Every styled field is padded as a plain string first: the escape
-            // bytes `console::style` adds are invisible but still counted by
-            // the formatter, so styling before padding shifts the columns.
-            let gutter = if row.active {
+    // Every styled field is padded as a plain string first: the escape bytes
+    // `console::style` adds are invisible but still counted by the formatter,
+    // so styling before padding shifts the columns.
+    let line = |gutter: &str, name: &str, installed: &str, latest: &str, rest: &str| {
+        let latest = if any_latest {
+            format!("{latest:<latest_width$}  ")
+        } else {
+            String::new()
+        };
+        format!(" {gutter}  {name}  {installed:<installed_width$}  {latest}{rest}")
+            .trim_end()
+            .to_string()
+    };
+
+    let header = heading(&line(
+        " ",
+        &format!("{NAME_HEADER:<name_width$}"),
+        INSTALLED_HEADER,
+        LATEST_HEADER,
+        "",
+    ));
+
+    let lines = cells
+        .iter()
+        .map(|c| {
+            let gutter = if c.active {
                 style("\u{2192}").cyan().bold().to_string()
             } else {
                 " ".to_string()
             };
-            let lts = match (any_lts, row.lts) {
+            let lts = match (any_lts, c.lts) {
                 (false, _) => String::new(),
                 (true, true) => format!("{}  ", style("LTS").bold()),
                 (true, false) => "     ".to_string(),
             };
-            // `ea` and `LTS` are different facts and get their own column;
-            // the inheritance gate in `build_rows` means no row ever carries
-            // both, but each column still has to line up on its own.
-            let ea = match (any_ea, row.ea) {
-                (false, _) => String::new(),
-                (true, true) => format!("{}  ", style("EA").bold()),
-                (true, false) => "    ".to_string(),
-            };
-            format!(
-                " {gutter}  {:>major_width$}  {:<version_width$}  {lts}{ea}{}",
-                style(row.major).dim(),
-                row.version,
-                render_status(row.status),
+            line(
+                &gutter,
+                &style(format!("{:<name_width$}", c.name)).dim().to_string(),
+                c.installed,
+                c.latest,
+                &format!("{lts}{}", c.status),
             )
-            .trim_end()
-            .to_string()
         })
-        .collect()
+        .collect();
+
+    Listing { header, lines }
 }
 
-/// The one word a row ends on. Each is a single token - no spaces, no
-/// parentheses - so `jlo list | grep superseded` stays a usable way to ask
-/// which installs `jlo remove --superseded` would take.
+/// The one word an indented build line ends on. Each is a single token - no
+/// spaces, no parentheses - so `jlo list | grep superseded` stays a usable
+/// way to ask which installs `jlo remove --superseded` would take.
 fn render_status(status: Status) -> String {
     match status {
-        Status::Available => String::new(),
-        Status::Update => style("update").yellow().to_string(),
-        Status::Installed => style("installed").green().to_string(),
+        Status::Installed => String::new(),
         Status::Superseded => style("superseded").dim().to_string(),
         Status::Unmanaged => style("unmanaged").dim().to_string(),
     }
@@ -1080,18 +1197,15 @@ fn render_status(status: Status) -> String {
 /// One line whatever applies: this prints on every `jlo list`, and a stack of
 /// suggestions under every listing reads as nagging rather than as help.
 fn tip_line(rows: &[Row]) -> Option<String> {
-    let outdated = rows.iter().filter(|r| r.status == Status::Update).count();
+    let names = || rows.iter().flat_map(Row::names);
+    let outdated = names().filter(|name| name.update).count();
     // A superseded build of a name with an update on offer is not advertised:
     // `jlo update` deletes it along with the build it replaces, so offering
     // `jlo remove --superseded` as well would be two commands for one job.
-    let superseded = rows
-        .iter()
-        .filter(|r| r.status == Status::Superseded)
-        .filter(|r| {
-            !rows
-                .iter()
-                .any(|u| u.status == Status::Update && u.major == r.major && u.ea == r.ea)
-        })
+    let superseded = names()
+        .filter(|name| !name.update)
+        .flat_map(|name| &name.others)
+        .filter(|build| build.status == Status::Superseded)
         .count();
 
     let mut offers = Vec::new();
@@ -1484,7 +1598,7 @@ mod tests {
         RemoteJdk {
             version: version.to_string(),
             major,
-            stream: crate::request::Stream::Ga,
+            stream: Stream::Ga,
             lts: false,
         }
     }
@@ -1493,8 +1607,17 @@ mod tests {
         RemoteJdk {
             version: version.to_string(),
             major,
-            stream: crate::request::Stream::Ea,
+            stream: Stream::Ea,
             lts: false,
+        }
+    }
+
+    fn remote_lts(version: &str, major: i64) -> RemoteJdk {
+        RemoteJdk {
+            version: version.to_string(),
+            major,
+            stream: Stream::Ga,
+            lts: true,
         }
     }
 
@@ -1502,7 +1625,7 @@ mod tests {
         InstalledJdk {
             version: version.to_string(),
             major,
-            stream: crate::request::Stream::Ga,
+            stream: Stream::Ga,
             managed: true,
         }
     }
@@ -1511,48 +1634,106 @@ mod tests {
         InstalledJdk {
             version: version.to_string(),
             major,
-            stream: crate::request::Stream::Ea,
+            stream: Stream::Ea,
             managed: true,
         }
     }
 
-    fn row(major: i64, version: &str, status: Status) -> Row {
-        Row {
-            major,
+    fn unmanaged(version: &str, major: i64) -> InstalledJdk {
+        InstalledJdk {
             version: version.to_string(),
-            lts: false,
-            status,
-            active: false,
-            ea: false,
+            major,
+            stream: Stream::Ga,
+            managed: false,
         }
     }
 
+    /// A name with nothing known about it yet; the builders below fill it in.
+    fn name(text: &str) -> NameRow {
+        NameRow {
+            name: request(text),
+            installed: None,
+            latest: None,
+            update: false,
+            lts: false,
+            active: false,
+            others: Vec::new(),
+        }
+    }
+
+    impl NameRow {
+        fn installed(mut self, version: &str) -> Self {
+            self.installed = Some(version.to_string());
+            self
+        }
+
+        fn latest(mut self, version: &str) -> Self {
+            self.latest = Some(version.to_string());
+            self
+        }
+
+        fn update(mut self) -> Self {
+            self.update = true;
+            self
+        }
+
+        fn lts(mut self) -> Self {
+            self.lts = true;
+            self
+        }
+
+        fn active(mut self) -> Self {
+            self.active = true;
+            self
+        }
+
+        fn other(mut self, version: &str, status: Status) -> Self {
+            self.others.push(Build {
+                version: version.to_string(),
+                status,
+                active: false,
+            });
+            self
+        }
+    }
+
+    fn row(head: NameRow) -> Row {
+        Row {
+            head,
+            pre_release: None,
+        }
+    }
+
+    fn row_with(head: NameRow, pre_release: NameRow) -> Row {
+        Row {
+            head,
+            pre_release: Some(pre_release),
+        }
+    }
+
+    // -- build_rows --
+
     #[test]
-    fn build_rows_merges_a_version_that_is_both_offered_and_installed() {
+    fn a_name_not_installed_shows_only_the_latest_build() {
+        let rows = build_rows(&[remote("26.0.2+101", 26)], &[], None);
+        assert_eq!(rows, vec![row(name("26").latest("26.0.2+101"))]);
+    }
+
+    /// Current means nothing to add: LATEST would only repeat INSTALLED.
+    #[test]
+    fn a_current_install_shows_no_latest_build() {
         let rows = build_rows(
             &[remote("21.0.12+101.0.LTS", 21)],
             &[local("21.0.12+101.0.LTS", 21)],
             None,
         );
-        assert_eq!(rows, vec![row(21, "21.0.12+101.0.LTS", Status::Installed)]);
+        assert_eq!(rows, vec![row(name("21").installed("21.0.12+101.0.LTS"))]);
     }
 
+    /// The installed build and the offered one are one row now, not two: both
+    /// answer to `21`, and one build per name is what every verb keeps.
     #[test]
-    fn build_rows_marks_an_offered_build_update_when_an_older_one_is_installed() {
-        let rows = build_rows(
-            &[remote("21.0.12+101.0.LTS", 21)],
-            &[local("21.0.11+10.0.LTS", 21)],
-            None,
-        );
-        let offered = rows
-            .iter()
-            .find(|r| r.version == "21.0.12+101.0.LTS")
-            .expect("the offered build has a row");
-        assert_eq!(offered.status, Status::Update);
-    }
-
-    #[test]
-    fn build_rows_gives_an_installed_build_its_own_row_under_the_offered_one() {
+    fn an_outdated_install_shares_its_row_with_the_update() {
         let rows = build_rows(
             &[remote("21.0.12+101.0.LTS", 21)],
             &[local("21.0.11+10.0.LTS", 21)],
@@ -1560,35 +1741,92 @@ mod tests {
         );
         assert_eq!(
             rows,
-            vec![
-                row(21, "21.0.12+101.0.LTS", Status::Update),
-                row(21, "21.0.11+10.0.LTS", Status::Installed),
-            ]
+            vec![row(name("21")
+                .installed("21.0.11+10.0.LTS")
+                .latest("21.0.12+101.0.LTS")
+                .update())]
         );
     }
 
+    /// The weekly case: an older build of the stream is installed, and the
+    /// row is named the way `jlo update` takes it.
     #[test]
-    fn build_rows_marks_every_installed_build_but_the_newest_superseded() {
+    fn an_outdated_pre_release_stream_is_one_row_named_as_typed() {
         let rows = build_rows(
-            &[remote("21.0.12+101.0.LTS", 21)],
-            &[local("21.0.11+10.0.LTS", 21), local("21.0.9+10.0.LTS", 21)],
+            &[remote_ea("28.0.0-beta+16.0.ea", 28)],
+            &[local_ea("28.0.0-beta+14.0.ea", 28)],
             None,
         );
         assert_eq!(
             rows,
-            vec![
-                row(21, "21.0.12+101.0.LTS", Status::Update),
-                row(21, "21.0.11+10.0.LTS", Status::Installed),
-                row(21, "21.0.9+10.0.LTS", Status::Superseded),
-            ]
+            vec![row(name("28-ea")
+                .installed("28.0.0-beta+14.0.ea")
+                .latest("28.0.0-beta+16.0.ea")
+                .update())]
+        );
+    }
+
+    #[test]
+    fn an_offered_pre_release_that_is_installed_is_one_row() {
+        let rows = build_rows(
+            &[remote_ea("28.0.0-beta+16.0.ea", 28)],
+            &[local_ea("28.0.0-beta+16.0.ea", 28)],
+            None,
+        );
+        assert_eq!(
+            rows,
+            vec![row(name("28-ea").installed("28.0.0-beta+16.0.ea"))]
+        );
+    }
+
+    /// A `27-ea` left over from before 27 shipped: one row for the major, led
+    /// by the name anyone reaches for now, the pre-release under it.
+    #[test]
+    fn a_pre_release_left_beside_its_release_is_a_line_under_it() {
+        let rows = build_rows(
+            &[remote("27.0.0+35", 27)],
+            &[local_ea("27.0.0-beta+30.0.ea", 27), local("27.0.0+35", 27)],
+            None,
+        );
+        assert_eq!(
+            rows,
+            vec![row_with(
+                name("27").installed("27.0.0+35"),
+                name("27-ea").installed("27.0.0-beta+30.0.ea"),
+            )]
+        );
+    }
+
+    /// The exceptions keep their exact builds, which is what `jlo remove
+    /// <build>` takes. Unmanaged wins over superseded: `jlo remove
+    /// --superseded` will not touch it whatever else is true.
+    #[test]
+    fn superseded_and_unmanaged_builds_are_lines_under_their_name() {
+        let rows = build_rows(
+            &[remote("21.0.12+101.0.LTS", 21)],
+            &[
+                local("21.0.11+10.0.LTS", 21),
+                local("21.0.9+10.0.LTS", 21),
+                unmanaged("21.0.8+9.0.LTS", 21),
+            ],
+            None,
+        );
+        assert_eq!(
+            rows,
+            vec![row(name("21")
+                .installed("21.0.11+10.0.LTS")
+                .latest("21.0.12+101.0.LTS")
+                .update()
+                .other("21.0.9+10.0.LTS", Status::Superseded)
+                .other("21.0.8+9.0.LTS", Status::Unmanaged))]
         );
     }
 
     /// Two builds of one patch differ only in the build number, and the
-    /// higher one wins. The deletion rule reads the same ordering, so the row
-    /// that says `superseded` has to be the row `remove --superseded` deletes.
+    /// higher one wins. The deletion rule reads the same ordering, so the line
+    /// that says `superseded` has to be the build `remove --superseded` deletes.
     #[test]
-    fn build_rows_marks_the_lower_build_of_one_patch_superseded() {
+    fn the_lower_build_of_one_patch_is_superseded() {
         let rows = build_rows(
             &[remote("21.0.11+10.0.LTS", 21)],
             &[local("21.0.11+9.0.LTS", 21), local("21.0.11+10.0.LTS", 21)],
@@ -1596,18 +1834,17 @@ mod tests {
         );
         assert_eq!(
             rows,
-            vec![
-                row(21, "21.0.11+10.0.LTS", Status::Installed),
-                row(21, "21.0.11+9.0.LTS", Status::Superseded),
-            ]
+            vec![row(name("21")
+                .installed("21.0.11+10.0.LTS")
+                .other("21.0.11+9.0.LTS", Status::Superseded))]
         );
     }
 
     /// Two names for one version are genuinely equal, so neither can be
-    /// `superseded`: neither will be deleted, and a row promising the
+    /// `superseded`: neither will be deleted, and a line promising the
     /// deletion would name an action that never happens.
     #[test]
-    fn build_rows_leaves_two_names_for_one_version_both_installed() {
+    fn two_names_for_one_version_are_both_listed_and_neither_superseded() {
         let rows = build_rows(
             &[],
             &[local("v21.0.11+9", 21), local("21.0.11+9", 21)],
@@ -1615,47 +1852,18 @@ mod tests {
         );
         assert_eq!(
             rows,
-            vec![
-                row(21, "v21.0.11+9", Status::Installed),
-                row(21, "21.0.11+9", Status::Installed),
-            ]
+            vec![row(name("21")
+                .installed("v21.0.11+9")
+                .other("21.0.11+9", Status::Installed))]
         );
     }
 
-    fn unmanaged(version: &str, major: i64) -> InstalledJdk {
-        InstalledJdk {
-            version: version.to_string(),
-            major,
-            stream: crate::request::Stream::Ga,
-            managed: false,
-        }
-    }
-
+    /// An unmanaged *newer* build must not make a managed one read as
+    /// superseded. `jlo remove --superseded` filters on the marker before it
+    /// picks the newest of a name, so the managed build is still the one it
+    /// keeps - and it is the one INSTALLED reports.
     #[test]
-    fn build_rows_reports_unmanaged_ahead_of_superseded() {
-        // `jlo remove --superseded` will not touch it whatever else is true, so
-        // `superseded` would name an action that cannot happen.
-        let rows = build_rows(
-            &[],
-            &[local("17.0.20+101", 17), unmanaged("17.0.11+10", 17)],
-            None,
-        );
-        assert_eq!(
-            rows,
-            vec![
-                row(17, "17.0.20+101", Status::Installed),
-                row(17, "17.0.11+10", Status::Unmanaged),
-            ]
-        );
-    }
-
-    /// The mirror of the test above, on the other side of the comparison: an
-    /// unmanaged *newer* build must not mark a managed one superseded.
-    /// `jlo remove --superseded` filters on the marker before it picks the
-    /// newest of a major, so the managed build is still the one it keeps -
-    /// and a `superseded` row here recommends a command that removes nothing.
-    #[test]
-    fn build_rows_does_not_call_a_build_superseded_by_an_unmanaged_one() {
+    fn an_unmanaged_newer_build_does_not_displace_the_managed_one() {
         let rows = build_rows(
             &[],
             &[unmanaged("21.0.3+9", 21), local("21.0.1+12", 21)],
@@ -1663,64 +1871,80 @@ mod tests {
         );
         assert_eq!(
             rows,
+            vec![row(name("21")
+                .installed("21.0.1+12")
+                .other("21.0.3+9", Status::Unmanaged))]
+        );
+    }
+
+    /// `jlo update` counts an unmanaged install as the name being present:
+    /// an older one is moved past, an exact one reports "up to date". The row
+    /// has to say the same in both cases.
+    #[test]
+    fn an_unmanaged_install_is_measured_against_like_any_other() {
+        let rows = build_rows(
+            // Out of order on purpose: the rows are sorted, not inherited.
+            &[remote("17.0.20+101", 17), remote("21.0.12+7", 21)],
+            &[unmanaged("21.0.11+9", 21), unmanaged("17.0.20+101", 17)],
+            None,
+        );
+        assert_eq!(
+            rows,
             vec![
-                row(21, "21.0.3+9", Status::Unmanaged),
-                row(21, "21.0.1+12", Status::Installed),
+                row(name("21")
+                    .latest("21.0.12+7")
+                    .update()
+                    .other("21.0.11+9", Status::Unmanaged)),
+                row(name("17").other("17.0.20+101", Status::Unmanaged)),
             ]
         );
     }
 
     #[test]
-    fn build_rows_flags_the_build_java_home_points_at() {
+    fn the_catalogue_behind_the_store_is_not_offered_as_a_downgrade() {
         let rows = build_rows(
-            &[remote("21.0.12+101.0.LTS", 21)],
-            &[local("21.0.11+10.0.LTS", 21)],
-            Some("21.0.11+10.0.LTS"),
+            &[remote("21.0.11+10.0.LTS", 21)],
+            &[local("21.0.12+101.0.LTS", 21)],
+            None,
         );
-        let active: Vec<&str> = rows
-            .iter()
-            .filter(|r| r.active)
-            .map(|r| r.version.as_str())
-            .collect();
-        assert_eq!(active, vec!["21.0.11+10.0.LTS"]);
+        assert_eq!(rows, vec![row(name("21").installed("21.0.12+101.0.LTS"))]);
     }
 
-    fn remote_lts(version: &str, major: i64) -> RemoteJdk {
-        RemoteJdk {
-            version: version.to_string(),
-            major,
-            stream: crate::request::Stream::Ga,
-            lts: true,
-        }
-    }
-
+    /// The gutter follows the build, wherever it is printed: on the name's
+    /// line, or on the indented line of a build under it.
     #[test]
-    fn build_rows_carries_the_lts_tag_down_to_older_builds_of_the_major() {
-        // LTS is a property of the major, not of one build, so a row that
-        // Adoptium no longer offers must not silently lose the tag.
+    fn the_active_mark_lands_on_the_line_of_the_build_java_home_points_at() {
+        let installed = [
+            local("21.0.11+10.0.LTS", 21),
+            local("21.0.9+10.0.LTS", 21),
+            local("17.0.20+101", 17),
+        ];
+
+        let rows = build_rows(&[], &installed, Some("17.0.20+101"));
+        assert!(rows[1].head.active, "{rows:?}");
+        assert!(!rows[0].head.active, "{rows:?}");
+
+        let rows = build_rows(&[], &installed, Some("21.0.9+10.0.LTS"));
+        assert!(!rows[0].head.active, "{rows:?}");
+        assert!(rows[0].head.others[0].active, "{rows:?}");
+    }
+
+    /// LTS is a property of the major, so a row whose installed build is not
+    /// the offered one keeps the tag.
+    #[test]
+    fn the_lts_tag_is_the_majors_whichever_build_is_installed() {
         let rows = build_rows(
             &[remote_lts("21.0.12+101.0.LTS", 21)],
             &[local("21.0.11+10.0.LTS", 21)],
             None,
         );
-        let older = rows
-            .iter()
-            .find(|r| r.version == "21.0.11+10.0.LTS")
-            .expect("the installed build has a row");
-        assert!(older.lts, "got: {older:?}");
-    }
-
-    #[test]
-    fn an_installed_pre_release_is_marked() {
-        let rows = build_rows(&[], &[local_ea("28.0.0-beta+16.0.ea", 28)], None);
-        assert_eq!(rows.len(), 1);
-        assert!(rows[0].ea, "a pre-release row carries the mark");
+        assert!(rows[0].head.lts, "{rows:?}");
     }
 
     /// The two streams of one major are two names, so neither supersedes the
-    /// other. Without the filter the beta - which sorts above the release it
-    /// previews - would mark the installed GA build superseded and send the
-    /// reader to 'jlo remove --superseded', which would not touch it.
+    /// other. Without the per-name rule the beta - which sorts above the
+    /// release it previews - would make the GA build read as superseded and
+    /// send the reader to 'jlo remove --superseded', which would not touch it.
     #[test]
     fn neither_stream_supersedes_the_other() {
         let rows = build_rows(
@@ -1728,15 +1952,18 @@ mod tests {
             &[local("26.0.1+9", 26), local_ea("26.0.2-beta+101.0.ea", 26)],
             None,
         );
-
-        let ga = rows.iter().find(|r| !r.ea).expect("the release has a row");
-        let beta = rows.iter().find(|r| r.ea).expect("the beta has a row");
-        assert_eq!(ga.status, Status::Installed);
-        assert_eq!(beta.status, Status::Installed);
+        assert_eq!(
+            rows,
+            vec![row_with(
+                name("26").installed("26.0.1+9"),
+                name("26-ea").installed("26.0.2-beta+101.0.ea"),
+            )]
+        );
     }
 
     /// An offered release must not be called an update to a pre-release
-    /// install: following it would change streams.
+    /// install: following it would change streams. The release still leads
+    /// the row - it is the name the major is now known by.
     #[test]
     fn a_ga_release_is_not_an_update_to_an_installed_pre_release() {
         let rows = build_rows(
@@ -1744,17 +1971,18 @@ mod tests {
             &[local_ea("28.0.0-beta+16.0.ea", 28)],
             None,
         );
-
-        let offered = rows
-            .iter()
-            .find(|r| r.version == "28.0.1+9")
-            .expect("the offered build has a row");
-        assert_eq!(offered.status, Status::Available);
+        assert_eq!(
+            rows,
+            vec![row_with(
+                name("28").latest("28.0.1+9"),
+                name("28-ea").installed("28.0.0-beta+16.0.ea"),
+            )]
+        );
     }
 
-    /// The mirror image, and the one a real listing meets: a pre-release
-    /// sorts above the release it previews, so without the per-name rule the
-    /// offered beta would read as an update to the installed release.
+    /// The mirror image: a pre-release sorts above the release it previews,
+    /// so without the per-name rule the offered beta would read as an update
+    /// to the installed release.
     #[test]
     fn an_offered_pre_release_is_not_an_update_to_an_installed_release() {
         let rows = build_rows(
@@ -1762,95 +1990,106 @@ mod tests {
             &[local("26.0.1+9", 26)],
             None,
         );
-
-        let offered = rows
-            .iter()
-            .find(|r| r.ea)
-            .expect("the offered pre-release has a row");
-        assert_eq!(offered.status, Status::Available);
+        assert_eq!(
+            rows,
+            vec![row_with(
+                name("26").installed("26.0.1+9"),
+                name("26-ea").latest("26.0.2-beta+101.0.ea"),
+            )]
+        );
     }
 
+    /// `--offline` has no catalogue: the same rows, with nothing to put under
+    /// LATEST and nothing to call an update.
     #[test]
-    fn an_offered_pre_release_that_is_installed_is_one_marked_row() {
+    fn offline_rows_are_the_same_rows_without_a_latest_build() {
         let rows = build_rows(
-            &[remote_ea("28.0.0-beta+16.0.ea", 28)],
-            &[local_ea("28.0.0-beta+16.0.ea", 28)],
+            &[],
+            &[
+                local_ea("28.0.0-beta+14.0.ea", 28),
+                local("21.0.11+10.0.LTS", 21),
+                local("21.0.9+10.0.LTS", 21),
+            ],
             None,
         );
-
-        let mut expected = row(28, "28.0.0-beta+16.0.ea", Status::Installed);
-        expected.ea = true;
-        assert_eq!(rows, vec![expected]);
-    }
-
-    /// The weekly case: an older build of the stream is installed, and the
-    /// listing is where `jlo update` gets offered for it.
-    #[test]
-    fn an_older_installed_pre_release_shows_the_offered_one_as_an_update() {
-        let rows = build_rows(
-            &[remote_ea("28.0.0-beta+16.0.ea", 28)],
-            &[local_ea("28.0.0-beta+14.0.ea", 28)],
-            None,
+        assert_eq!(
+            rows,
+            vec![
+                row(name("28-ea").installed("28.0.0-beta+14.0.ea")),
+                row(name("21")
+                    .installed("21.0.11+10.0.LTS")
+                    .other("21.0.9+10.0.LTS", Status::Superseded)),
+            ]
         );
-
-        let offered = rows
-            .iter()
-            .find(|r| r.version == "28.0.0-beta+16.0.ea")
-            .expect("the offered build has a row");
-        assert_eq!(offered.status, Status::Update);
-        assert!(offered.ea, "the offered build is marked a pre-release");
     }
+
+    // -- render_rows --
 
     #[test]
     fn render_rows_aligns_the_columns_and_marks_the_active_build() {
-        let rows = vec![
-            Row {
-                major: 28,
-                version: "28.0.0-beta+16.0.ea".into(),
-                lts: false,
-                status: Status::Installed,
-                active: false,
-                ea: true,
-            },
-            Row {
-                major: 21,
-                version: "21.0.12+101.0.LTS".into(),
-                lts: true,
-                status: Status::Update,
-                active: false,
-                ea: false,
-            },
-            Row {
-                major: 21,
-                version: "21.0.11+10.0.LTS".into(),
-                lts: true,
-                status: Status::Installed,
-                active: true,
-                ea: false,
-            },
-            Row {
-                major: 8,
-                version: "8.0.412+8".into(),
-                lts: false,
-                status: Status::Available,
-                active: false,
-                ea: false,
-            },
-        ];
+        let mut outdated = name("21")
+            .installed("21.0.11+10.0.LTS")
+            .latest("21.0.12+101.0.LTS")
+            .update()
+            .lts()
+            .other("21.0.9+10.0.LTS", Status::Superseded)
+            .other("21.0.8+9.0.LTS", Status::Unmanaged);
+        outdated.others[0].active = true;
+
+        let listing = render_rows(&[
+            row(name("28-ea")
+                .installed("28.0.0-beta+14.0.ea")
+                .latest("28.0.0-beta+16.0.ea")
+                .update()),
+            row_with(
+                name("27").installed("27.0.0+35").active(),
+                name("27-ea").installed("27.0.0-beta+30.0.ea"),
+            ),
+            row(name("26").latest("26.0.2+101")),
+            row(outdated),
+        ]);
+
+        assert_eq!(listing.header, "    NAME     INSTALLED            LATEST");
         assert_eq!(
-            render_rows(&rows),
+            listing.lines,
             vec![
-                "    28  28.0.0-beta+16.0.ea       EA  installed",
-                "    21  21.0.12+101.0.LTS    LTS      update",
-                " \u{2192}  21  21.0.11+10.0.LTS     LTS      installed",
-                "     8  8.0.412+8",
+                "    28-ea    28.0.0-beta+14.0.ea  28.0.0-beta+16.0.ea       update",
+                " \u{2192}  27       27.0.0+35",
+                "      27-ea  27.0.0-beta+30.0.ea",
+                "    26                            26.0.2+101",
+                "    21       21.0.11+10.0.LTS     21.0.12+101.0.LTS    LTS  update",
+                " \u{2192}           21.0.9+10.0.LTS                                superseded",
+                "             21.0.8+9.0.LTS                                 unmanaged",
             ]
         );
     }
 
     #[test]
+    fn render_rows_drops_the_latest_and_lts_columns_when_nothing_fills_them() {
+        // `jlo list --offline` knows neither, so each column would be blank
+        // on every line.
+        let listing = render_rows(&[
+            row(name("26").installed("26.0.2+101")),
+            row(name("21")
+                .installed("21.0.11+10.0.LTS")
+                .other("21.0.9+10.0.LTS", Status::Superseded)),
+        ]);
+        assert_eq!(listing.header, "    NAME  INSTALLED");
+        assert_eq!(
+            listing.lines,
+            vec![
+                "    26    26.0.2+101",
+                "    21    21.0.11+10.0.LTS",
+                "          21.0.9+10.0.LTS   superseded",
+            ]
+        );
+    }
+
+    // -- tip_line --
+
+    #[test]
     fn tip_line_is_silent_when_everything_is_current() {
-        let rows = vec![row(21, "21.0.12+101.0.LTS", Status::Installed)];
+        let rows = vec![row(name("21").installed("21.0.12+101.0.LTS"))];
         assert_eq!(tip_line(&rows), None);
     }
 
@@ -1859,10 +2098,17 @@ mod tests {
         // One line whatever applies: a listing that ends in a stack of
         // advice reads as nagging, and this one prints on every `jlo list`.
         let rows = vec![
-            row(21, "21.0.12+101.0.LTS", Status::Update),
-            row(17, "17.0.20+101", Status::Update),
-            row(11, "11.0.25+9", Status::Installed),
-            row(11, "11.0.24+8", Status::Superseded),
+            row(name("21")
+                .installed("21.0.11+10.0.LTS")
+                .latest("21.0.12+101.0.LTS")
+                .update()),
+            row(name("17")
+                .installed("17.0.19+7")
+                .latest("17.0.20+101")
+                .update()),
+            row(name("11")
+                .installed("11.0.25+9")
+                .other("11.0.24+8", Status::Superseded)),
         ];
         assert_eq!(
             tip_line(&rows).as_deref(),
@@ -1871,25 +2117,30 @@ mod tests {
     }
 
     /// `jlo update` deletes the builds its install supersedes, so a
-    /// superseded row under an offered update of the same *name* is already
-    /// covered by the first offer - advertising the second would be two
-    /// commands for one job. An update of the other stream of that major
-    /// deletes nothing of this one, so the pre-release at 28 keeps its offer
-    /// and the one at 29 does not.
+    /// superseded build of a name with an update on offer is already covered
+    /// by the first offer - advertising the second would be two commands for
+    /// one job. An update of the other stream of that major deletes nothing of
+    /// this one, so the leftover under `28-ea` keeps its offer and the one
+    /// under `29-ea` does not.
     #[test]
     fn tip_line_leaves_to_update_what_update_removes() {
-        let ea = |major, version, status| Row {
-            ea: true,
-            ..row(major, version, status)
-        };
         let rows = vec![
-            ea(29, "29.0.0-beta+3.0.ea", Status::Update),
-            ea(29, "29.0.0-beta+1.0.ea", Status::Superseded),
-            row(28, "28.0.1+3", Status::Update),
-            ea(28, "28.0.0-beta+14.0.ea", Status::Superseded),
-            row(21, "21.0.12+101.0.LTS", Status::Update),
-            row(21, "21.0.9+10.0.LTS", Status::Installed),
-            row(21, "21.0.8+9.0.LTS", Status::Superseded),
+            row(name("29-ea")
+                .installed("29.0.0-beta+1.0.ea")
+                .latest("29.0.0-beta+3.0.ea")
+                .update()
+                .other("29.0.0-beta+0.0.ea", Status::Superseded)),
+            row_with(
+                name("28").latest("28.0.1+3").update(),
+                name("28-ea")
+                    .installed("28.0.0-beta+16.0.ea")
+                    .other("28.0.0-beta+14.0.ea", Status::Superseded),
+            ),
+            row(name("21")
+                .installed("21.0.9+10.0.LTS")
+                .latest("21.0.12+101.0.LTS")
+                .update()
+                .other("21.0.8+9.0.LTS", Status::Superseded)),
         ];
         assert_eq!(
             tip_line(&rows).as_deref(),
@@ -1899,7 +2150,9 @@ mod tests {
 
     #[test]
     fn tip_line_offers_only_what_applies() {
-        let rows = vec![row(21, "21.0.9+10.0.LTS", Status::Superseded)];
+        let rows = vec![row(name("21")
+            .installed("21.0.11+10.0.LTS")
+            .other("21.0.9+10.0.LTS", Status::Superseded))];
         assert_eq!(
             tip_line(&rows).as_deref(),
             Some("TIP: `jlo remove --superseded` (1 superseded)")
@@ -1908,42 +2161,11 @@ mod tests {
 
     #[test]
     fn tip_line_does_not_offer_to_remove_an_unmanaged_install() {
-        // `jlo remove --superseded` leaves it alone, so counting it would promise a
-        // removal that will not happen.
-        let rows = vec![row(21, "21.0.9+10.0.LTS", Status::Unmanaged)];
+        // `jlo remove --superseded` leaves it alone, so counting it would
+        // promise a removal that will not happen.
+        let rows = vec![row(name("21")
+            .installed("21.0.11+10.0.LTS")
+            .other("21.0.9+10.0.LTS", Status::Unmanaged))];
         assert_eq!(tip_line(&rows), None);
-    }
-
-    #[test]
-    fn build_rows_does_not_offer_an_update_to_an_older_build_than_is_installed() {
-        // Adoptium's catalogue can sit behind an install that came from
-        // somewhere else. `update` there would offer a downgrade.
-        let rows = build_rows(
-            &[remote("21.0.11+10.0.LTS", 21)],
-            &[local("21.0.12+101.0.LTS", 21)],
-            None,
-        );
-        let offered = rows
-            .iter()
-            .find(|r| r.version == "21.0.11+10.0.LTS")
-            .expect("the offered build has a row");
-        assert_eq!(offered.status, Status::Available);
-    }
-
-    #[test]
-    fn render_rows_drops_the_lts_column_when_nothing_carries_the_tag() {
-        // `jlo list --offline` never knows which majors are LTS, so the
-        // column would be three blank characters on every line.
-        let rows = vec![
-            row(26, "26.0.2+101", Status::Installed),
-            row(21, "21.0.9+10.0.LTS", Status::Superseded),
-        ];
-        assert_eq!(
-            render_rows(&rows),
-            vec![
-                "    26  26.0.2+101       installed",
-                "    21  21.0.9+10.0.LTS  superseded",
-            ]
-        );
     }
 }
