@@ -16,11 +16,12 @@ pre-release stream (28-ea):
   jlo exec [VERSION] -- <COMMAND> [ARGS]...
   jlo init [VERSION]
 
-When VERSION is omitted, env, home, exec, install and update resolve it in
-four steps: the nearest .jlorc at or above the current directory, then
+When VERSION is omitted, env, home, exec and install resolve it in four
+steps: the nearest .jlorc at or above the current directory, then
 ~/.jlo/default.jlorc, then the newest JDK already installed, then the latest
 release, which is downloaded. --offline stops after the third step rather
-than downloading. init instead pins the latest release.
+than downloading. update instead takes every installed name, and init pins
+the latest release.
 
 Examples:
   jlo env 25                       Use Java 25 in this shell
@@ -30,7 +31,7 @@ Examples:
   jlo exec 21 -- ./gradlew build   Run a build on Java 21
   jlo install 25                   Download Java 25 without switching to it
   jlo install 28-ea                Download the early-access build of Java 28
-  jlo update --all                 Bring every installed JDK up to date
+  jlo update                       Bring every installed JDK up to date
   jlo remove 11 17                 Remove every installed Java 11 and 17
   jlo remove --superseded          Remove every superseded minor release
 
@@ -257,25 +258,30 @@ some other version lives, see jlo home."
     // the top of this enum: JAVA_HOME below would have to be backtick-quoted
     // in rustdoc, and clap would then print the backticks.
     #[command(
-        about = "Install the latest build of a major version, without changing this shell",
+        about = "Install JDKs; without a version, the one jlo env would use",
         long_about = "\
-Install the latest build of a major version, without changing this shell
+Install JDKs; without a version, the one jlo env would use
 
-Downloads the latest build Adoptium offers of every major version
-named. Nothing is exported and no shell is touched: neither JAVA_HOME
-nor PATH changes, here or anywhere else.
+Downloads the latest build Adoptium offers of every name given - a
+major (21) or a pre-release stream (28-ea), not an exact build: 21, not
+21.0.5. A name already on its latest build is reported and left alone.
+
+install and update are one operation. They differ only when no version
+is given: install resolves one in four steps - the nearest .jlorc at or
+above the current directory, then ~/.jlo/default.jlorc, then the newest
+JDK already installed, then the latest release - while update takes
+every installed name.
+
+The new build replaces the old one: J'Lo keeps one build per name, so
+each download deletes the builds it supersedes - including the one
+JAVA_HOME points at, in which case this shell moves to the new build.
+Other shells still on it need 'jlo env' again. Otherwise no shell is
+touched.
 
 The usual route is jlo env, which switches the current shell and
 downloads the JDK on demand if it is missing, so an explicit install
 is for the cases that come before that - warming a CI cache, preparing
-for offline work, or seeding a machine without switching it. A major
-already on its latest build is reported and left alone.
-
-When VERSION is omitted, it resolves in four steps: the nearest
-.jlorc at or above the current directory, then ~/.jlo/default.jlorc,
-then the newest JDK already installed, then the latest release, which
-is downloaded. A major version (21) or a pre-release stream (28-ea)
-is accepted, not an exact build: 21, not 21.0.5."
+for offline work, or seeding a machine without switching it."
     )]
     Install {
         /// Java version: a major (21) or a pre-release stream (28-ea). Default: .jlorc, the newest installed JDK, then the latest release
@@ -285,28 +291,26 @@ is accepted, not an exact build: 21, not 21.0.5."
     // Attribute strings rather than a doc comment, for the reason given at
     // the top of this enum: JAVA_HOME would print with backticks.
     #[command(
-        about = "Update installed JDKs to their latest minor release",
+        about = "Update JDKs; without a version, every installed one",
         long_about = "\
-Update installed JDKs to their latest minor release
+Update JDKs; without a version, every installed one
 
-With no argument, updates the version resolved in four steps: the
-nearest .jlorc at or above the current directory, then
-~/.jlo/default.jlorc, then the newest JDK already installed, then the
-latest release. Pass --all to update every installed name, pre-release
-streams included, or list versions explicitly.
+Downloads the latest build Adoptium offers of every name given - a
+major (21) or a pre-release stream (28-ea), not an exact build: 21, not
+21.0.5. A name already on its latest build is reported and left alone.
+
+install and update are one operation. They differ only when no version
+is given: update takes every installed name, pre-release streams
+included, while install resolves one version the way jlo env does.
 
 The new build replaces the old one: J'Lo keeps one build per name, so
-each update deletes the builds it supersedes - including the one
+each download deletes the builds it supersedes - including the one
 JAVA_HOME points at, in which case this shell moves to the new build.
 Other shells still on it need 'jlo env' again."
     )]
     Update {
-        /// Java version: a major (21) or a pre-release stream (28-ea). Default: .jlorc, the newest installed JDK, then the latest release
+        /// Java version: a major (21) or a pre-release stream (28-ea). Default: every installed name
         versions: Vec<String>,
-
-        /// Update every installed name, pre-release streams included
-        #[arg(short, long, conflicts_with = "versions")]
-        all: bool,
     },
 
     // Attribute strings rather than a doc comment, for the reason given at

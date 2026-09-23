@@ -20,6 +20,7 @@ use crate::shellenv::{parse_exec_args, restore_leading_separator, shell_quote, u
 use crate::store::{InstalledJdk, JdkStore, RemoveError};
 use anyhow::{Context, anyhow};
 use clap::Parser;
+use std::collections::HashSet;
 use std::env;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
@@ -135,7 +136,7 @@ fn run() -> Result<(), CommandError> {
         cli::Command::Current => cmd_current(),
         cli::Command::List { offline } => cmd_list(&client, offline),
         cli::Command::Install { versions } => cmd_install(&client, versions),
-        cli::Command::Update { versions, all } => cmd_update(&client, versions, all),
+        cli::Command::Update { versions } => cmd_update(&client, versions),
         cli::Command::Remove {
             versions,
             superseded,
@@ -555,51 +556,32 @@ fn cmd_init(
     })
 }
 
-/// Download the latest build of each name given, without touching the
-/// current shell.
+/// `jlo install`: the names given, or the one the cascade resolves.
 ///
-/// Deliberately a second verb rather than an alias for `update`: "make sure
-/// this name is here" and "bring what is here up to date" are different
-/// questions, and they coincide only because jlo keeps exactly one build per
-/// name. Hence no `--all` here - there is no such thing as installing every
-/// name - while `update` keeps its own meaning and wording.
+/// The same operation as `update` - see [`install_names`]. Without an
+/// argument it answers "make sure the JDK this directory wants is here", the
+/// same resolution `env`, `home` and `exec` do, so it works on a machine with
+/// nothing installed yet.
 fn cmd_install(client: &AdoptiumClient, versions: Vec<String>) -> Result<(), CommandError> {
     let store = JdkStore::discover()?;
-    let versions = requested_versions(versions, "install", &store, client)?;
-    let run = store::install_each(client, &store, versions, store::Superseded::Keep);
-    match run.error {
-        Some(e) => Err(e.into()),
-        None => Ok(()),
-    }
+    let requests = requested_versions(versions, "install", &store, client)?;
+    install_names(client, &store, requests)
 }
 
-/// Bring names up to date, deleting the builds each new one supersedes.
+/// `jlo update`: the names given, or every installed name.
 ///
-/// Including the build `$JAVA_HOME` points at: J'Lo keeps one build per
-/// name, and `update` is the verb that keeps it so. The calling shell follows
-/// the replacement because the wrapper evaluates this command's stdout, which
-/// carries the same `export` lines `jlo env` would print - and only when the
-/// live build was one of those deleted.
+/// The same operation as `install` - see [`install_names`]. Without an
+/// argument it answers "bring what is here up to date", which is why it does
+/// not go through the cascade: that would pick one name, and "update" with
+/// nothing named means all of them.
 ///
-/// Written even when a later name failed: the deletions before the failure
-/// have happened, and a shell left on a removed JDK is worse than an error
-/// the wrapper returns after moving it. The wrapper evaluates `update`'s
-/// output regardless of the status for exactly this reason.
-fn cmd_update(
-    client: &AdoptiumClient,
-    versions: Vec<String>,
-    all: bool,
-) -> Result<(), CommandError> {
+/// Pre-release streams included: leaving them out would be the special case.
+/// Someone who installed `28-ea` wants it current, and the stream's weekly
+/// builds are replaced rather than piling up, so following it costs a
+/// download, not the disk.
+fn cmd_update(client: &AdoptiumClient, versions: Vec<String>) -> Result<(), CommandError> {
     let store = JdkStore::discover()?;
-
-    // `--all` and explicit versions are mutually exclusive (clap enforces it),
-    // so these two arms are the whole input space.
-    //
-    // `--all` is every installed name, pre-release streams included: leaving
-    // them out would be the special case. Someone who installed `28-ea`
-    // wants it current, and the stream's weekly builds are replaced rather
-    // than piling up, so following it costs a download, not the disk.
-    let versions_to_install = if all {
+    let requests = if versions.is_empty() {
         let installed = store
             .installed_requests()
             .context("could not determine installed JDK versions")?;
@@ -610,24 +592,40 @@ fn cmd_update(
     } else {
         requested_versions(versions, "update", &store, client)?
     };
+    install_names(client, &store, requests)
+}
 
+/// Bring each name to its latest build, deleting the builds each new one
+/// supersedes - the one operation behind `install` and `update`, which differ
+/// only in what an empty version list means.
+///
+/// Including the build `$JAVA_HOME` points at: J'Lo keeps one build per name,
+/// whichever verb put the newer one there. The calling shell follows the
+/// replacement because the wrapper evaluates both verbs' stdout, which
+/// carries the same `export` lines `jlo env` would print - and only when the
+/// live build was one of those deleted.
+///
+/// Written even when a later name failed: the deletions before the failure
+/// have happened, and a shell left on a removed JDK is worse than an error
+/// the wrapper returns after moving it. The wrapper evaluates these verbs'
+/// output regardless of the status for exactly this reason.
+fn install_names(
+    client: &AdoptiumClient,
+    store: &JdkStore,
+    requests: HashSet<Request>,
+) -> Result<(), CommandError> {
     // A dry run of the exports, before anything is deleted: every reason
     // they can fail - an undecodable `PATH`, a store path that is not UTF-8
     // or cannot sit in `PATH` - is a property of the environment and the
     // store, not of the build, so the store itself stands in for it. Failing
     // once the live build is gone would strand the shell on it.
-    export_lines(&store, store.base())?;
+    export_lines(store, store.base())?;
 
     let active = active_java_home();
-    let run = store::install_each(
-        client,
-        &store,
-        versions_to_install,
-        store::Superseded::Replace(active.as_deref()),
-    );
+    let run = store::install_each(client, store, requests, active.as_deref());
 
     if let Some(java_home) = &run.repointed {
-        ui::print_lines(export_lines(&store, java_home)?);
+        ui::print_lines(export_lines(store, java_home)?);
     }
     ui::update_report(&run, !std::io::stdout().is_terminal());
 
@@ -805,8 +803,8 @@ mod tests {
 
     #[test]
     fn cmd_update_rejects_a_list_of_only_invalid_versions() {
-        let err = cmd_update(&offline_client(), owned(&["abc"]), false)
-            .expect_err("nothing was left to update");
+        let err =
+            cmd_update(&offline_client(), owned(&["abc"])).expect_err("nothing was left to update");
         assert_eq!(
             format!("{:#}", err.error),
             "no valid Java versions provided to update"

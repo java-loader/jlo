@@ -1,7 +1,7 @@
 //! What version of Java a command should run against, and where that JDK
 //! lives.
 //!
-//! The cascade is jlo's one rule, and five commands ask it the same question,
+//! The cascade is jlo's one rule, and four commands ask it the same question,
 //! so it gets a name here rather than a copy in each of them. Everything in
 //! this module answers "which JDK", never "what do I print" or "how do I
 //! install it" - those are `ui` and `store`.
@@ -159,9 +159,11 @@ fn warn_legacy_layout(store: &JdkStore, java_home: &Path) {
 /// `home` and `exec` do, so a bare `jlo install` means the same version they
 /// would pick.
 ///
-/// Neither verb takes `--offline`, so the cascade here may reach its last
+/// `install` takes no `--offline`, so the cascade here may reach its last
 /// stage: `jlo install` on a machine with no config and no JDK installs the
-/// latest release, which is the only thing it could sensibly mean.
+/// latest release, which is the only thing it could sensibly mean. `update`
+/// comes here only with a list: without one it means every installed name,
+/// which is not a resolution at all.
 ///
 /// An invalid entry is warned about and skipped, so one typo in a list of four
 /// does not cost the other three. A list that leaves nothing valid behind is

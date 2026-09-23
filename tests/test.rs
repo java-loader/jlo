@@ -127,13 +127,17 @@ fn removed_and_hidden_names_are_nowhere_to_be_found() {
         .code(0)
         .stderr(predicate::str::contains("There are no Easter Eggs"));
 
-    // `env --verbose` went the same way, and has no subcommand entry to check.
-    Command::cargo_bin("jlo-bin")
-        .unwrap()
-        .args(["env", "--verbose"])
-        .assert()
-        .failure()
-        .code(2);
+    // `env --verbose` and `update --all` went the same way, and have no
+    // subcommand entry to check. `--all` became what a bare `update` means.
+    for args in [["env", "--verbose"], ["update", "--all"]] {
+        Command::cargo_bin("jlo-bin")
+            .unwrap()
+            .args(args)
+            .env("JLO_ADOPTIUM_API_URL", "http://127.0.0.1:1")
+            .assert()
+            .failure()
+            .code(2);
+    }
 }
 
 #[test]
@@ -284,29 +288,9 @@ fn remove_superseded_refuses_a_version_alongside_it() {
         .stderr(predicate::str::contains("cannot be used with"));
 }
 
-/// The reason `install` is a command of its own rather than an alias on
-/// `update`: there is no such thing as installing every major, so the flag
-/// that makes sense for `update` must not be a documented spelling here.
-#[test]
-fn install_has_no_all_flag() {
-    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
-    cmd.args(["install", "--all"])
-        .env("JLO_ADOPTIUM_API_URL", "http://127.0.0.1:1")
-        .assert()
-        .failure()
-        .code(2)
-        .stderr(predicate::str::contains("--all"));
-
-    let mut help = Command::cargo_bin("jlo-bin").unwrap();
-    help.args(["install", "--help"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("--all").not());
-}
-
-/// `install` does not touch the shell, so nothing may reach stdout - the
-/// wrapper sources what lands there. The argument check fails before the
-/// network, hence the unreachable API address.
+/// A failed `install` has deleted nothing, so nothing may reach stdout - the
+/// wrapper evaluates what lands there even on failure. The argument check
+/// fails before the network, hence the unreachable API address.
 #[test]
 fn install_rejects_an_invalid_version_without_writing_to_stdout() {
     let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
@@ -963,10 +947,11 @@ fn fake_jdk_archive(root: &str) -> Vec<u8> {
     builder.into_inner().unwrap().finish().unwrap()
 }
 
-/// `jlo update 21` against a store holding 21.0.5+11, with Adoptium offering
+/// `jlo <verb> 21` against a store holding 21.0.5+11, with Adoptium offering
 /// 21.0.9+10. Returns the store and the command's output; `JAVA_HOME` points
 /// at the old build when `active`.
-fn run_update_over_an_older_build(
+fn run_over_an_older_build(
+    verb: &str,
     active: bool,
 ) -> (tempfile::TempDir, std::path::PathBuf, std::process::Output) {
     use sha2::Digest;
@@ -995,7 +980,7 @@ fn run_update_over_an_older_build(
     let store = jdk_store_in(home.path());
 
     let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
-    cmd.args(["update", "21"])
+    cmd.args([verb, "21"])
         .env("HOME", home.path())
         .env("JLO_ADOPTIUM_API_URL", server.url())
         .env_remove("JAVA_HOME");
@@ -1006,34 +991,37 @@ fn run_update_over_an_older_build(
     (home, store, out)
 }
 
-/// One build per name: the update deletes the build it supersedes, the live
-/// one included, and prints the exports that move the calling shell onto
-/// the replacement - the wrapper evaluates them.
+/// One build per name, whichever verb downloads it: the new build deletes
+/// the one it supersedes, the live one included, and the exports that move
+/// the calling shell onto the replacement are printed - the wrapper
+/// evaluates them. `install` used to keep the superseded build.
 #[test]
-fn update_replaces_the_live_build_and_moves_the_shell() {
-    let (_home, store, out) = run_update_over_an_older_build(true);
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let stderr = String::from_utf8_lossy(&out.stderr);
+fn install_and_update_replace_the_live_build_and_move_the_shell() {
+    for verb in ["install", "update"] {
+        let (_home, store, out) = run_over_an_older_build(verb, true);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
 
-    assert!(out.status.success(), "{stderr}");
-    assert!(
-        !store.join("21.0.5+11").exists(),
-        "superseded build survived"
-    );
-    assert!(store.join("21.0.9+10").exists());
-    assert_eq!(
-        exported_var(&stdout, "JAVA_HOME").as_deref(),
-        store.join("21.0.9+10").to_str(),
-        "{stdout}"
-    );
-    assert!(stderr.contains("replaced 21.0.5+11"), "{stderr}");
+        assert!(out.status.success(), "{verb}: {stderr}");
+        assert!(
+            !store.join("21.0.5+11").exists(),
+            "{verb}: superseded build survived"
+        );
+        assert!(store.join("21.0.9+10").exists());
+        assert_eq!(
+            exported_var(&stdout, "JAVA_HOME").as_deref(),
+            store.join("21.0.9+10").to_str(),
+            "{stdout}"
+        );
+        assert!(stderr.contains("replaced 21.0.5+11"), "{verb}: {stderr}");
+    }
 }
 
 /// A shell that was not on the replaced build has nothing to follow, so
 /// stdout - which the wrapper evaluates - stays empty.
 #[test]
 fn update_leaves_a_shell_on_another_jdk_alone() {
-    let (_home, store, out) = run_update_over_an_older_build(false);
+    let (_home, store, out) = run_over_an_older_build("update", false);
 
     assert!(
         out.status.success(),
@@ -1814,24 +1802,70 @@ fn bare_env_offline_ignores_an_ea_install() {
         .stdout("");
 }
 
-/// `update` and `install` resolve through the same cascade, and both then ask
-/// Adoptium about whatever it produced. With the network wired to fail, the
-/// version named in the failure is the assertion: reaching Adoptium at all
-/// means stage 3 answered.
+/// A bare `install` resolves through the cascade, then asks Adoptium about
+/// whatever it produced. With the network wired to fail, the version named
+/// in the failure is the assertion: reaching Adoptium at all means stage 3
+/// answered.
 #[test]
-fn update_and_install_resolve_the_newest_installed_jdk() {
-    for verb in ["update", "install"] {
-        let (home, project) = store_fixture(&["21.0.5+11"]);
+fn install_resolves_the_newest_installed_jdk() {
+    let (home, project) = store_fixture(&["21.0.5+11"]);
 
-        cascade_cmd(home.path(), &project, &[verb])
-            .assert()
-            .failure()
-            .code(1)
-            .stdout(predicate::str::is_empty())
-            // Not "no valid Java versions provided": the cascade produced 21,
-            // and it is the request about 21 that failed.
-            .stderr(predicate::str::contains("Adoptium"));
-    }
+    cascade_cmd(home.path(), &project, &["install"])
+        .assert()
+        .failure()
+        .code(1)
+        .stdout(predicate::str::is_empty())
+        // Not "no valid Java versions provided": the cascade produced 21,
+        // and it is the request about 21 that failed.
+        .stderr(predicate::str::contains("Adoptium"));
+}
+
+/// A bare `update` is every installed name, pre-release streams included -
+/// not the cascade `install` runs. The `.jlorc` pinning 25 is the trap: were
+/// the cascade consulted, 25 would be the one name asked about.
+#[test]
+fn a_bare_update_asks_about_every_installed_name() {
+    let mut server = mockito::Server::new();
+    let mut latest = |major: &str| {
+        server
+            .mock(
+                "GET",
+                mockito::Matcher::Regex(format!(r"^/v3/assets/latest/{major}/hotspot")),
+            )
+            .match_query(mockito::Matcher::Any)
+            .with_body(
+                include_str!("fixtures/assets_latest.json")
+                    .replace("21.0.11+10.0.LTS", &format!("{major}.0.11+10")),
+            )
+            .create()
+    };
+    // No mock for 25: were it asked about, the unmatched request would fail
+    // the run.
+    let asked_17 = latest("17");
+    let asked_21 = latest("21");
+    let asked_28_ea = server
+        .mock(
+            "GET",
+            mockito::Matcher::Regex(r"^/v3/assets/feature_releases/28/ea".to_string()),
+        )
+        .match_query(mockito::Matcher::Any)
+        .with_body(include_str!("fixtures/feature_releases_28_ea.json"))
+        .create();
+
+    // Each installed build is the one Adoptium offers, so nothing downloads.
+    let (home, project) = store_fixture(&["17.0.11+10", "21.0.11+10", "28.0.0-beta+16.0.ea"]);
+    std::fs::write(project.join(".jlorc"), "25").unwrap();
+
+    cascade_cmd(home.path(), &project, &["update"])
+        .env("JLO_ADOPTIUM_API_URL", server.url())
+        .assert()
+        .success()
+        .code(0)
+        .stdout(predicate::str::is_empty());
+
+    asked_17.assert();
+    asked_21.assert();
+    asked_28_ea.assert();
 }
 
 // -- the success paths of update and remove --

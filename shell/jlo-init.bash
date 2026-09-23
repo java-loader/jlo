@@ -11,17 +11,18 @@ jlo() {
   # ever reached - the same rule the autoload hook already follows for
   # $_JLO_LAST_DIR.
   case "${1-}" in
-    env|use|selfupdate|update)
+    env|use|selfupdate|install|update)
       # The branch below *evaluates* stdout, so help and version output - which
-      # clap prints to stdout - must never reach it. Scoped to these three verbs
-      # on purpose: a wrapper-wide scan would hijack a child's flags in
+      # clap prints to stdout - must never reach it. Scoped to these verbs on
+      # purpose: a wrapper-wide scan would hijack a child's flags in
       # 'jlo exec -- ./gradlew --help'. env/use take at most a version,
-      # update takes versions or --all, and selfupdate takes nothing - none
-      # of them hands flags on to a child.
+      # install/update take versions, and selfupdate takes nothing - none of
+      # them hands flags on to a child. The patterns are whole words, so the
+      # hidden '__install' verb falls through to the plain branch below.
       for arg in "$@"; do
         case "$arg" in
-          # The last pattern is a cluster of short flags: 'update -ah' is
-          # help too.
+          # The last pattern is a cluster of short flags holding h or V
+          # ('-ah'): never evaluated, whatever clap makes of it.
           -h|--help|-V|--version|-[hV]*|-[!-]*[hV]*)
             "$J" "$@"
             return
@@ -46,20 +47,21 @@ jlo() {
       # with the one the new binary just generated. An update that was already
       # current prints nothing, so `eval ""` is a no-op.
       #
-      # 'update' rides it too, and is the one verb whose output is evaluated
-      # on failure as well: it deletes the build each new one supersedes,
-      # including the one JAVA_HOME points at, and prints the exports that
-      # move this shell onto the replacement. A later name failing does not
-      # undo that deletion, so skipping the eval would leave the shell on a
-      # JDK that is gone. The binary writes those lines in one go after the
-      # work is done, so there is no half-written environment to fear here.
+      # 'install' and 'update' ride it too - one operation behind two verbs -
+      # and are the ones whose output is evaluated on failure as well: they
+      # delete the build each new one supersedes, including the one
+      # JAVA_HOME points at, and print the exports that move this shell onto
+      # the replacement. A later name failing does not undo that deletion, so
+      # skipping the eval would leave the shell on a JDK that is gone. The
+      # binary writes those lines in one go after the work is done, so there
+      # is no half-written environment to fear here.
       if out="$("$J" "$@")"; then
         eval "$out"
       else
         rc=$?
-        if [ "$1" = update ]; then
-          eval "$out"
-        fi
+        case "$1" in
+          install|update) eval "$out" ;;
+        esac
         return "$rc"
       fi
       ;;

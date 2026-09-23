@@ -150,8 +150,9 @@ impl InstallUi {
     }
 }
 
-/// `jlo update` exists to answer "is anything newer available?", so the answer
-/// is its output - unlike `jlo env`, where silence is the answer.
+/// `jlo install` and `jlo update` exist to answer "is anything newer
+/// available?", so the answer is their output - unlike `jlo env`, where
+/// silence is the answer.
 pub(crate) fn up_to_date(name: &str, version: &str) {
     eprintln!(
         "{} JDK {} is up to date {}",
@@ -161,9 +162,9 @@ pub(crate) fn up_to_date(name: &str, version: &str) {
     );
 }
 
-/// What an update's new build replaced, printed under its install summary.
+/// What a new build replaced, printed under its install summary.
 ///
-/// A pre-release says so. Its stream publishes weekly and `update --all`
+/// A pre-release says so. Its stream publishes weekly and a bare `jlo update`
 /// moves it, so these lines recur on every run - one that did not read as a
 /// preview being swapped for the next would pass for a patch release.
 pub(crate) fn replaced(request: crate::request::Request, removed: &[String], failures: &[String]) {
@@ -186,8 +187,8 @@ fn replaced_line(request: crate::request::Request, removed: &[String]) -> String
     )
 }
 
-/// The lines an update ends on when it deleted anything: how many, and
-/// whether the shell moved with it.
+/// The lines `install` and `update` end on when they deleted anything: how
+/// many, and whether the shell moved with it.
 ///
 /// `captured` is stdout not being a terminal - the same proxy `jlo env` uses
 /// for "the wrapper is evaluating this". When it is a terminal the exports
@@ -212,7 +213,7 @@ pub(crate) fn update_report(run: &crate::store::InstallRun, captured: bool) {
                     .for_stderr()
             );
         } else {
-            warning!("JAVA_HOME still points at a JDK this update removed");
+            warning!("JAVA_HOME still points at a JDK this command removed");
             hint!("{NO_ACTIVE_JDK_HINT}");
         }
     }
@@ -735,9 +736,9 @@ pub(crate) fn unsourced_env_hint(java_version: &str) -> String {
 }
 
 /// The line `jlo install` and `jlo update` end on when a superseded build is
-/// still on disk after an install. After `install` that is the build it just
-/// superseded; after `update`, which deletes its own, only a leftover from
-/// before - a name this run did not move, or a deletion that failed.
+/// still on disk after an install. Both delete what their own downloads
+/// supersede, so this is only ever a leftover - a name this run did not move,
+/// or a deletion that failed.
 ///
 /// `None` when there is nothing to say: no install happened (nagging on every
 /// no-op run trains the user to ignore the line), or nothing is superseded.
@@ -760,8 +761,8 @@ pub(crate) fn superseded_hint(installed_any: bool, superseded: usize) -> Option<
 /// *next patch*. That is deliberately not changed under the user's feet; it is
 /// announced instead.
 ///
-/// Also said on every `update --all` while such a stream is installed, since
-/// `--all` moves pre-release names too - so it names the way to stop that as
+/// Also said on every bare `jlo update` while such a stream is installed,
+/// since it moves pre-release names too - so it names the way to stop that as
 /// well as the way to switch.
 pub(crate) fn ea_is_now_released(request: crate::request::Request) -> String {
     format!(
@@ -1071,7 +1072,7 @@ fn tip_line(rows: &[Row]) -> Option<String> {
     if outdated > 0 {
         offers.push(format!(
             "{} ({outdated} outdated)",
-            style("`jlo update --all`").bold().for_stderr()
+            style("`jlo update`").bold().for_stderr()
         ));
     }
     if superseded > 0 {
@@ -1253,9 +1254,9 @@ mod tests {
 
     // -- replaced_line --
 
-    /// A pre-release stream publishes weekly and `update --all` moves it, so
-    /// its replacement line has to read as a preview swapped for the next,
-    /// not as a patch release.
+    /// A pre-release stream publishes weekly and a bare `jlo update` moves
+    /// it, so its replacement line has to read as a preview swapped for the
+    /// next, not as a patch release.
     #[test]
     fn a_replaced_pre_release_says_so() {
         use crate::request::{Request, Stream};
@@ -1779,9 +1780,7 @@ mod tests {
         ];
         assert_eq!(
             tip_line(&rows).as_deref(),
-            Some(
-                "TIP: `jlo update --all` (2 outdated) \u{b7} `jlo remove --superseded` (1 superseded)"
-            )
+            Some("TIP: `jlo update` (2 outdated) \u{b7} `jlo remove --superseded` (1 superseded)")
         );
     }
 
@@ -1802,9 +1801,7 @@ mod tests {
         ];
         assert_eq!(
             tip_line(&rows).as_deref(),
-            Some(
-                "TIP: `jlo update --all` (2 outdated) \u{b7} `jlo remove --superseded` (1 superseded)"
-            )
+            Some("TIP: `jlo update` (2 outdated) \u{b7} `jlo remove --superseded` (1 superseded)")
         );
     }
 

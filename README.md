@@ -86,8 +86,8 @@ of them; `-h` gives the short form of either.
 | `jlo exec [VERSION] -- <CMD>` | Run a command with that JDK active, leaving the current shell alone. |
 | `jlo current` | Say which JDK is active in this shell, and why. |
 | `jlo list` | Show what Adoptium offers and what is installed. `jlo ls` is an alias. |
-| `jlo install [VERSION...]` | Download a major version without changing any shell. |
-| `jlo update [VERSION...]` | Bring installed JDKs up to their latest minor release, replacing the build each one supersedes. `--all` for every installed name. |
+| `jlo install [VERSION...]` | Download the latest build of a version, replacing the build it supersedes. |
+| `jlo update [VERSION...]` | The same, but with no version it updates every installed JDK. |
 | `jlo remove <VERSION...>` | Delete installed JDKs by name, or `--superseded` to delete them by rule. |
 | `jlo init [VERSION]` | Write a `.jlorc` pinning this project's version. `--global` for the user-wide default. |
 | `jlo selfupdate` | Update J'Lo itself. |
@@ -95,10 +95,10 @@ of them; `-h` gives the short form of either.
 
 Three things are worth knowing before you read any of that:
 
-- **The version is optional on `env`, `home`, `exec`, `install` and `update`.** Left out, it resolves in four steps:
+- **The version is optional on `env`, `home`, `exec` and `install`.** Left out, it resolves in four steps:
   the nearest `.jlorc` at or above the current directory, then `~/.jlo/default.jlorc`, then the newest JDK already
   installed, then the latest release, which is downloaded. `jlo env --help` spells out the whole cascade and its one
-  sharp edge; `jlo current` tells you which step answered.
+  sharp edge; `jlo current` tells you which step answered. A bare `jlo update` is every installed JDK instead.
 - **A major version (`21`) or a pre-release stream (`28-ea`) is accepted** wherever a JDK is resolved or downloaded,
   not an exact build: `21`, not `21.0.5`. The one exception is `jlo remove`, which names an install rather than
   resolving one and so also takes an exact build (`jlo remove 21.0.5+11`).

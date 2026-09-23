@@ -492,25 +492,30 @@ fn selfupdate_help_is_printed_not_evaluated() {
 }
 
 // ---------------------------------------------------------------------------
-// update: the exports that follow a deletion are evaluated even on failure
+// install/update: the exports that follow a deletion are evaluated even on
+// failure
 // ---------------------------------------------------------------------------
 
-/// `update` deletes the build `JAVA_HOME` points at and prints the exports
-/// that move the shell onto its replacement. A later name failing does not
-/// bring the deleted build back, so the wrapper must evaluate those exports
-/// anyway - and still hand back the failure. `env`, whose failure deletes
-/// nothing, keeps not evaluating, and help output never is.
+/// `install` and `update` delete the build `JAVA_HOME` points at and print
+/// the exports that move the shell onto its replacement. A later name failing
+/// does not bring the deleted build back, so the wrapper must evaluate those
+/// exports anyway - and still hand back the failure. `env`, whose failure
+/// deletes nothing, keeps not evaluating, and help output never is.
 #[test]
-fn update_evals_its_exports_even_when_it_fails() {
+fn install_and_update_eval_their_exports_even_when_they_fail() {
     for sh in INTERPRETERS {
-        if skip_missing("update_evals_its_exports_even_when_it_fails", sh) {
+        if skip_missing(
+            "install_and_update_eval_their_exports_even_when_they_fail",
+            sh,
+        ) {
             continue;
         }
         let home = jlo_home_with_stub("echo 'JLO_TEST_MOVED=yes'\necho boom >&2\nexit 1");
-        // `-ah` is clap's help in a short-flag cluster: printed, never
+        // `-ah` is a short-flag cluster holding help: printed, never
         // evaluated, like `--help`.
         for (verb, moved) in [
-            ("update --all", "yes"),
+            ("update", "yes"),
+            ("install 21", "yes"),
             ("env 21", "no"),
             ("update -ah", "no"),
             ("update -ha", "no"),
