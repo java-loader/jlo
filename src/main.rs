@@ -236,13 +236,17 @@ fn cmd_exec(client: &AdoptiumClient, args: &[String]) -> Result<(), CommandError
     // child command and must be passed through untouched (see
     // `exec_passes_hyphen_args_through_to_the_child`).
     let separator = args.iter().position(|a| a == "--").unwrap_or(args.len());
-    let before_separator = &args[..separator];
-    if before_separator.iter().any(|a| a == "--help") {
-        cli::print_exec_help(true);
-        return Ok(());
-    }
-    if before_separator.iter().any(|a| a == "-h") {
-        cli::print_exec_help(false);
+    // `--help` wins over `-h` wherever each appears: `true` sorts above `false`.
+    let help = args[..separator]
+        .iter()
+        .filter_map(|a| match a.as_str() {
+            "--help" => Some(true),
+            "-h" => Some(false),
+            _ => None,
+        })
+        .max();
+    if let Some(long) = help {
+        cli::print_exec_help(long);
         return Ok(());
     }
 
