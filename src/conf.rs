@@ -324,6 +324,7 @@ fn init_config(path: &Path, request: Request, force: bool) -> anyhow::Result<()>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::request::request;
     use std::fs;
     use tempfile::tempdir;
 
@@ -388,7 +389,7 @@ mod tests {
     fn init_config_creates_file() {
         let dir = tempdir().unwrap();
         let file = dir.path().join(".jlorc");
-        init_config(&file, Request::parse("21").unwrap(), false).unwrap();
+        init_config(&file, request("21"), false).unwrap();
 
         let content = fs::read_to_string(&file).unwrap();
         let lines: Vec<_> = content.lines().collect();
@@ -405,7 +406,7 @@ mod tests {
         // jlo-bin is run without the installer having created ~/.jlo.
         let dir = tempdir().unwrap();
         let file = dir.path().join(".jlo").join("default.jlorc");
-        init_config(&file, Request::parse("21").unwrap(), false).unwrap();
+        init_config(&file, request("21"), false).unwrap();
 
         assert_eq!(
             fs::read_to_string(&file).unwrap().lines().nth(1),
@@ -419,7 +420,7 @@ mod tests {
         let file = dir.path().join(".jlorc");
         fs::write(&file, "17\n").unwrap();
 
-        let err = init_config(&file, Request::parse("21").unwrap(), false).unwrap_err();
+        let err = init_config(&file, request("21"), false).unwrap_err();
         assert!(err.is::<AlreadyExists>(), "{err:#}");
         assert!(err.to_string().contains("already exists"));
     }
@@ -430,7 +431,7 @@ mod tests {
         let file = dir.path().join(".jlorc");
         fs::write(&file, "17\nleftover\n").unwrap();
 
-        init_config(&file, Request::parse("21").unwrap(), true).unwrap();
+        init_config(&file, request("21"), true).unwrap();
 
         let content = fs::read_to_string(&file).unwrap();
         assert_eq!(content.lines().nth(1), Some("21"));

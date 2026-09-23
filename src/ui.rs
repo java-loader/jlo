@@ -1339,6 +1339,7 @@ fn tilde(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::request::request;
     use std::path::PathBuf;
 
     // -- ea_is_now_released --
@@ -1354,13 +1355,7 @@ mod tests {
         };
         assert_eq!(released_ea_names(&[ea(21), ea(28)], &[21]), vec![ea(21)]);
         assert_eq!(
-            released_ea_names(
-                &[Request {
-                    major: 21,
-                    stream: Stream::Ga
-                }],
-                &[21]
-            ),
+            released_ea_names(&[request("21")], &[21]),
             vec![],
             "a GA name is not a pin on the unreleased stream"
         );
@@ -1370,10 +1365,7 @@ mod tests {
     /// repeats it - is still one thing to say.
     #[test]
     fn a_repeated_name_is_announced_once() {
-        let ea = Request {
-            major: 21,
-            stream: Stream::Ea,
-        };
+        let ea = request("21-ea");
         assert_eq!(released_ea_names(&[ea, ea], &[21]), vec![ea]);
     }
 
@@ -1382,10 +1374,7 @@ mod tests {
     /// therefore a note, not a warning - but it must name the way out.
     #[test]
     fn the_notice_names_the_major_and_the_plain_name() {
-        let notice = ea_is_now_released(Request {
-            major: 28,
-            stream: Stream::Ea,
-        });
+        let notice = ea_is_now_released(request("28-ea"));
         assert!(
             notice.contains("28-ea"),
             "names what was asked for: {notice}"
@@ -1405,23 +1394,11 @@ mod tests {
     fn a_replaced_pre_release_says_so() {
         let removed = vec!["28.0.0-beta+14.0.ea".to_string()];
         assert_eq!(
-            replaced_line(
-                Request {
-                    major: 28,
-                    stream: Stream::Ea
-                },
-                &removed
-            ),
+            replaced_line(request("28-ea"), &removed),
             "  replaced pre-release 28.0.0-beta+14.0.ea"
         );
         assert_eq!(
-            replaced_line(
-                Request {
-                    major: 21,
-                    stream: Stream::Ga
-                },
-                &["21.0.8+9".to_string()]
-            ),
+            replaced_line(request("21"), &["21.0.8+9".to_string()]),
             "  replaced 21.0.8+9"
         );
     }
@@ -1480,10 +1457,6 @@ mod tests {
     // no config, no environment. Cases 1 and 6 never reach a formatter - they
     // have no answer to print - so they are covered by the integration
     // suite's exit codes instead.
-
-    fn request(name: &str) -> Request {
-        Request::parse(name).expect("the fixture names a valid version")
-    }
 
     fn active(version: &str, major: i64) -> Active {
         Active {

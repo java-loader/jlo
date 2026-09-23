@@ -105,6 +105,12 @@ impl Request {
     }
 }
 
+/// A test fixture's version name, parsed - one spelling for every test module.
+#[cfg(test)]
+pub(crate) fn request(text: &str) -> Request {
+    Request::parse(text).expect("the fixture names a valid version")
+}
+
 impl fmt::Display for Request {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.major)?;

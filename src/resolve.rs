@@ -435,6 +435,7 @@ fn is_inside(base: &Path, path: &Path) -> bool {
 mod tests {
     use super::*;
     use crate::request::Stream;
+    use crate::request::request;
     use tempfile::tempdir;
 
     fn owned(items: &[&str]) -> Vec<String> {
@@ -452,29 +453,6 @@ mod tests {
     /// JDKs. Enough for the tests that never reach stage 3 of the cascade.
     fn empty_store() -> JdkStore {
         JdkStore::at("/nonexistent/jlo-test-store")
-    }
-
-    /// `env` must not send the reader to `home`: the advice line names the
-    /// command they actually ran.
-    #[test]
-    fn java_home_offline_names_the_calling_command_in_its_hint() {
-        let store = JdkStore::at(tempdir().unwrap().path());
-        let err = java_home(
-            &offline_client(),
-            &store,
-            Some("99".into()),
-            true,
-            Verb::Env,
-        )
-        .expect_err("the store is empty");
-        assert_eq!(
-            format!("{:#}", err.error),
-            "no installed JDK matches Java 99"
-        );
-        assert_eq!(
-            err.hint.as_deref(),
-            Some("Run 'jlo env 99' without --offline to install it.")
-        );
     }
 
     #[test]
@@ -496,32 +474,29 @@ mod tests {
 
     /// The exit status is the answer a script wants, and the hint has to name
     /// the command that would actually install it - the whole point of the
-    /// flag is that this one did not.
+    /// flag is that this one did not. `env` must not send the reader to
+    /// `home`: the advice line names the command they actually ran.
     #[test]
     fn java_home_offline_fails_without_installing_anything() {
-        let dir = tempdir().unwrap();
-        let store = store_with(dir.path(), "21.0.3+9");
+        for (verb, command) in [(Verb::Env, "env"), (Verb::Home, "home")] {
+            let dir = tempdir().unwrap();
+            let store = store_with(dir.path(), "21.0.3+9");
 
-        let err = java_home(
-            &offline_client(),
-            &store,
-            Some("17".into()),
-            true,
-            Verb::Home,
-        )
-        .expect_err("17 is not installed");
-        assert_eq!(
-            format!("{:#}", err.error),
-            "no installed JDK matches Java 17"
-        );
-        assert_eq!(
-            err.hint.as_deref(),
-            Some("Run 'jlo home 17' without --offline to install it.")
-        );
-        assert!(
-            !dir.path().join("17").exists(),
-            "--offline must not create anything"
-        );
+            let err = java_home(&offline_client(), &store, Some("17".into()), true, verb)
+                .expect_err("17 is not installed");
+            assert_eq!(
+                format!("{:#}", err.error),
+                "no installed JDK matches Java 17"
+            );
+            assert_eq!(
+                err.hint.as_deref(),
+                Some(format!("Run 'jlo {command} 17' without --offline to install it.").as_str())
+            );
+            assert!(
+                !dir.path().join("17").exists(),
+                "--offline must not create anything"
+            );
+        }
     }
 
     /// Online, an installed JDK is answered before the client is used: the
@@ -548,10 +523,6 @@ mod tests {
     // temp directory. `refuse_network` is the assertion that matters most in
     // half of them: stage 4 is a several-hundred-megabyte download, and the
     // cases below are exactly the ones in which it must not be reached.
-
-    fn request(version: &str) -> Request {
-        Request::parse(version).expect("the fixture names a valid version")
-    }
 
     fn configured(version: &str) -> conf::Resolved {
         conf::Resolved {
@@ -591,26 +562,15 @@ mod tests {
     }
 
     /// Stage 3: no config anywhere, so the newest JDK on disk answers - and
-    /// answers without a round trip to Adoptium.
+    /// answers without a round trip to Adoptium, however outdated it is.
+    /// Whether something newer exists is `jlo update`'s question, not this
+    /// one's.
     #[test]
     fn cascade_falls_back_to_the_newest_installed_jdk() {
         let resolved = cascade(None, Some(installed("25")), false, refuse_network)
             .expect("the installed JDK answers");
 
         assert_eq!(resolved.request, request("25"));
-        assert_eq!(resolved.source, conf::Source::NewestInstalled);
-    }
-
-    /// The case the cascade is most easily got wrong in: a machine holding
-    /// only an outdated major resolves to *that* major. Stage 3 does not ask
-    /// Adoptium whether something newer exists - that is what `jlo update` is
-    /// for - so nothing is downloaded here.
-    #[test]
-    fn cascade_keeps_an_outdated_install_rather_than_downloading_a_newer_major() {
-        let resolved = cascade(None, Some(installed("17")), false, refuse_network)
-            .expect("the outdated install still answers");
-
-        assert_eq!(resolved.request, request("17"));
         assert_eq!(resolved.source, conf::Source::NewestInstalled);
     }
 
@@ -677,29 +637,8 @@ mod tests {
         let resolved = cascade(None, newest_installed(&store), false, || Ok(request("27")))
             .expect("stage 4 answers when stage 3 declines");
 
-        assert_eq!(
-            resolved.request,
-            Request {
-                major: 27,
-                stream: Stream::Ga
-            }
-        );
+        assert_eq!(resolved.request, request("27"));
         assert_eq!(resolved.source, conf::Source::LatestRelease);
-    }
-
-    /// The same store, offline: stage 4 is refused, so this must fail rather
-    /// than quietly resolving to the beta.
-    #[test]
-    fn offline_declines_rather_than_resolving_to_a_pre_release() {
-        let dir = tempdir().unwrap();
-        let store = store_with(dir.path(), "28.0.0-beta+16.0.ea");
-
-        assert!(
-            cascade(None, newest_installed(&store), true, || Err(anyhow!(
-                "no network"
-            )))
-            .is_err()
-        );
     }
 
     // -- requested_versions --

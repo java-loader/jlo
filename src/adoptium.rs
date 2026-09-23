@@ -556,6 +556,7 @@ mod tests {
 #[cfg(test)]
 mod client_tests {
     use super::*;
+    use crate::request::request;
     use std::io::Read;
 
     const ASSETS_FIXTURE: &str = include_str!("../tests/fixtures/assets_latest.json");
@@ -611,10 +612,7 @@ mod client_tests {
 
         let client = AdoptiumClient::new(server.url());
         let metadata = client
-            .fetch_metadata(Request {
-                major: 21,
-                stream: Stream::Ga,
-            })
+            .fetch_metadata(request("21"))
             .unwrap()
             .expect("the fixture offers a build");
 
@@ -640,12 +638,7 @@ mod client_tests {
         let _m = metadata_mock(&mut server, 500, "boom");
 
         let client = AdoptiumClient::new(server.url());
-        let err = client
-            .fetch_metadata(Request {
-                major: 21,
-                stream: Stream::Ga,
-            })
-            .unwrap_err();
+        let err = client.fetch_metadata(request("21")).unwrap_err();
 
         assert!(format!("{err:#}").contains("HTTP 500"), "got: {err:#}");
     }
@@ -656,12 +649,7 @@ mod client_tests {
         let _m = metadata_mock(&mut server, 200, "this is not json");
 
         let client = AdoptiumClient::new(server.url());
-        let err = client
-            .fetch_metadata(Request {
-                major: 21,
-                stream: Stream::Ga,
-            })
-            .unwrap_err();
+        let err = client.fetch_metadata(request("21")).unwrap_err();
 
         assert!(
             format!("{err:#}").contains("could not parse the Adoptium API response"),
@@ -679,10 +667,7 @@ mod client_tests {
 
         let client = AdoptiumClient::new(server.url());
         let metadata = client
-            .fetch_metadata(Request {
-                major: 21,
-                stream: Stream::Ga,
-            })
+            .fetch_metadata(request("21"))
             .expect("an empty array is not a failure");
 
         assert!(metadata.is_none(), "{metadata:?}");
@@ -695,12 +680,7 @@ mod client_tests {
         let _m = metadata_mock(&mut server, 200, &body);
 
         let client = AdoptiumClient::new(server.url());
-        let err = client
-            .fetch_metadata(Request {
-                major: 21,
-                stream: Stream::Ga,
-            })
-            .unwrap_err();
+        let err = client.fetch_metadata(request("21")).unwrap_err();
 
         assert!(format!("{err:#}").contains("checksum"), "got: {err:#}");
     }
@@ -712,12 +692,7 @@ mod client_tests {
         let _m = metadata_mock(&mut server, 200, &body);
 
         let client = AdoptiumClient::new(server.url());
-        let err = client
-            .fetch_metadata(Request {
-                major: 21,
-                stream: Stream::Ga,
-            })
-            .unwrap_err();
+        let err = client.fetch_metadata(request("21")).unwrap_err();
 
         assert!(
             format!("{err:#}").contains("incomplete metadata"),
@@ -955,7 +930,7 @@ mod client_tests {
             .create();
 
         let client = AdoptiumClient::new(server.url());
-        assert_eq!(client.latest_major().unwrap().to_string(), "26");
+        assert_eq!(client.latest_major().unwrap(), request("26"));
     }
 
     #[test]
@@ -1111,10 +1086,7 @@ mod client_tests {
 
         let client = AdoptiumClient::new(server.url());
         let metadata = client
-            .fetch_metadata(Request {
-                major: 28,
-                stream: Stream::Ea,
-            })
+            .fetch_metadata(request("28-ea"))
             .expect("the EA fixture is a complete release")
             .expect("the EA fixture offers a build");
 
@@ -1144,10 +1116,7 @@ mod client_tests {
 
         let client = AdoptiumClient::new(server.url());
         client
-            .fetch_metadata(Request {
-                major: 21,
-                stream: Stream::Ga,
-            })
+            .fetch_metadata(request("21"))
             .expect("the GA fixture is a complete asset");
         mock.assert();
     }
@@ -1171,10 +1140,7 @@ mod client_tests {
         // come back as an error rather than as `None`.
         let client = AdoptiumClient::new(server.url());
         let metadata = client
-            .fetch_metadata(Request {
-                major: 11,
-                stream: Stream::Ea,
-            })
+            .fetch_metadata(request("11-ea"))
             .expect("an empty stream is not a failure");
         assert!(metadata.is_none(), "{metadata:?}");
     }

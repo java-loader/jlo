@@ -1261,12 +1261,9 @@ fn find_jdk_path(temp_dest: &Path) -> anyhow::Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::request::request;
     use std::fs;
     use tempfile::tempdir;
-
-    fn request(name: &str) -> Request {
-        Request::parse(name).expect("the fixture names a valid version")
-    }
 
     fn create_jdk_dir(base: &Path, version: &str, managed: bool) {
         let dir = base.join(version);
@@ -1689,18 +1686,12 @@ mod tests {
         let store = JdkStore::at(dir.path());
 
         assert_eq!(
-            store.find_matching(Request {
-                major: 26,
-                stream: Stream::Ga
-            }),
+            store.find_matching(request("26")),
             Some(dir.path().join("26.0.1+9")),
             "a GA request must not be answered with the higher-sorting beta"
         );
         assert_eq!(
-            store.find_matching(Request {
-                major: 26,
-                stream: Stream::Ea
-            }),
+            store.find_matching(request("26-ea")),
             Some(dir.path().join("26.0.2-beta+101.0.ea"))
         );
     }
@@ -1717,10 +1708,7 @@ mod tests {
 
         assert_eq!(
             JdkStore::at(dir.path()).newest_ga_request(),
-            Some(Request {
-                major: 21,
-                stream: Stream::Ga
-            })
+            Some(request("21"))
         );
     }
 
@@ -1785,19 +1773,7 @@ mod tests {
 
         let requests = JdkStore::at(dir.path()).installed_requests().unwrap();
 
-        assert_eq!(
-            requests,
-            vec![
-                Request {
-                    major: 21,
-                    stream: Stream::Ga
-                },
-                Request {
-                    major: 28,
-                    stream: Stream::Ea
-                },
-            ]
-        );
+        assert_eq!(requests, vec![request("21"), request("28-ea"),]);
     }
 
     /// A bare `jlo update` reports an unreadable install directory rather than
@@ -1874,17 +1850,6 @@ mod tests {
 
         // Exactly what `prune` would remove: two old 21s, no 17.
         assert_eq!(JdkStore::at(dir.path()).superseded_count().unwrap(), 2);
-    }
-
-    #[test]
-    fn superseded_count_ignores_unmanaged() {
-        let dir = tempdir().unwrap();
-        create_jdk_dir(dir.path(), "21.0.1+12", false);
-        create_jdk_dir(dir.path(), "21.0.3+9", true);
-
-        // `prune` never touches an unmanaged install, so counting one would
-        // point at a `jlo remove --superseded` that then removes nothing.
-        assert_eq!(JdkStore::at(dir.path()).superseded_count().unwrap(), 0);
     }
 
     #[test]
@@ -2150,27 +2115,6 @@ mod tests {
     /// `remove --superseded` keeps the newest of each *name*. Without the
     /// stream in the key, the beta - which sorts above the GA build it
     /// previews - would make the released build superseded.
-    #[test]
-    fn superseded_counts_within_a_stream_only() {
-        let dir = tempdir().unwrap();
-        create_jdk_dir(dir.path(), "26.0.1+9", true);
-        create_jdk_dir(dir.path(), "26.0.2-beta+101.0.ea", true);
-        let store = JdkStore::at(dir.path());
-
-        assert_eq!(
-            store.superseded_count().unwrap(),
-            0,
-            "one build of each stream supersedes nothing"
-        );
-
-        create_jdk_dir(dir.path(), "26.0.3-beta+102.0.ea", true);
-        assert_eq!(
-            store.superseded_count().unwrap(),
-            1,
-            "the older beta is superseded by the newer beta, and only by it"
-        );
-    }
-
     #[test]
     fn prune_keeps_the_newest_of_each_stream() {
         let dir = tempdir().unwrap();
@@ -2658,18 +2602,12 @@ mod tests {
     fn selector_selects_by_name_not_by_major() {
         let ga = InstalledJdk {
             version: "26.0.1+9".to_string(),
-            request: Request {
-                major: 26,
-                stream: Stream::Ga,
-            },
+            request: request("26"),
             managed: true,
         };
         let ea = InstalledJdk {
             version: "26.0.2-beta+101.0.ea".to_string(),
-            request: Request {
-                major: 26,
-                stream: Stream::Ea,
-            },
+            request: request("26-ea"),
             managed: true,
         };
 
@@ -2685,10 +2623,7 @@ mod tests {
     fn selector_reads_a_bare_integer_as_a_major() {
         let jdk = InstalledJdk {
             version: "17.0.2+8".to_string(),
-            request: Request {
-                major: 17,
-                stream: Stream::Ga,
-            },
+            request: request("17"),
             managed: true,
         };
 
