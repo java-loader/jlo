@@ -26,6 +26,7 @@
 //! the documented repair for both, and for anything else the receipt does not
 //! speak to.
 
+use crate::store::same_path;
 use crate::ui;
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
@@ -1053,15 +1054,6 @@ pub(crate) fn is_current_exe(path: &Path) -> bool {
         return false;
     };
     same_path(&exe, path)
-}
-
-/// Compares resolved paths where both exist: `$JLO_HOME` may itself be reached
-/// through a symlink, and the receipt records whatever spelling it was given.
-pub(crate) fn same_path(a: &Path, b: &Path) -> bool {
-    match (a.canonicalize(), b.canonicalize()) {
-        (Ok(a), Ok(b)) => a == b,
-        _ => a == b,
-    }
 }
 
 // ---------------------------------------------------------------------------

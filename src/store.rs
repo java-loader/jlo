@@ -1189,14 +1189,15 @@ fn matches_target(jdk: &InstalledJdk, target: &str) -> bool {
     }
 }
 
-/// Whether two paths name the same directory.
+/// Whether two paths name the same file or directory.
 ///
 /// Canonicalised when both resolve, so a trailing slash or a symlinked home
-/// does not let a live JDK slip past the `$JAVA_HOME` refusal. The literal
-/// comparison comes first and stands alone as the fallback: a `$JAVA_HOME`
-/// pointing at a path that no longer exists cannot be canonicalised, and that
-/// must not silently turn the refusal off.
-fn same_dir(a: &Path, b: &Path) -> bool {
+/// does not let a live JDK slip past the `$JAVA_HOME` refusal, and a
+/// `$JLO_HOME` reached through a symlink still matches the spelling its
+/// receipt recorded. The literal comparison comes first and stands alone as
+/// the fallback: a `$JAVA_HOME` pointing at a path that no longer exists
+/// cannot be canonicalised, and that must not silently turn the refusal off.
+pub(crate) fn same_path(a: &Path, b: &Path) -> bool {
     if a == b {
         return true;
     }
@@ -1269,7 +1270,7 @@ fn java_home_in(dir: &Path) -> PathBuf {
 /// root resolves to its version rather than falling through to "that install
 /// is no longer there".
 fn owns(dir: &Path, active: &Path) -> bool {
-    same_dir(dir, active) || same_dir(&dir.join(BUNDLE_HOME[0]).join(BUNDLE_HOME[1]), active)
+    same_path(dir, active) || same_path(&dir.join(BUNDLE_HOME[0]).join(BUNDLE_HOME[1]), active)
 }
 
 /// A directory counts as a JDK when its name parses as a version. That is what

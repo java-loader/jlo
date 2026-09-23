@@ -342,7 +342,7 @@ fn check_owned(receipt: &install::Receipt, layout: &Layout) -> Result<(), Comman
         }
     }
 
-    if !install::same_path(Path::new(&receipt.jlo_home), layout.home()) {
+    if !crate::store::same_path(Path::new(&receipt.jlo_home), layout.home()) {
         return Err(anyhow!(
             "the install receipt in {:?} describes a different JLO_HOME ({:?}).",
             layout.home(),
