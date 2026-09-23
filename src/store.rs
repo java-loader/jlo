@@ -1899,6 +1899,27 @@ mod tests {
         assert!(staging.path().exists(), "the staging directory is real");
     }
 
+    /// `jlo remove --superseded` can run while an install is mid-download in
+    /// another shell: the staging directory is that install's, so pruning
+    /// must neither delete it nor count it as an unmanaged install.
+    #[test]
+    fn prune_leaves_an_in_flight_staging_directory_alone() {
+        let dir = tempdir().unwrap();
+        create_jdk_dir(dir.path(), "21.0.1+12", true);
+        create_jdk_dir(dir.path(), "21.0.3+9", true);
+        let store = JdkStore::at(dir.path());
+        let staging = staging_dir(&store).unwrap();
+
+        let report = store.prune(None).unwrap();
+
+        assert!(
+            staging.path().exists(),
+            "prune deleted an in-flight install"
+        );
+        assert_eq!(report.skipped_unmanaged, 0);
+        assert_eq!(report.removed_count(), 1);
+    }
+
     // -- prune --
 
     #[test]
