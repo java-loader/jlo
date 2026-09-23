@@ -34,24 +34,27 @@ use tempfile::tempdir;
 /// Separates the `declare -p` line from the element dump.
 const MARKER: &str = "--8<--";
 
-/// The dialect as `__install` writes it: its own registration, then the
-/// common rest - the same `concat!` `src/install.rs` compiles in, assembled
-/// once per test run.
+/// The dialect exactly as `__install` writes it - its own registration, then
+/// the common rest - produced by running the verb once per test run into a
+/// throwaway `$JLO_HOME`, so what is sourced here is the shipped file rather
+/// than a copy of how it is assembled.
 fn autoload_script(dialect: &str) -> String {
-    static DIR: OnceLock<PathBuf> = OnceLock::new();
-    let dir = DIR.get_or_init(|| {
-        let shell = Path::new(env!("CARGO_MANIFEST_DIR")).join("shell");
-        let common = std::fs::read_to_string(shell.join("jlo-autoload-common.sh")).unwrap();
-        let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("autoload");
-        std::fs::create_dir_all(&dir).unwrap();
-        for dialect in ["bash", "zsh"] {
-            let name = format!("jlo-autoload.{dialect}");
-            let head = std::fs::read_to_string(shell.join(&name)).unwrap();
-            std::fs::write(dir.join(&name), head + &common).unwrap();
-        }
-        dir
+    static HOME: OnceLock<PathBuf> = OnceLock::new();
+    let home = HOME.get_or_init(|| {
+        let home = Path::new(env!("CARGO_TARGET_TMPDIR")).join("autoload");
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        let out = Command::new(env!("CARGO_BIN_EXE_jlo-bin"))
+            .arg("__install")
+            .env("HOME", &home)
+            .env("JLO_HOME", home.join(".jlo"))
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "__install failed: {out:?}");
+        home
     });
-    dir.join(format!("jlo-autoload.{dialect}"))
+    home.join(".jlo/bin")
+        .join(format!("jlo-autoload.{dialect}"))
         .display()
         .to_string()
 }
