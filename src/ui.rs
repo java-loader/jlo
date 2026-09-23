@@ -879,14 +879,13 @@ struct Build {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct NameRow {
     name: Request,
-    /// The newest managed build of the name: the one `jlo env <name>` picks
-    /// and the one `jlo update` measures against.
+    /// The newest managed build of the name, as shown in the column.
     installed: Option<String>,
-    /// The build Adoptium offers, only when it is not already here: nothing
-    /// of the name is installed, or it is newer than everything that is.
+    /// The build Adoptium offers, only when that exact build is not installed
+    /// under the name. Usually newer than what is; older when the catalogue
+    /// sits behind the store.
     latest: Option<String>,
-    /// `latest` is newer than an install of this name, so `jlo update` would
-    /// download it.
+    /// `latest` is newer than every install of this name.
     update: bool,
     lts: bool,
     /// `$JAVA_HOME` points at `installed`.
@@ -975,10 +974,16 @@ fn name_row(
     builds
         .sort_by(|a, b| crate::version::compare(&b.version, &a.version).unwrap_or(Ordering::Equal));
 
+    // LATEST and `update` answer different questions. LATEST is anything
+    // Adoptium offers that is not already on disk, so a catalogue that sits
+    // behind the store is still visible; only `update` claims the offer is
+    // an improvement. Presence is the exact directory name, as `jlo update`
+    // checks it before reporting "up to date".
     let latest = offered
-        .filter(|jdk| supersedes_every_install(jdk, &builds))
+        .filter(|jdk| !builds.iter().any(|build| build.version == jdk.version))
         .map(|jdk| jdk.version.clone());
-    let update = latest.is_some() && !builds.is_empty();
+    let update =
+        !builds.is_empty() && offered.is_some_and(|jdk| supersedes_every_install(jdk, &builds));
 
     // Only a managed build can be the one the name reports, because only
     // managed builds are what `jlo remove --superseded` sorts: it filters on
@@ -1011,14 +1016,14 @@ fn name_row(
     })
 }
 
-/// Whether an offered build is newer than every install of its name - true
-/// when nothing of the name is installed.
+/// Whether an offered build is newer than every install of its name - the
+/// condition for calling it an `update`.
 ///
 /// The catalogue can sit *behind* the store - an install that came from
-/// somewhere else, or a major Adoptium has since rolled back - and showing it
-/// there would be offering a downgrade. Unmanaged installs count too: `jlo
-/// update` finds the exact build already on disk and does nothing, so
-/// offering it would name an action that does not happen.
+/// somewhere else, or a major Adoptium has since rolled back - and calling
+/// that offer an update would be recommending a downgrade. Unmanaged installs
+/// count too: an offer no newer than one of them is not an improvement on
+/// what is already on disk.
 fn supersedes_every_install(offered: &RemoteJdk, builds: &[&InstalledJdk]) -> bool {
     builds.iter().all(|jdk| {
         crate::version::compare(&offered.version, &jdk.version)
@@ -1900,14 +1905,22 @@ mod tests {
         );
     }
 
+    /// A catalogue behind the store - Adoptium rolled back, or the install
+    /// came from elsewhere - still shows what it offers, since that differs
+    /// from what is installed; it is just not called an update.
     #[test]
-    fn the_catalogue_behind_the_store_is_not_offered_as_a_downgrade() {
+    fn the_catalogue_behind_the_store_is_shown_but_not_as_an_update() {
         let rows = build_rows(
             &[remote("21.0.11+10.0.LTS", 21)],
             &[local("21.0.12+101.0.LTS", 21)],
             None,
         );
-        assert_eq!(rows, vec![row(name("21").installed("21.0.12+101.0.LTS"))]);
+        assert_eq!(
+            rows,
+            vec![row(name("21")
+                .installed("21.0.12+101.0.LTS")
+                .latest("21.0.11+10.0.LTS"))]
+        );
     }
 
     /// The gutter follows the build, wherever it is printed: on the name's
@@ -2060,6 +2073,33 @@ mod tests {
                 "    21       21.0.11+10.0.LTS     21.0.12+101.0.LTS    LTS  update",
                 " \u{2192}           21.0.9+10.0.LTS                                superseded",
                 "             21.0.8+9.0.LTS                                 unmanaged",
+            ]
+        );
+    }
+
+    /// INSTALLED and LATEST are sized apart, and an indented build counts
+    /// toward INSTALLED's width even when it is wider than every name's.
+    #[test]
+    fn render_rows_sizes_each_column_by_its_own_widest_cell() {
+        let listing = render_rows(&[
+            row(name("25")
+                .installed("25.0.1+8")
+                .latest("25.0.2+10")
+                .update()),
+            row(name("21")
+                .installed("21.0.11+9")
+                .latest("21.0.12+101.0.LTS")
+                .update()
+                .other("21.0.9+10.0.LTS", Status::Superseded)),
+        ]);
+
+        assert_eq!(listing.header, "    NAME  INSTALLED        LATEST");
+        assert_eq!(
+            listing.lines,
+            vec![
+                "    25    25.0.1+8         25.0.2+10          update",
+                "    21    21.0.11+9        21.0.12+101.0.LTS  update",
+                "          21.0.9+10.0.LTS                     superseded",
             ]
         );
     }
