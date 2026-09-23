@@ -64,15 +64,10 @@ impl Request {
         // set of accepted spellings is exactly what `u32::from_str` accepted
         // before - a leading `+` included. Widening the grammar is the change
         // being made here; narrowing it is not.
-        let Ok(major) = digits.parse::<i64>() else {
-            bail!(Self::rejection(text));
-        };
-
-        if major < OLDEST_MAJOR {
-            bail!(Self::rejection(text));
+        match digits.parse::<i64>() {
+            Ok(major) if major >= OLDEST_MAJOR => Ok(Self { major, stream }),
+            _ => bail!(Self::rejection(text)),
         }
-
-        Ok(Self { major, stream })
     }
 
     pub(crate) fn is_ea(self) -> bool {

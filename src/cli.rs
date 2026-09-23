@@ -60,6 +60,9 @@ the latest release.
 
 const DOCS: &str = "Docs: https://github.com/java-loader/jlo";
 
+/// `jlo exec`'s usage line, shared by `-h` and the argument error's hint.
+pub(crate) const EXEC_USAGE: &str = "jlo exec [VERSION] -- <COMMAND> [ARGS]...";
+
 /// Command, what it does, and whether the short help shows it too.
 const EXAMPLES: &[(&str, &str, bool)] = &[
     ("jlo env 25", "Use Java 25 in this shell", true),
@@ -277,10 +280,8 @@ The literal -- separates the optional version from the command:
 JAVA_HOME is set and the JDK's bin directory is prepended to PATH for
 the child only; the current shell is untouched.",
         // The default rendering (`Usage: jlo exec [ARGS]...`) reads as
-        // free-form optional args and hides the mandatory `--`. Match the
-        // usage line `cmd_exec`'s own error path prints on a parse
-        // failure (main.rs), so `-h` and the error agree.
-        override_usage = "jlo exec [VERSION] -- <COMMAND> [ARGS]..."
+        // free-form optional args and hides the mandatory `--`.
+        override_usage = EXEC_USAGE
     )]
     Exec {
         /// [VERSION] -- <COMMAND>...

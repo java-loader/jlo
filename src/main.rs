@@ -246,12 +246,8 @@ fn cmd_exec(client: &AdoptiumClient, args: &[String]) -> Result<(), CommandError
         return Ok(());
     }
 
-    let (version, command) = parse_exec_args(&args).map_err(|e| {
-        CommandError::with_hint(
-            anyhow!("{e}"),
-            "Usage: jlo exec [VERSION] -- <COMMAND> [ARGS]...",
-        )
-    })?;
+    let (version, command) = parse_exec_args(&args)
+        .map_err(|e| CommandError::with_hint(e, format!("Usage: {}", cli::EXEC_USAGE)))?;
 
     // No --offline flag on `exec`: the command's whole job is to run
     // something on that JDK, so declining to fetch it would only move the
@@ -551,21 +547,21 @@ fn install_names(
 fn export_lines(store: &JdkStore, java_home: &Path) -> anyhow::Result<Vec<String>> {
     let mut exports = Vec::new();
 
-    let current_java_home = env::var("JAVA_HOME").unwrap_or_default();
-    // `to_string_lossy` is the wrong shape on this path for the same reason
-    // `unwrap_or_default` was wrong for `PATH`: it substitutes U+FFFD for
+    // `to_string_lossy` is the wrong shape here: it substitutes U+FFFD for
     // bytes it cannot decode and hands back a path that does not exist, and
     // the caller then exports it as `JAVA_HOME`. An undecodable install
     // directory is unusable, so say so rather than exporting a near miss.
     let java_home_str = path_str(java_home)?;
-    if current_java_home != java_home_str {
+    // Compared as strings, not as `Path`s: `Path` equality ignores a trailing
+    // slash, and a `JAVA_HOME` spelled differently is re-exported.
+    if active_java_home().is_none_or(|current| current.as_os_str() != java_home_str) {
         exports.push(format!("export JAVA_HOME={}", shell_quote(java_home_str)));
     }
 
     let java_bin = java_home.join("bin");
-    let java_bin_path = path_str(&java_bin)?.to_string();
+    let java_bin_path = path_str(&java_bin)?;
     let current_path = shellenv::current_path()?;
-    if let Some(updated_path) = update_path(&java_bin_path, &current_path, store.base())? {
+    if let Some(updated_path) = update_path(java_bin_path, &current_path, store.base())? {
         exports.push(format!("export PATH={}", shell_quote(&updated_path)));
     }
 

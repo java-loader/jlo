@@ -7,7 +7,7 @@
 //! which subcommand asked.
 
 use crate::ui;
-use anyhow::{Context, anyhow};
+use anyhow::{Context, anyhow, bail};
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process::exit;
@@ -155,21 +155,21 @@ fn child_path(java_home: &Path) -> anyhow::Result<String> {
 /// Split the arguments following `exec` into an optional version and the command
 /// to run. The literal `--` separates them; everything before it is the version
 /// (zero or one token), everything after is the command.
-pub(crate) fn parse_exec_args(args: &[String]) -> Result<(Option<String>, Vec<String>), String> {
+pub(crate) fn parse_exec_args(args: &[String]) -> anyhow::Result<(Option<String>, Vec<String>)> {
     let sep = args
         .iter()
         .position(|a| a == "--")
-        .ok_or("expected '--' before the command, e.g. jlo exec 21 -- java -version")?;
+        .context("expected '--' before the command, e.g. jlo exec 21 -- java -version")?;
 
     let version = match &args[..sep] {
         [] => None,
         [v] => Some(v.clone()),
-        _ => return Err("only one version may be given before '--'".to_string()),
+        _ => bail!("only one version may be given before '--'"),
     };
 
     let command = args[sep + 1..].to_vec();
     if command.is_empty() {
-        return Err("no command given after '--'".to_string());
+        bail!("no command given after '--'");
     }
 
     Ok((version, command))
