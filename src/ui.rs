@@ -165,17 +165,12 @@ pub(crate) fn up_to_date(name: &str, version: &str, older_offer: Option<&str>) {
         "{} JDK {} is up to date {}",
         style("✓").green().for_stderr(),
         name,
-        style(format!("({version})")).dim().for_stderr()
+        dim(format!("({version})"))
     );
     if let Some(offered) = older_offer {
-        eprintln!(
-            "{}",
-            style(format!(
-                "  Adoptium currently offers an older build ({offered})"
-            ))
-            .dim()
-            .for_stderr()
-        );
+        note(format!(
+            "  Adoptium currently offers an older build ({offered})"
+        ));
     }
 }
 
@@ -213,14 +208,9 @@ pub(crate) const NOT_OFFERED_HINT: &str = "Run 'jlo list' to see what is availab
 /// preview being swapped for the next would pass for a patch release.
 pub(crate) fn replaced(request: crate::request::Request, removed: &[String], failures: &[String]) {
     if !removed.is_empty() {
-        eprintln!(
-            "{}",
-            style(replaced_line(request, removed)).dim().for_stderr()
-        );
+        note(replaced_line(request, removed));
     }
-    for failure in failures {
-        eprintln!("{} {}", style("!").red().for_stderr(), failure);
-    }
+    print_failures(failures);
 }
 
 fn replaced_line(request: crate::request::Request, removed: &[String]) -> String {
@@ -236,20 +226,10 @@ fn replaced_line(request: crate::request::Request, removed: &[String]) -> String
 pub(crate) fn update_report(run: &crate::store::InstallRun) {
     let count = run.removed_count();
     if count > 0 {
-        eprintln!(
-            "{} Removed {} superseded JDK{}",
-            style("✓").green().for_stderr(),
-            count,
-            if count == 1 { "" } else { "s" }
-        );
+        print_removed(count, "superseded JDK");
     }
     if let Some(java_home) = &run.repointed {
-        eprintln!(
-            "{}",
-            style(format!("  JAVA_HOME now points at {}", tilde(java_home)))
-                .dim()
-                .for_stderr()
-        );
+        note(format!("  JAVA_HOME now points at {}", tilde(java_home)));
     }
     if let Some(version) = &run.kept_active {
         hint!("{}", kept_active_hint(version));
@@ -303,7 +283,35 @@ pub(crate) fn print_warning(args: std::fmt::Arguments) {
 /// Advice printed *alongside* an error (a usage line, a suggested flag), so it
 /// is dimmed rather than labelled - it must not read as a second failure.
 pub(crate) fn print_hint(args: std::fmt::Arguments) {
-    eprintln!("{}", style(args.to_string()).dim().for_stderr());
+    note(args);
+}
+
+/// A secondary line - a note under a result, or advice: dim, so it never
+/// competes with the line it follows.
+fn note(text: impl std::fmt::Display) {
+    eprintln!("{}", dim(text));
+}
+
+/// Dim, for stderr: the one weight every secondary piece of output shares.
+fn dim(text: impl std::fmt::Display) -> String {
+    style(text).dim().for_stderr().to_string()
+}
+
+/// `s` unless there is exactly one.
+pub(crate) fn plural(n: usize) -> &'static str {
+    if n == 1 { "" } else { "s" }
+}
+
+/// The green tick that closes a run which deleted `count` builds.
+fn print_removed(count: usize, noun: &str) {
+    print_created(format_args!("Removed {count} {noun}{}", plural(count)));
+}
+
+/// One `!` line per deletion that failed.
+fn print_failures(failures: &[String]) {
+    for failure in failures {
+        eprintln!("{} {}", style("!").red().for_stderr(), failure);
+    }
 }
 
 /// The one thing a pre-bundle macOS install is missing, and how to fix it.
@@ -335,7 +343,7 @@ pub(crate) fn print_created(args: std::fmt::Arguments) {
 /// scaffolding for the lines below it - dimming it is what lets the commands
 /// carry less colour and still win the eye.
 pub(crate) fn heading(text: &str) -> String {
-    style(text).dim().for_stderr().to_string()
+    dim(text)
 }
 
 /// A command offered for copying.
@@ -383,7 +391,7 @@ pub(crate) fn jlo_mark_bare(version: &str) -> String {
 /// off: the marker is a line's first character, this one always sits between
 /// two operands.
 pub(crate) fn punctuation_arrow() -> String {
-    style("→").dim().for_stderr().to_string()
+    dim("→")
 }
 
 /// `<label> <version>` as the install lines say it: the magenta mark when the
@@ -457,7 +465,7 @@ pub(crate) fn help_footnote(text: &str) -> String {
 /// A closing note under a block of commands: dim, because it is secondary to
 /// the commands it follows.
 pub(crate) fn footnote(text: &str) -> String {
-    style(text).dim().for_stderr().to_string()
+    dim(text)
 }
 
 macro_rules! error {
@@ -484,8 +492,8 @@ pub(crate) use {created, error, hint, warning};
 fn partial_line(removed: usize, failures: usize) -> String {
     format!(
         "  removed {removed} JDK{} before the failure{}",
-        if removed == 1 { "" } else { "s" },
-        if failures == 1 { "" } else { "s" }
+        plural(removed),
+        plural(failures)
     )
 }
 
@@ -508,17 +516,13 @@ pub(crate) fn prune_report(report: &crate::store::PruneReport) {
     for (request, versions) in &report.removed {
         eprintln!(
             "{}  {} {}",
-            style(format!("{:<width$}", request.to_string()))
-                .dim()
-                .for_stderr(),
-            style("removed").dim().for_stderr(),
+            dim(format!("{:<width$}", request.to_string())),
+            dim("removed"),
             versions.join(", ")
         );
     }
 
-    for failure in &report.failures {
-        eprintln!("{} {}", style("!").red().for_stderr(), failure);
-    }
+    print_failures(&report.failures);
 
     // The green tick is reserved for a run that did what it was asked, so a
     // run whose deletions all failed gets neither it nor "Nothing to remove" -
@@ -527,12 +531,7 @@ pub(crate) fn prune_report(report: &crate::store::PruneReport) {
     let count = report.removed_count();
     if !report.failures.is_empty() {
         if count > 0 {
-            eprintln!(
-                "{}",
-                style(partial_line(count, report.failures.len()))
-                    .dim()
-                    .for_stderr()
-            );
+            note(partial_line(count, report.failures.len()));
         }
     } else if count == 0 {
         // The parenthetical is the *reason* nothing went, so it cannot be
@@ -547,19 +546,12 @@ pub(crate) fn prune_report(report: &crate::store::PruneReport) {
             } else {
                 format!(
                     " {}",
-                    style("(only the newest build of each name is installed)")
-                        .dim()
-                        .for_stderr()
+                    dim("(only the newest build of each name is installed)")
                 )
             }
         );
     } else {
-        eprintln!(
-            "{} Removed {} JDK{}",
-            style("✓").green().for_stderr(),
-            count,
-            if count == 1 { "" } else { "s" }
-        );
+        print_removed(count, "JDK");
     }
 
     // Warned rather than noted, unlike `skipped_unmanaged`: this is the one
@@ -571,20 +563,11 @@ pub(crate) fn prune_report(report: &crate::store::PruneReport) {
     }
 
     if report.skipped_unmanaged > 0 {
-        eprintln!(
-            "{}",
-            style(format!(
-                "  left {} install{} alone (not managed by jlo)",
-                report.skipped_unmanaged,
-                if report.skipped_unmanaged == 1 {
-                    ""
-                } else {
-                    "s"
-                }
-            ))
-            .dim()
-            .for_stderr()
-        );
+        note(format!(
+            "  left {} install{} alone (not managed by jlo)",
+            report.skipped_unmanaged,
+            plural(report.skipped_unmanaged)
+        ));
     }
 }
 
@@ -597,57 +580,35 @@ pub(crate) fn prune_report(report: &crate::store::PruneReport) {
 /// the targets that did not contribute one.
 pub(crate) fn remove_report(report: &crate::store::RemoveReport) {
     for version in &report.removed {
-        eprintln!("{}  {}", style("removed").dim().for_stderr(), version);
+        eprintln!("{}  {}", dim("removed"), version);
     }
 
-    for failure in &report.failures {
-        eprintln!("{} {}", style("!").red().for_stderr(), failure);
-    }
+    print_failures(&report.failures);
 
     // As in `prune_report`: the tick means the run did what it was asked, so
     // a failed deletion does not get one, and the caller exits non-zero on
     // the same condition.
     let count = report.removed.len();
     if report.failures.is_empty() {
-        eprintln!(
-            "{} Removed {} JDK{}",
-            style("✓").green().for_stderr(),
-            count,
-            if count == 1 { "" } else { "s" }
-        );
+        print_removed(count, "JDK");
     } else if count > 0 {
-        eprintln!(
-            "{}",
-            style(partial_line(count, report.failures.len()))
-                .dim()
-                .for_stderr()
-        );
+        note(partial_line(count, report.failures.len()));
     }
 
     // Listed, not counted: the user named these, so anything they expected
     // to go and which did not is worth a line of its own.
     for version in &report.skipped_unmanaged {
-        eprintln!(
-            "{}",
-            style(format!("  left {version} alone (not managed by jlo)"))
-                .dim()
-                .for_stderr()
-        );
+        note(format!("  left {version} alone (not managed by jlo)"));
     }
 
     // Not a failure - the JDK is already absent, which is what was asked for
     // - so this is a dim note under a successful run rather than a warning.
     // It is still said, because it is usually a typo.
     if !report.not_installed.is_empty() {
-        eprintln!(
-            "{}",
-            style(format!(
-                "  nothing installed matched {}",
-                crate::store::quoted_list(&report.not_installed)
-            ))
-            .dim()
-            .for_stderr()
-        );
+        note(format!(
+            "  nothing installed matched {}",
+            crate::store::quoted_list(&report.not_installed)
+        ));
     }
 
     // Last, and a warning rather than a dim note: of the three skips this is
@@ -812,9 +773,9 @@ pub(crate) fn superseded_hint(installed_any: bool, superseded: usize) -> Option<
         return None;
     }
 
-    let plural = if superseded == 1 { "" } else { "s" };
     Some(format!(
-        "{superseded} superseded JDK{plural} still installed - run 'jlo remove --superseded' to remove {}.",
+        "{superseded} superseded JDK{} still installed - run 'jlo remove --superseded' to remove {}.",
+        plural(superseded),
         if superseded == 1 { "it" } else { "them" }
     ))
 }
@@ -1272,12 +1233,7 @@ fn tip_line(rows: &[Row]) -> Option<String> {
     }
 
     // Dim, like every other hint: advice, not a finding.
-    Some(
-        style(format!("run {}", offers.join(" \u{b7} ")))
-            .dim()
-            .for_stderr()
-            .to_string(),
-    )
+    Some(dim(format!("run {}", offers.join(" \u{b7} "))))
 }
 
 /// Whether stderr can carry a bar that redraws over itself.
@@ -1346,9 +1302,7 @@ fn format_summary(label: &str, version: &str, dest: &str, elapsed: Duration) -> 
         install_mark(label, version),
         punctuation_arrow(),
         dest,
-        style(format!("({})", format_elapsed(elapsed)))
-            .dim()
-            .for_stderr()
+        dim(format!("({})", format_elapsed(elapsed)))
     )
 }
 

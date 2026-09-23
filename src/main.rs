@@ -375,14 +375,19 @@ fn cmd_remove(versions: &[String], superseded: bool) -> Result<(), CommandError>
         report.failures.len()
     };
 
-    if failures > 0 {
-        return Err(anyhow!(
-            "{failures} JDK{} could not be removed",
-            if failures == 1 { "" } else { "s" }
-        )
-        .into());
+    removal_failed(failures, "JDK")
+}
+
+/// The error a run ends on when some deletions failed.
+fn removal_failed(failures: usize, noun: &str) -> Result<(), CommandError> {
+    if failures == 0 {
+        return Ok(());
     }
-    Ok(())
+    Err(anyhow!(
+        "{failures} {noun}{} could not be removed",
+        ui::plural(failures)
+    )
+    .into())
 }
 
 /// A path as a `&str`, or an error naming it.
@@ -528,15 +533,7 @@ fn install_names(
     if let Some(e) = run.error {
         return Err(e);
     }
-    let failures = run.failures.len();
-    if failures > 0 {
-        return Err(anyhow!(
-            "{failures} superseded JDK{} could not be removed",
-            if failures == 1 { "" } else { "s" }
-        )
-        .into());
-    }
-    Ok(())
+    removal_failed(run.failures.len(), "superseded JDK")
 }
 
 /// The `export` lines that point this shell at `java_home`: `JAVA_HOME` when
