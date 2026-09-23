@@ -6,7 +6,7 @@ use console::style;
 use indicatif::{ProgressBar, ProgressBarIter, ProgressStyle};
 use std::cmp::Ordering;
 use std::io::{IsTerminal, Read, stderr};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::exit;
 use std::time::{Duration, Instant};
 
@@ -728,39 +728,12 @@ fn print_listing(rows: &[Row]) {
     }
 }
 
-/// What is active in this shell, and why.
-///
-/// Built by `main` and handed here formatted-but-undecided: `ui` never
-/// consults the store, the config or the environment - it turns this into a
-/// line. The shape is deliberately wider than any one caller needs, so the
-/// machine-readable output still to come reports the same four facts under the
-/// same names rather than inventing a second schema.
-#[derive(Debug)]
-pub(crate) struct Active {
-    /// The directory `$JAVA_HOME` points at.
-    pub path: PathBuf,
-    /// The install's version, e.g. `25.0.4+101`. `None` when the JDK is not
-    /// one of jlo's, which is the one case that reports a path instead.
-    pub version: Option<String>,
-    /// The version name of `version` - its major and its stream, so a GA
-    /// build and a pre-release of one major are told apart here too.
-    pub request: Option<crate::request::Request>,
-    /// Where the active JDK came from. `None` when it is one of jlo's but
-    /// nothing accounts for it - either nothing is pinned, or what is pinned
-    /// is a different name, which `pinned_elsewhere` distinguishes.
-    pub source: Option<crate::conf::Source>,
-    /// A config that pins a *different* name than the one active. Set only
-    /// when the two disagree; that disagreement is the whole reason this
-    /// command answers "and why" rather than just "what".
-    pub pinned_elsewhere: Option<crate::conf::Resolved>,
-}
-
 /// The one line that answers "which JDK, and why".
 ///
 /// `jlo current`'s whole stdout line. A formatter rather than a `println!` at
 /// the call site so it can be unit-tested against every state it
 /// distinguishes: pure - no filesystem, no environment.
-pub(crate) fn provenance_line(active: &Active) -> String {
+pub(crate) fn provenance_line(active: &crate::resolve::Active) -> String {
     // A JDK jlo did not install has no version to name, so the path is the
     // answer: it says "not mine" completely, and the version is usually in it
     // anyway.
@@ -1406,6 +1379,8 @@ fn tilde(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resolve::Active;
+    use std::path::PathBuf;
 
     // -- ea_is_now_released --
 

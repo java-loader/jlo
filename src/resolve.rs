@@ -44,6 +44,34 @@ pub(crate) struct Target {
     pub java_home: PathBuf,
 }
 
+/// What is active in this shell, and why.
+///
+/// Built by [`provenance`] and handed to `ui::provenance_line` formatted-but-
+/// undecided: `ui` never consults the store, the config or the environment -
+/// it turns this into a line. The shape is deliberately wider than any one
+/// caller needs, so the machine-readable output still to come reports the
+/// same four facts under the same names rather than inventing a second
+/// schema.
+#[derive(Debug)]
+pub(crate) struct Active {
+    /// The directory `$JAVA_HOME` points at.
+    pub path: PathBuf,
+    /// The install's version, e.g. `25.0.4+101`. `None` when the JDK is not
+    /// one of jlo's, which is the one case that reports a path instead.
+    pub version: Option<String>,
+    /// The version name of `version` - its major and its stream, so a GA
+    /// build and a pre-release of one major are told apart here too.
+    pub request: Option<Request>,
+    /// Where the active JDK came from. `None` when it is one of jlo's but
+    /// nothing accounts for it - either nothing is pinned, or what is pinned
+    /// is a different name, which `pinned_elsewhere` distinguishes.
+    pub source: Option<conf::Source>,
+    /// A config that pins a *different* name than the one active. Set only
+    /// when the two disagree; that disagreement is the whole reason this
+    /// command answers "and why" rather than just "what".
+    pub pinned_elsewhere: Option<conf::Resolved>,
+}
+
 /// The JDK `verb` runs against: the explicit version or the cascade's answer,
 /// then its java home - from the store alone when `offline`, installing on
 /// demand otherwise.
@@ -91,6 +119,18 @@ fn resolve_java_version_from(
     }
 }
 
+/// Stages 1-3 of the cascade: what this machine answers without the network.
+///
+/// Named on its own so the stage order is written once: `cascade` goes on to
+/// stage 4 from here, and `provenance` stops here, the way `jlo current`
+/// must.
+fn on_disk(
+    configured: Option<conf::Resolved>,
+    newest_installed: Option<conf::Resolved>,
+) -> Option<conf::Resolved> {
+    configured.or(newest_installed)
+}
+
 /// The version-resolution cascade, once the explicit argument is out of the
 /// way. Four stages, in order:
 ///
@@ -117,7 +157,7 @@ fn cascade(
     offline: bool,
     latest_release: impl FnOnce() -> anyhow::Result<String>,
 ) -> anyhow::Result<conf::Resolved> {
-    if let Some(resolved) = configured.or(newest_installed) {
+    if let Some(resolved) = on_disk(configured, newest_installed) {
         return Ok(resolved);
     }
 
@@ -267,6 +307,136 @@ fn resolve_java_home(
             .ok_or_else(|| anyhow!("{}", ui::not_offered(&[request])))?;
         store::install_jdk(client, store, &metadata)
     }
+}
+
+/// What is active in this shell, and why: `$JAVA_HOME` read against the
+/// store and, for a JDK the store recognizes, against the cascade stopped
+/// after stage 3 - this never touches the network.
+///
+/// `configured` is stages 1 and 2 (`conf::find`), taken as a closure because
+/// it is consulted only on the branch that needs it: a foreign or vanished
+/// `$JAVA_HOME` is answered without reading any config, so a broken `.jlorc`
+/// cannot fail it.
+pub(crate) fn provenance(
+    store: &JdkStore,
+    java_home: PathBuf,
+    configured: impl FnOnce() -> anyhow::Result<Option<conf::Resolved>>,
+) -> Result<Active, CommandError> {
+    // Asked before the listing, because the listing cannot answer it. A
+    // `$JAVA_HOME` inside the store that is simply *gone* is what `jlo
+    // remove` on the live JDK leaves behind, and reporting that as a JDK set
+    // outside jlo would be wrong - the install was ours.
+    //
+    // Existence is the whole of the test, and it has to be asked of
+    // `$JAVA_HOME` itself rather than inferred from the listing, for two
+    // reasons that pull in opposite directions. A directory the listing
+    // cannot name may be perfectly present: a vendor-named entry
+    // (`temurin-21.0.1`), which is what the IDE's own downloads land as,
+    // shares the store by design and is deliberately unlistable - `jlo list
+    // --offline` calls it foreign, and this has to agree. And a version the
+    // listing *can* name may be gone: on macOS `$JAVA_HOME` is the bundle's
+    // `Contents/Home`, and `owns` matches that spelling without asking the
+    // filesystem anything - deliberately, since it is also the guard that
+    // refuses to delete the live JDK and must not be switchable off by a
+    // directory that cannot be stat'd.
+    if is_inside(store.base(), &java_home) && !java_home.exists() {
+        return Err(CommandError::with_hint(
+            anyhow!(
+                "$JAVA_HOME points at a jlo install that is no longer there ({}).",
+                java_home.display()
+            ),
+            ui::NO_ACTIVE_JDK_HINT,
+        ));
+    }
+
+    let installed = store.list().context("could not list installed JDKs")?;
+
+    let Some(version) = store.active_version(&installed, Some(&java_home)) else {
+        // A JDK jlo does not manage. No config is consulted: whatever is
+        // pinned, jlo is not what put this here, and the path says that
+        // completely.
+        return Ok(Active {
+            path: java_home,
+            version: None,
+            request: None,
+            source: Some(conf::Source::Foreign),
+            pinned_elsewhere: None,
+        });
+    };
+
+    // Whether the active JDK is the *exact* install stage 3 of the cascade
+    // would pick, not merely one of its name. The distinction matters because
+    // the cascade resolves a name and `jlo env` then takes the newest build of
+    // it: a shell on 21.0.5 with 21.0.6 sitting beside it agrees on the name
+    // but is not what a bare `jlo env` would hand back, so calling it "the
+    // newest installed JDK" would claim more than is true. Asked of the
+    // selector rather than re-derived, so this says "from the newest installed
+    // JDK" exactly when a bare `jlo env` would hand back this build - which
+    // puts both of the selector's rules here too: a shell on a pre-release
+    // with a released build installed is not the cascade's answer, and a shell
+    // below the version floor never was.
+    let newest = store::newest_ga(&installed);
+    let stage_3 = newest.map(|jdk| conf::Resolved {
+        request: jdk.request(),
+        source: conf::Source::NewestInstalled,
+    });
+
+    let mut active = Active {
+        request: installed
+            .iter()
+            .find(|jdk| jdk.version == version)
+            .map(store::InstalledJdk::request),
+        path: java_home,
+        version: Some(version),
+        source: None,
+        pinned_elsewhere: None,
+    };
+
+    // The same cascade `jlo env` resolves through, stopped after stage 3:
+    // this command never touches the network, so "download the latest
+    // release" is not an answer it can give - and it would be a strange one
+    // anyway, since something is demonstrably active already.
+    //
+    // A config that fails to load is still a failure: it is a file the user
+    // wrote and meant, and answering around it would hide the mistake.
+    match on_disk(configured()?, stage_3) {
+        // Stage 3, credited only to the exact build a bare `jlo env` would
+        // hand back - not merely to the name, which `newest` alone would give
+        // it. No mismatch counterpart: nobody asked for the newest installed
+        // JDK, so a shell that is on something else is not wrong about
+        // anything and gets no warning - it reads as "nothing pinned".
+        // Not collapsible into the guard: a name match on a build that is not
+        // the exact newest one must fall through to nothing, not to the next
+        // arm's by-name comparison, which would credit it anyway.
+        #[allow(clippy::collapsible_match)]
+        Some(answer) if answer.source == conf::Source::NewestInstalled => {
+            if newest.is_some_and(|jdk| active.version.as_ref() == Some(&jdk.version)) {
+                active.source = Some(answer.source);
+            }
+        }
+        // The whole name, so a `.jlorc` pinning `28-ea` is a mismatch on a
+        // shell holding the GA build of 28.
+        Some(answer) if Some(answer.request) == active.request => {
+            active.source = Some(answer.source);
+        }
+        Some(answer) => active.pinned_elsewhere = Some(answer),
+        None => {}
+    }
+
+    Ok(active)
+}
+
+/// Whether `path` lies under `base`.
+///
+/// `$JAVA_HOME` is normally spelled exactly as the store spelled it, because
+/// `jlo env` is what set it; the canonicalized retry covers a `$HOME` that
+/// reaches the store through a symlink. `path` itself is deliberately not
+/// canonicalized - the case this decides is the one where it no longer exists.
+fn is_inside(base: &Path, path: &Path) -> bool {
+    path.starts_with(base)
+        || base
+            .canonicalize()
+            .is_ok_and(|canonical| path.starts_with(canonical))
 }
 
 #[cfg(test)]
@@ -585,5 +755,160 @@ mod tests {
         std::fs::write(dir.join("bin").join("java"), "").unwrap();
         std::fs::File::create(dir.join(".jlo-managed")).unwrap();
         JdkStore::at(base)
+    }
+
+    // -- provenance --
+
+    fn store_holding(base: &Path, versions: &[&str]) -> JdkStore {
+        for version in versions {
+            store_with(base, version);
+        }
+        JdkStore::at(base)
+    }
+
+    // `Result` is `provenance`'s closure signature, not a choice this helper
+    // makes for itself.
+    #[allow(clippy::unnecessary_wraps)]
+    fn nothing_configured() -> anyhow::Result<Option<conf::Resolved>> {
+        Ok(None)
+    }
+
+    fn project_pins(version: &str) -> impl FnOnce() -> anyhow::Result<Option<conf::Resolved>> {
+        let resolved = conf::Resolved {
+            request: request(version),
+            source: conf::Source::ProjectConfig(PathBuf::from("./.jlorc")),
+        };
+        move || Ok(Some(resolved))
+    }
+
+    /// Config is read only for a JDK the store recognizes; these branches
+    /// must answer without it, so a broken `.jlorc` cannot fail them.
+    fn config_must_not_be_read() -> anyhow::Result<Option<conf::Resolved>> {
+        panic!("config was consulted")
+    }
+
+    #[test]
+    fn provenance_names_the_config_when_it_agrees() {
+        let dir = tempdir().unwrap();
+        let store = store_holding(dir.path(), &["25.0.4+101"]);
+        let active = provenance(&store, dir.path().join("25.0.4+101"), project_pins("25")).unwrap();
+        assert_eq!(active.version.as_deref(), Some("25.0.4+101"));
+        assert!(matches!(
+            active.source,
+            Some(conf::Source::ProjectConfig(_))
+        ));
+        assert!(active.pinned_elsewhere.is_none());
+    }
+
+    #[test]
+    fn provenance_reports_a_config_that_pins_another_name() {
+        let dir = tempdir().unwrap();
+        let store = store_holding(dir.path(), &["25.0.4+101"]);
+        let active = provenance(&store, dir.path().join("25.0.4+101"), project_pins("21")).unwrap();
+        assert_eq!(active.source, None);
+        assert_eq!(
+            active.pinned_elsewhere.map(|p| p.request),
+            Some(request("21"))
+        );
+    }
+
+    #[test]
+    fn provenance_credits_stage_3_only_for_the_exact_newest_build() {
+        let dir = tempdir().unwrap();
+        let store = store_holding(dir.path(), &["21.0.5+11", "21.0.6+7"]);
+
+        let newest = provenance(&store, dir.path().join("21.0.6+7"), nothing_configured).unwrap();
+        assert_eq!(newest.source, Some(conf::Source::NewestInstalled));
+
+        // Same name, older build: a bare `jlo env` would hand back 21.0.6+7.
+        let older = provenance(&store, dir.path().join("21.0.5+11"), nothing_configured).unwrap();
+        assert_eq!(older.source, None);
+        assert!(older.pinned_elsewhere.is_none());
+    }
+
+    #[test]
+    fn provenance_says_nothing_pinned_when_stage_3_picks_another_major() {
+        let dir = tempdir().unwrap();
+        let store = store_holding(dir.path(), &["17.0.11+9", "25.0.4+101"]);
+        let active = provenance(&store, dir.path().join("17.0.11+9"), nothing_configured).unwrap();
+        assert_eq!(active.source, None);
+        assert!(active.pinned_elsewhere.is_none());
+    }
+
+    #[test]
+    fn provenance_never_calls_a_pre_release_the_newest_install() {
+        let dir = tempdir().unwrap();
+        let store = store_holding(dir.path(), &["21.0.5+11", "28.0.0-beta+16.0.ea"]);
+        let active = provenance(
+            &store,
+            dir.path().join("28.0.0-beta+16.0.ea"),
+            nothing_configured,
+        )
+        .unwrap();
+        assert_eq!(active.source, None);
+        assert_eq!(active.request.map(|r| r.stream), Some(Stream::Ea));
+    }
+
+    /// Below the version floor stage 3 has no answer at all, so nothing is
+    /// credited and nothing is a pin.
+    #[test]
+    fn provenance_credits_nothing_for_a_store_below_the_version_floor() {
+        let dir = tempdir().unwrap();
+        let store = store_holding(dir.path(), &["7.0.4+101"]);
+        let active = provenance(&store, dir.path().join("7.0.4+101"), nothing_configured).unwrap();
+        assert_eq!(active.version.as_deref(), Some("7.0.4+101"));
+        assert_eq!(active.source, None);
+        assert!(active.pinned_elsewhere.is_none());
+    }
+
+    #[test]
+    fn provenance_reports_a_foreign_java_home_by_path_without_reading_config() {
+        let dir = tempdir().unwrap();
+        let store = store_holding(dir.path(), &["25.0.4+101"]);
+        let active = provenance(
+            &store,
+            PathBuf::from("/opt/jdk-21"),
+            config_must_not_be_read,
+        )
+        .unwrap();
+        assert_eq!(active.version, None);
+        assert_eq!(active.source, Some(conf::Source::Foreign));
+    }
+
+    /// A vendor-named directory is inside the store and present, but
+    /// unlistable: foreign, not gone.
+    #[test]
+    fn provenance_calls_a_vendor_named_jdk_in_the_store_foreign() {
+        let dir = tempdir().unwrap();
+        let store = store_holding(dir.path(), &["25.0.4+101"]);
+        let vendor = dir.path().join("temurin-17.0.9");
+        std::fs::create_dir_all(vendor.join("bin")).unwrap();
+        let active = provenance(&store, vendor, config_must_not_be_read).unwrap();
+        assert_eq!(active.source, Some(conf::Source::Foreign));
+    }
+
+    #[test]
+    fn provenance_refuses_a_removed_install_without_reading_config() {
+        let dir = tempdir().unwrap();
+        let store = store_holding(dir.path(), &["25.0.4+101"]);
+        let gone = dir.path().join("25.0.4+101");
+        std::fs::remove_dir_all(&gone).unwrap();
+        let err =
+            provenance(&store, gone, config_must_not_be_read).expect_err("the install is gone");
+        assert!(format!("{:#}", err.error).contains("no longer there"));
+        assert_eq!(err.hint.as_deref(), Some(ui::NO_ACTIVE_JDK_HINT));
+    }
+
+    /// A config the user wrote and meant fails the command rather than being
+    /// answered around.
+    #[test]
+    fn provenance_fails_when_the_config_cannot_be_read() {
+        let dir = tempdir().unwrap();
+        let store = store_holding(dir.path(), &["25.0.4+101"]);
+        let err = provenance(&store, dir.path().join("25.0.4+101"), || {
+            Err(anyhow!("bad .jlorc"))
+        })
+        .expect_err("config failure propagates");
+        assert!(format!("{:#}", err.error).contains("bad .jlorc"));
     }
 }

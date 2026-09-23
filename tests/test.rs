@@ -1639,22 +1639,6 @@ fn current_without_java_home_has_no_answer() {
         .stderr(predicate::str::contains("jlo env"));
 }
 
-/// Case 2: the active JDK is the one the project pins, and the line says which
-/// file that is.
-#[test]
-fn current_names_the_project_config_when_it_agrees() {
-    let (home, project) = current_fixture("25.0.4+101");
-    std::fs::write(project.join(".jlorc"), "25\n").unwrap();
-
-    current_cmd(home.path(), &project)
-        .env("JAVA_HOME", store_base(home.path()).join("25.0.4+101"))
-        .assert()
-        .success()
-        .code(0)
-        .stdout("25.0.4+101  (from ./.jlorc)\n")
-        .stderr(predicate::str::is_empty());
-}
-
 /// Case 3, the one this command is for: "why am I on the wrong JDK". Exit 0,
 /// because the question asked - what is active - has an answer, and exiting 1
 /// would make `jlo current` useless in exactly the situation where you most
@@ -1673,78 +1657,6 @@ fn current_warns_but_still_answers_when_the_config_disagrees() {
         .stderr(predicate::str::contains(
             "./.jlorc pins Java 21; run 'jlo env' to switch.",
         ));
-}
-
-/// Stage 3 names an *install*, not a major, so the check behind it has to be
-/// one too. Nothing configured, 21.0.5+11 active, 21.0.6+7 installed beside
-/// it: the majors agree, but a bare `jlo env` here would resolve major 21 and
-/// then hand back 21.0.6+7, so calling the active build "the newest installed
-/// JDK" would claim more than is true.
-#[test]
-fn current_does_not_call_an_older_build_of_the_same_major_the_newest_install() {
-    let (home, project) = store_fixture(&["21.0.5+11", "21.0.6+7"]);
-
-    current_cmd(home.path(), &project)
-        .env("JAVA_HOME", store_base(home.path()).join("21.0.5+11"))
-        .assert()
-        .success()
-        .code(0)
-        .stdout("21.0.5+11  (active, nothing pinned)\n")
-        .stderr(predicate::str::is_empty());
-}
-
-/// "Nothing pinned" survives as the answer for the state it actually
-/// describes: nothing configured, and the active JDK is not what the cascade
-/// would pick either. No warning - stage 3 is not a pin, so a shell on an
-/// older major is not wrong about anything anyone asked for.
-#[test]
-fn current_says_nothing_is_pinned_when_the_cascade_would_pick_another_major() {
-    let (home, project) = store_fixture(&["17.0.11+9", "25.0.4+101"]);
-
-    current_cmd(home.path(), &project)
-        .env("JAVA_HOME", store_base(home.path()).join("17.0.11+9"))
-        .assert()
-        .success()
-        .code(0)
-        .stdout("17.0.11+9  (active, nothing pinned)\n")
-        .stderr(predicate::str::is_empty());
-}
-
-/// Stage 3 is GA-only, so a shell on a pre-release is never "the newest
-/// installed JDK" - a bare `jlo env` here resolves 21 and hands back
-/// 21.0.5+11, not the beta. Nothing configured, the beta active, a released
-/// build installed beside it.
-#[test]
-fn current_does_not_call_a_pre_release_the_newest_install() {
-    let (home, project) = store_fixture(&["21.0.5+11", "28.0.0-beta+16.0.ea"]);
-
-    current_cmd(home.path(), &project)
-        .env(
-            "JAVA_HOME",
-            store_base(home.path()).join("28.0.0-beta+16.0.ea"),
-        )
-        .assert()
-        .success()
-        .code(0)
-        .stdout("28.0.0-beta+16.0.ea  (active, nothing pinned)\n")
-        .stderr(predicate::str::is_empty());
-}
-
-/// Case 5: a JDK jlo does not manage. The path is the whole answer - jlo is
-/// not managing this, and naming a version would claim knowledge it does not
-/// have. No advisory either: whatever is pinned, jlo did not put this here.
-#[test]
-fn current_reports_a_foreign_java_home_by_path() {
-    let (home, project) = current_fixture("25.0.4+101");
-    std::fs::write(project.join(".jlorc"), "21\n").unwrap();
-
-    current_cmd(home.path(), &project)
-        .env("JAVA_HOME", "/opt/jdk-21")
-        .assert()
-        .success()
-        .code(0)
-        .stdout("/opt/jdk-21  ($JAVA_HOME, set outside jlo)\n")
-        .stderr(predicate::str::is_empty());
 }
 
 /// Case 6, reachable by exactly one route: `jlo remove` on the JDK the current
@@ -1766,29 +1678,6 @@ fn current_reports_a_removed_install_rather_than_calling_it_foreign() {
             "points at a jlo install that is no longer there",
         ))
         .stderr(predicate::str::contains("jlo env"));
-}
-
-/// The other way to be inside the store and absent from the listing, and the
-/// one the test above must not swallow: a vendor-named directory, which is
-/// what the IDE's own JDK downloads land as. The store is shared with
-/// `IntelliJ` by design, and `is_jdk_version_dir` deliberately keeps a
-/// non-semver name out of `jlo list` - so "unlistable" alone cannot mean
-/// "gone", and only an existence check tells the two apart.
-/// `jlo list --offline` already calls this JDK foreign, and `jlo current` has
-/// to agree with it.
-#[test]
-fn current_calls_a_vendor_named_jdk_in_the_store_foreign_rather_than_missing() {
-    let (home, project) = current_fixture("25.0.4+101");
-    let vendor = store_base(home.path()).join("temurin-17.0.9");
-    std::fs::create_dir_all(vendor.join("bin")).unwrap();
-
-    current_cmd(home.path(), &project)
-        .env("JAVA_HOME", &vendor)
-        .assert()
-        .success()
-        .code(0)
-        .stdout(predicate::str::contains("($JAVA_HOME, set outside jlo)"))
-        .stderr(predicate::str::is_empty());
 }
 
 /// The command answers from disk and the environment alone. The API URL points

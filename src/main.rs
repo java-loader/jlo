@@ -335,97 +335,7 @@ fn cmd_current() -> Result<(), CommandError> {
     };
 
     let store = JdkStore::discover()?;
-
-    // Asked before the listing, because the listing cannot answer it. A
-    // `$JAVA_HOME` inside the store that is simply *gone* is what `jlo
-    // remove` on the live JDK leaves behind, and reporting that as a JDK set
-    // outside jlo would be wrong - the install was ours.
-    //
-    // Existence is the whole of the test, and it has to be asked of
-    // `$JAVA_HOME` itself rather than inferred from the listing, for two
-    // reasons that pull in opposite directions. A directory the listing
-    // cannot name may be perfectly present: a vendor-named entry
-    // (`temurin-21.0.1`), which is what the IDE's own downloads land as,
-    // shares the store by design and is deliberately unlistable - `jlo list
-    // --offline` calls it foreign, and this has to agree. And a version the
-    // listing *can* name may be gone: on macOS `$JAVA_HOME` is the bundle's
-    // `Contents/Home`, and `owns` matches that spelling without asking the
-    // filesystem anything - deliberately, since it is also the guard that
-    // refuses to delete the live JDK and must not be switchable off by a
-    // directory that cannot be stat'd.
-    if is_inside(store.base(), &java_home) && !java_home.exists() {
-        return Err(CommandError::with_hint(
-            anyhow!(
-                "$JAVA_HOME points at a jlo install that is no longer there ({}).",
-                java_home.display()
-            ),
-            ui::NO_ACTIVE_JDK_HINT,
-        ));
-    }
-
-    let installed = store.list().context("could not list installed JDKs")?;
-
-    let Some(version) = store.active_version(&installed, Some(&java_home)) else {
-        // A JDK jlo does not manage. No config is consulted: whatever is
-        // pinned, jlo is not what put this here, and the path says that
-        // completely.
-        ui::print_lines([ui::provenance_line(&ui::Active {
-            path: java_home,
-            version: None,
-            request: None,
-            source: Some(conf::Source::Foreign),
-            pinned_elsewhere: None,
-        })]);
-        return Ok(());
-    };
-
-    // Whether the active JDK is the *exact* install stage 3 of the cascade
-    // would pick, not merely one of its name. The distinction matters because
-    // the cascade resolves a name and `jlo env` then takes the newest build of
-    // it: a shell on 21.0.5 with 21.0.6 sitting beside it agrees on the name
-    // but is not what a bare `jlo env` would hand back, so calling it "the
-    // newest installed JDK" would claim more than is true. Asked of the
-    // selector rather than re-derived, so this says "from the newest installed
-    // JDK" exactly when a bare `jlo env` would hand back this build - which
-    // puts both of the selector's rules here too: a shell on a pre-release
-    // with a released build installed is not the cascade's answer, and a shell
-    // below the version floor never was.
-    let is_newest_install =
-        store::newest_ga(&installed).is_some_and(|newest| newest.version == version);
-
-    let mut active = ui::Active {
-        request: installed
-            .iter()
-            .find(|jdk| jdk.version == version)
-            .map(InstalledJdk::request),
-        path: java_home,
-        version: Some(version),
-        source: None,
-        pinned_elsewhere: None,
-    };
-
-    // The same cascade `jlo env` resolves through, stopped after stage 3:
-    // this command never touches the network, so "download the latest
-    // release" is not an answer it can give - and it would be a strange one
-    // anyway, since something is demonstrably active already.
-    //
-    // A config that fails to load is still a failure: it is a file the user
-    // wrote and meant, and answering around it would hide the mistake.
-    if let Some(configured) = conf::find()? {
-        // The whole name, so a `.jlorc` pinning `28-ea` is a mismatch on a
-        // shell holding the GA build of 28.
-        if Some(configured.request) == active.request {
-            active.source = Some(configured.source);
-        } else {
-            active.pinned_elsewhere = Some(configured);
-        }
-    } else if is_newest_install {
-        // Stage 3. No mismatch counterpart: nobody asked for the newest
-        // installed JDK, so a shell that is on something else is not wrong
-        // about anything and gets no warning - it reads as "nothing pinned".
-        active.source = Some(conf::Source::NewestInstalled);
-    }
-
+    let active = resolve::provenance(&store, java_home, conf::find)?;
     ui::print_lines([ui::provenance_line(&active)]);
 
     // After the answer, so it reads as a footnote to it rather than in place
@@ -438,19 +348,6 @@ fn cmd_current() -> Result<(), CommandError> {
     }
 
     Ok(())
-}
-
-/// Whether `path` lies under `base`.
-///
-/// `$JAVA_HOME` is normally spelled exactly as the store spelled it, because
-/// `jlo env` is what set it; the canonicalized retry covers a `$HOME` that
-/// reaches the store through a symlink. `path` itself is deliberately not
-/// canonicalized - the case this decides is the one where it no longer exists.
-fn is_inside(base: &Path, path: &Path) -> bool {
-    path.starts_with(base)
-        || base
-            .canonicalize()
-            .is_ok_and(|canonical| path.starts_with(canonical))
 }
 
 /// Delete installed JDKs, selected either by name or by the superseded rule.
