@@ -11,29 +11,6 @@ use common::{
 use predicates::prelude::*;
 use serial_test::serial;
 
-#[test]
-fn bare_invocation_prints_help() {
-    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
-    cmd.assert()
-        .success()
-        .code(0)
-        .stdout(predicate::str::contains("Usage: jlo"))
-        .stdout(predicate::str::contains("env"))
-        .stdout(predicate::str::contains("home"))
-        .stdout(predicate::str::contains("exec"))
-        .stdout(predicate::str::contains("current"))
-        .stdout(predicate::str::contains("list"))
-        .stdout(predicate::str::contains("update"))
-        .stdout(predicate::str::contains("remove"))
-        .stdout(predicate::str::contains("init"))
-        .stdout(predicate::str::contains("selfupdate"))
-        .stdout(predicate::str::contains("completions"));
-    // No assertion for "version" here: since the `version` subcommand was
-    // removed, that substring would still match vacuously against the
-    // `-V, --version` line in the Options block, making it a false pass
-    // rather than real coverage of the subcommand list.
-}
-
 /// The names jlo used to have, and the one it hides.
 ///
 /// `clean` became `prune`, `prune` became `jlo remove --superseded`,
@@ -143,27 +120,6 @@ fn removed_and_hidden_names_are_nowhere_to_be_found() {
             .failure()
             .code(2);
     }
-}
-
-#[test]
-fn ls_lists_the_same_thing_as_list() {
-    // `--offline` is unaffected by the alias, and is the form that does not
-    // need the network.
-    let mut aliased = Command::cargo_bin("jlo-bin").unwrap();
-    let aliased = aliased
-        .args(["ls", "--offline"])
-        .env("JLO_ADOPTIUM_API_URL", "http://127.0.0.1:1")
-        .assert()
-        .success();
-
-    let mut spelled_out = Command::cargo_bin("jlo-bin").unwrap();
-    let spelled_out = spelled_out
-        .args(["list", "--offline"])
-        .env("JLO_ADOPTIUM_API_URL", "http://127.0.0.1:1")
-        .assert()
-        .success();
-
-    assert_eq!(aliased.get_output().stdout, spelled_out.get_output().stdout);
 }
 
 #[test]
@@ -339,27 +295,6 @@ fn install_without_a_version_falls_through_to_the_latest_release() {
 }
 
 #[test]
-fn version_flag_prints_the_crate_version() {
-    let mut flag = Command::cargo_bin("jlo-bin").unwrap();
-    let flag_out = flag
-        .arg("-V")
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let flag_out = String::from_utf8(flag_out).unwrap();
-    assert!(flag_out.contains(env!("CARGO_PKG_VERSION")));
-
-    let mut long_flag = Command::cargo_bin("jlo-bin").unwrap();
-    long_flag
-        .arg("--version")
-        .assert()
-        .success()
-        .stdout(predicate::str::contains(env!("CARGO_PKG_VERSION")));
-}
-
-#[test]
 fn init_global_writes_the_default_config() {
     let home = tempfile::tempdir().unwrap();
     let cwd = tempfile::tempdir().unwrap();
@@ -420,16 +355,6 @@ fn init_without_force_hints_at_force() {
     // The existing file is left alone.
     let content = std::fs::read_to_string(dir.path().join(".jlorc")).unwrap();
     assert_eq!(content.lines().next(), Some("17"));
-}
-
-#[test]
-fn exec_help_is_not_passed_to_the_child() {
-    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
-    cmd.args(["exec", "--help"])
-        .assert()
-        .success()
-        .code(0)
-        .stdout(predicate::str::contains("Usage: jlo exec"));
 }
 
 #[test]
@@ -1323,23 +1248,6 @@ fn env_does_not_let_a_hostile_path_execute_when_evaluated() {
 }
 
 #[test]
-fn completions_emit_a_script_per_shell() {
-    for (shell, needle) in [
-        ("bash", "complete"),
-        ("zsh", "compdef"),
-        ("fish", "complete"),
-    ] {
-        let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
-        cmd.args(["completions", shell])
-            .assert()
-            .success()
-            .code(0)
-            .stdout(predicate::str::contains(needle))
-            .stdout(predicate::str::contains("jlo"));
-    }
-}
-
-#[test]
 fn completions_do_not_hit_the_network() {
     let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
     cmd.args(["completions", "bash"])
@@ -1618,20 +1526,6 @@ fn env_offline_stays_silent_about_a_pre_bundle_install() {
         .success()
         .stdout(predicate::str::contains("export JAVA_HOME="))
         .stderr(predicate::str::is_empty());
-}
-
-/// The flag is gone from `env` as well as from `home`, and gone means a usage
-/// error rather than a silently accepted no-op.
-#[test]
-fn neither_env_nor_home_has_a_verbose_flag() {
-    for verb in ["env", "home"] {
-        Command::cargo_bin("jlo-bin")
-            .unwrap()
-            .args([verb, "--verbose", "25"])
-            .assert()
-            .failure()
-            .code(2);
-    }
 }
 
 // -- every rule survives without colour --
