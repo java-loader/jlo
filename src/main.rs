@@ -77,10 +77,9 @@ impl From<RemoveError> for CommandError {
 
 /// The one place a command failure turns into a message and a non-zero exit
 /// status. Every `cmd_*` below hands its error back rather than ending the
-/// process, including `exec`'s resolution: only `shellenv::exec_command`'s own
-/// launch failure - after the process image is already committed to - and
-/// `ui`'s `print_lines`, which fails on the very stream it is writing the
-/// output to, still call `exit` themselves.
+/// process. The remaining exits are `shellenv::exec_command`, which cannot
+/// return and so reports its own PATH/launch failures, and `ui`'s
+/// `print_lines`, which fails on the very stream it is writing the output to.
 fn main() {
     if let Err(e) = run() {
         ui::error!("{:#}", e.error);
@@ -186,6 +185,9 @@ fn cmd_completions(shell: clap_complete::Shell) {
 /// `offline` is the whole of the "a `cd` must not start a download" rule, and
 /// deciding it in `resolve::java_home` rather than in `jlo-autoload.sh` keeps
 /// it decided once, in Rust, instead of once per shell dialect.
+///
+/// Resolution fails before anything reaches stdout: the hook sources that
+/// stream, and a partial export would be worse than none.
 fn cmd_env(
     client: &AdoptiumClient,
     version: Option<String>,

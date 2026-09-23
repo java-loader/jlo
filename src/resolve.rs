@@ -75,9 +75,6 @@ pub(crate) struct Active {
 /// The JDK `verb` runs against: the explicit version or the cascade's answer,
 /// then its java home - from the store alone when `offline`, installing on
 /// demand otherwise.
-///
-/// When `offline` declines, it declines before the caller has written
-/// anything to stdout, so `env` never emits a partial environment.
 pub(crate) fn java_home(
     client: &AdoptiumClient,
     store: &JdkStore,
@@ -97,9 +94,9 @@ pub(crate) fn java_home(
 /// Determine the requested version name: the explicit CLI argument if
 /// present, otherwise the fallback cascade below.
 ///
-/// Returns where the version came from as well as what it is, because
-/// `jlo current` reports it, and re-deriving it there
-/// would be a second spelling of the same walk.
+/// Returns where the version came from as well as what it is: `cascade`
+/// produces a `Resolved`, and its own tests assert on the stage that
+/// answered.
 fn resolve_java_version_from(
     explicit: Option<String>,
     store: &JdkStore,
@@ -223,9 +220,8 @@ fn offline_java_home(
 
     // `env --offline` is how the autoload hook runs, on every new shell and
     // every `cd`, so it stays silent - a line here would print forever.
-    // `home --offline` and `exec` are a person asking a question and get the
-    // warning. This is the only place that distinction exists, which is why
-    // `java_home` is its only caller.
+    // `home --offline` is a person asking a question and gets the warning.
+    // This is the only place that distinction exists.
     if verb != Verb::Env {
         warn_legacy_layout(store, &java_home);
     }
@@ -408,11 +404,10 @@ pub(crate) fn provenance(
         // Not collapsible into the guard: a name match on a build that is not
         // the exact newest one must fall through to nothing, not to the next
         // arm's by-name comparison, which would credit it anyway.
-        #[allow(clippy::collapsible_match)]
         Some(answer) if answer.source == conf::Source::NewestInstalled => {
-            if newest.is_some_and(|jdk| active.version.as_ref() == Some(&jdk.version)) {
-                active.source = Some(answer.source);
-            }
+            active.source = newest
+                .is_some_and(|jdk| active.version.as_ref() == Some(&jdk.version))
+                .then_some(answer.source);
         }
         // The whole name, so a `.jlorc` pinning `28-ea` is a mismatch on a
         // shell holding the GA build of 28.
@@ -766,13 +761,6 @@ mod tests {
         JdkStore::at(base)
     }
 
-    // `Result` is `provenance`'s closure signature, not a choice this helper
-    // makes for itself.
-    #[allow(clippy::unnecessary_wraps)]
-    fn nothing_configured() -> anyhow::Result<Option<conf::Resolved>> {
-        Ok(None)
-    }
-
     fn project_pins(version: &str) -> impl FnOnce() -> anyhow::Result<Option<conf::Resolved>> {
         let resolved = conf::Resolved {
             request: request(version),
@@ -817,11 +805,11 @@ mod tests {
         let dir = tempdir().unwrap();
         let store = store_holding(dir.path(), &["21.0.5+11", "21.0.6+7"]);
 
-        let newest = provenance(&store, dir.path().join("21.0.6+7"), nothing_configured).unwrap();
+        let newest = provenance(&store, dir.path().join("21.0.6+7"), || Ok(None)).unwrap();
         assert_eq!(newest.source, Some(conf::Source::NewestInstalled));
 
         // Same name, older build: a bare `jlo env` would hand back 21.0.6+7.
-        let older = provenance(&store, dir.path().join("21.0.5+11"), nothing_configured).unwrap();
+        let older = provenance(&store, dir.path().join("21.0.5+11"), || Ok(None)).unwrap();
         assert_eq!(older.source, None);
         assert!(older.pinned_elsewhere.is_none());
     }
@@ -830,7 +818,7 @@ mod tests {
     fn provenance_says_nothing_pinned_when_stage_3_picks_another_major() {
         let dir = tempdir().unwrap();
         let store = store_holding(dir.path(), &["17.0.11+9", "25.0.4+101"]);
-        let active = provenance(&store, dir.path().join("17.0.11+9"), nothing_configured).unwrap();
+        let active = provenance(&store, dir.path().join("17.0.11+9"), || Ok(None)).unwrap();
         assert_eq!(active.source, None);
         assert!(active.pinned_elsewhere.is_none());
     }
@@ -839,13 +827,10 @@ mod tests {
     fn provenance_never_calls_a_pre_release_the_newest_install() {
         let dir = tempdir().unwrap();
         let store = store_holding(dir.path(), &["21.0.5+11", "28.0.0-beta+16.0.ea"]);
-        let active = provenance(
-            &store,
-            dir.path().join("28.0.0-beta+16.0.ea"),
-            nothing_configured,
-        )
-        .unwrap();
+        let active =
+            provenance(&store, dir.path().join("28.0.0-beta+16.0.ea"), || Ok(None)).unwrap();
         assert_eq!(active.source, None);
+        assert!(active.pinned_elsewhere.is_none());
         assert_eq!(active.request.map(|r| r.stream), Some(Stream::Ea));
     }
 
@@ -855,7 +840,7 @@ mod tests {
     fn provenance_credits_nothing_for_a_store_below_the_version_floor() {
         let dir = tempdir().unwrap();
         let store = store_holding(dir.path(), &["7.0.4+101"]);
-        let active = provenance(&store, dir.path().join("7.0.4+101"), nothing_configured).unwrap();
+        let active = provenance(&store, dir.path().join("7.0.4+101"), || Ok(None)).unwrap();
         assert_eq!(active.version.as_deref(), Some("7.0.4+101"));
         assert_eq!(active.source, None);
         assert!(active.pinned_elsewhere.is_none());
