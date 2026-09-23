@@ -68,14 +68,25 @@ fn write_payload(out: &mut impl std::io::Write, statements: &[String]) -> std::i
 }
 
 /// Prepend `java_path` to `current_path`, dropping any entry already under
-/// `jdk_base`. `jdk_base` must be the JDK install directory ([`JdkStore::base`]) —
-/// the only tree whose PATH entries J'Lo owns. Passing a broader directory (the
-/// home directory, say) would strip unrelated user entries.
+/// `jdk_base`, or `None` when that changes nothing. `jdk_base` must be the JDK
+/// install directory ([`JdkStore::base`]) — the only tree whose PATH entries
+/// J'Lo owns. Passing a broader directory (the home directory, say) would strip
+/// unrelated user entries.
 pub(crate) fn update_path(
     java_path: &str,
     current_path: &str,
     jdk_base: &Path,
 ) -> anyhow::Result<Option<String>> {
+    let new_path = prepend(java_path, current_path, |p| !p.starts_with(jdk_base))?;
+    Ok((new_path != current_path).then_some(new_path))
+}
+
+/// `java_path` followed by the entries of `current_path` that `keep` accepts.
+fn prepend(
+    java_path: &str,
+    current_path: &str,
+    keep: impl Fn(&Path) -> bool,
+) -> anyhow::Result<String> {
     // An empty `PATH` is *no* entries, not one empty entry. `split_paths("")`
     // yields the latter, which would leave `<jdk>/bin:` - and an empty `PATH`
     // component means the working directory, so the shell would search
@@ -92,28 +103,14 @@ pub(crate) fn update_path(
         env::split_paths(current_path).collect()
     };
 
-    // Remove JDK bin entries from earlier runs to avoid duplicates
-    let mut path_vector: Vec<_> = inherited
-        .into_iter()
-        .filter(|p| !p.starts_with(jdk_base))
-        .collect();
+    let entries =
+        std::iter::once(PathBuf::from(java_path)).chain(inherited.into_iter().filter(|p| keep(p)));
 
-    // Insert the new path at the beginning
-    path_vector.insert(0, java_path.into());
-
-    // Join paths back into a single string
-    let new_path = env::join_paths(path_vector)
+    Ok(env::join_paths(entries)
         .context("could not join PATH components")?
         .to_str()
         .context("PATH contains non-UTF-8 characters")?
-        .to_string();
-
-    // Only return if the path has changed
-    if new_path == current_path {
-        Ok(None)
-    } else {
-        Ok(Some(new_path))
-    }
+        .to_string())
 }
 
 /// The caller's `PATH`, or an error when it is not valid UTF-8.
@@ -146,20 +143,13 @@ fn classify_path(looked_up: Result<String, env::VarError>) -> anyhow::Result<Str
     }
 }
 
-/// Build the child `PATH` with the JDK's `bin` directory prepended.
-fn child_path(java_bin: &str, current_path: &str) -> anyhow::Result<String> {
-    // Empty means no entries, and the join still runs: see `update_path` for
-    // both halves of why.
-    let mut paths = vec![PathBuf::from(java_bin)];
-    if !current_path.is_empty() {
-        paths.extend(env::split_paths(current_path));
-    }
-
-    Ok(env::join_paths(paths)
-        .context("could not join PATH components")?
+/// The child's `PATH`: the caller's with the JDK's `bin` directory prepended.
+fn child_path(java_home: &Path) -> anyhow::Result<String> {
+    let java_bin = java_home.join("bin");
+    let bin = java_bin
         .to_str()
-        .context("PATH contains non-UTF-8 characters")?
-        .to_string())
+        .with_context(|| format!("path is not valid UTF-8: {}", java_bin.display()))?;
+    prepend(bin, &current_path()?, |_| true)
 }
 
 /// Split the arguments following `exec` into an optional version and the command
@@ -230,16 +220,10 @@ pub(crate) fn exec_command(java_home: &Path, command: &[String]) -> ! {
         .split_first()
         .expect("command is non-empty (checked in parse_exec_args)");
 
-    let java_bin = java_home.join("bin");
-    let new_path = java_bin
-        .to_str()
-        .with_context(|| format!("path is not valid UTF-8: {}", java_bin.display()))
-        .and_then(|bin| current_path().map(|current| (bin, current)))
-        .and_then(|(bin, current)| child_path(bin, &current))
-        .unwrap_or_else(|e| {
-            ui::error!("{e:#}");
-            exit(1);
-        });
+    let new_path = child_path(java_home).unwrap_or_else(|e| {
+        ui::error!("{e:#}");
+        exit(1);
+    });
 
     // `exec` only returns if it failed to launch the program.
     let err = Command::new(program)
@@ -515,19 +499,6 @@ mod tests {
         assert_eq!(command, owned(&["sh", "-c", "--", "x"]));
     }
 
-    #[test]
-    fn child_path_prepends_java_bin() {
-        assert_eq!(
-            child_path("/jdk/21/bin", "/usr/bin:/bin").unwrap(),
-            "/jdk/21/bin:/usr/bin:/bin"
-        );
-    }
-
-    #[test]
-    fn child_path_handles_empty_path() {
-        assert_eq!(child_path("/jdk/21/bin", "").unwrap(), "/jdk/21/bin");
-    }
-
     /// `env::var(..).unwrap_or_default()` used to sit where `current_path`
     /// does, and it maps an undecodable `PATH` to the empty string - which
     /// `update_path` reads as "nothing on PATH". `jlo env` then emitted
@@ -538,7 +509,7 @@ mod tests {
     #[test]
     fn an_empty_path_is_not_the_same_as_an_undecodable_one() {
         // Unset is genuinely empty, and the JDK's bin is the whole answer.
-        assert_eq!(child_path("/jdk/21/bin", "").unwrap(), "/jdk/21/bin");
+        assert_eq!(prepend("/jdk/21/bin", "", |_| true).unwrap(), "/jdk/21/bin");
 
         // Undecodable has to stop instead, because there is no correct
         // rewrite of a PATH jlo cannot read.
@@ -592,22 +563,6 @@ mod tests {
         assert!(
             update_path(hostile, "/usr/bin", jdk_base).is_err(),
             "populated PATH"
-        );
-        assert!(child_path(hostile, "").is_err(), "empty child PATH");
-        assert!(child_path(hostile, "/usr/bin").is_err(), "populated child");
-    }
-
-    /// `update_path` and `child_path` are the two halves of one rule - what
-    /// `PATH` the JDK goes on the front of - and they answered an empty one
-    /// differently, which is how the trailing separator survived review.
-    #[test]
-    fn update_path_and_child_path_agree_on_an_empty_path() {
-        let jdk_base = Path::new("/home/u/.jdks");
-        assert_eq!(
-            update_path("/home/u/.jdks/21.0.12/bin", "", jdk_base)
-                .unwrap()
-                .unwrap(),
-            child_path("/home/u/.jdks/21.0.12/bin", "").unwrap()
         );
     }
 
