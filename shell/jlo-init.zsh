@@ -4,65 +4,33 @@
 # copy lives beside it. Splitting the two is what lets each one be written for
 # a single parser - this file never has to also be valid sh or bash.
 jlo() {
-  local J arg out rc
+  local J out rc=0
   J="${JLO_HOME-}/bin/jlo-bin"
-  # "${1-}", not "$1": a bare `jlo` under a profile running `set -u` would
-  # otherwise abort the shell on an unbound parameter before the binary is
-  # ever reached - the same rule the autoload hook already follows for
-  # $_JLO_LAST_DIR.
+  # "${1-}", not "$1": a bare `jlo` must not abort a `set -u` shell.
   case "${1-}" in
+    # The verbs whose stdout is shell code; the others print data there or
+    # hand it to a child ('jlo exec -- ./gradlew --help').
     env|use|selfupdate|install|update)
-      # The branch below *evaluates* stdout, so help and version output - which
-      # clap prints to stdout - must never reach it. Scoped to these verbs on
-      # purpose: a wrapper-wide scan would hijack a child's flags in
-      # 'jlo exec -- ./gradlew --help'. env/use take at most a version,
-      # install/update take versions, and selfupdate takes nothing - none of
-      # them hands flags on to a child. The patterns are whole words, so the
-      # hidden '__install' verb falls through to the plain branch below.
-      for arg in "$@"; do
-        case "$arg" in
-          # The last pattern is a cluster of short flags holding h or V
-          # ('-ah'): never evaluated, whatever clap makes of it.
-          -h|--help|-V|--version|-[hV]*|-[!-]*[hV]*)
-            "$J" "$@"
-            return
-            ;;
-        esac
-      done
-      # Capture, then eval - deliberately not `. <("$J" "$@")`. That form
-      # discards the command's exit status in every shell, so the wrapper could
-      # not tell a successful 'jlo env' from a failed one. (It is also a hard
-      # no-op under the bash 3.2 macOS ships, which the bash copy explains.)
-      #
-      # The assignment is its own statement: `local out="$(...)"` would report
-      # `local`'s status, not the binary's. A failure then returns that status
-      # instead of eval-ing a half-written environment - see the explicit
-      # `return 0` in jlo_after_cd, which keeps that status out of the user's
-      # prompt.
-      #
-      # 'selfupdate' rides the same branch: the binary prints the reload line
-      # (`. $JLO_HOME/jlo.sh`, plus whichever optional stubs this shell had
-      # enabled) on stdout, and eval-ing it replaces the resident jlo function
-      # with the one the new binary just generated. An update that was already
-      # current prints nothing, so `eval ""` is a no-op.
-      #
-      # 'install' and 'update' ride it too - one operation behind two verbs -
-      # and are the ones whose output is evaluated on failure as well: they
-      # delete the build each new one supersedes, including the one
-      # JAVA_HOME points at, and print the exports that move this shell onto
-      # the replacement. A later name failing does not undo that deletion, so
-      # skipping the eval would leave the shell on a JDK that is gone. The
-      # binary writes those lines in one go after the work is done, so there
-      # is no half-written environment to fear here.
-      if out="$("$J" "$@")"; then
-        eval "$out"
-      else
-        rc=$?
-        case "$1" in
-          install|update) eval "$out" ;;
-        esac
-        return "$rc"
+      # install/update may delete the build this shell is on, so the shell
+      # must be able to follow.
+      if ! ( JAVA_HOME= PATH= ) 2>/dev/null; then
+        echo "jlo: JAVA_HOME or PATH is read-only" >&2
+        return 1
       fi
+      # Capture, then eval - not `. <("$J" ...)`, which discards the exit
+      # status in every shell (and sources nothing at all under the bash 3.2
+      # macOS ships).
+      out="$("$J" __wrapped "$@")" || rc=$?
+      # Only a payload ending in the marker is evaluated: help, an older
+      # binary's refusal and a cut-short payload lack it. A marked payload is
+      # evaluated even on failure - the binary writes it before deleting.
+      # `>&1`: zsh's printf reports success on a closed stdout, the
+      # redirection does not.
+      case "$out" in
+        *"# jlo'end") eval "$out" || [ "$rc" -ne 0 ] || rc=1 ;;
+        *) [ "$rc" -ne 0 ] || printf '%s\n' "$out" >&1 || rc=1 ;;
+      esac
+      return "$rc"
       ;;
     *)
       "$J" "$@"

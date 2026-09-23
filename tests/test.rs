@@ -947,12 +947,13 @@ fn fake_jdk_archive(root: &str) -> Vec<u8> {
     builder.into_inner().unwrap().finish().unwrap()
 }
 
-/// `jlo <verb> 21` against a store holding 21.0.5+11, with Adoptium offering
-/// 21.0.9+10. Returns the store and the command's output; `JAVA_HOME` points
-/// at the old build when `active`.
+/// `jlo-bin <args> 21` against a store holding 21.0.5+11, with Adoptium
+/// offering 21.0.9+10. Returns the store and the command's output; `JAVA_HOME`
+/// points at the old build when `active`.
 fn run_over_an_older_build(
-    verb: &str,
+    args: &[&str],
     active: bool,
+    stdout: std::process::Stdio,
 ) -> (tempfile::TempDir, std::path::PathBuf, std::process::Output) {
     use sha2::Digest;
 
@@ -979,11 +980,13 @@ fn run_over_an_older_build(
     install_fake_jdk(home.path(), "21.0.5+11");
     let store = jdk_store_in(home.path());
 
-    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
-    cmd.args([verb, "21"])
+    let mut cmd = std::process::Command::new(assert_cmd::cargo::cargo_bin("jlo-bin"));
+    cmd.args(args)
+        .arg("21")
         .env("HOME", home.path())
         .env("JLO_ADOPTIUM_API_URL", server.url())
-        .env_remove("JAVA_HOME");
+        .env_remove("JAVA_HOME")
+        .stdout(stdout);
     if active {
         cmd.env("JAVA_HOME", store.join("21.0.5+11"));
     }
@@ -991,14 +994,14 @@ fn run_over_an_older_build(
     (home, store, out)
 }
 
-/// One build per name, whichever verb downloads it: the new build deletes
-/// the one it supersedes, the live one included, and the exports that move
-/// the calling shell onto the replacement are printed - the wrapper
-/// evaluates them. `install` used to keep the superseded build.
+/// One build per name, whichever verb downloads it: wrapped, the new build
+/// deletes the one it supersedes, the live one included, and stdout carries
+/// the `&&`-joined exports that move the calling shell, ending in the marker.
 #[test]
-fn install_and_update_replace_the_live_build_and_move_the_shell() {
+fn wrapped_install_and_update_replace_the_live_build_and_move_the_shell() {
     for verb in ["install", "update"] {
-        let (_home, store, out) = run_over_an_older_build(verb, true);
+        let (_home, store, out) =
+            run_over_an_older_build(&["__wrapped", verb], true, std::process::Stdio::piped());
         let stdout = String::from_utf8_lossy(&out.stdout);
         let stderr = String::from_utf8_lossy(&out.stderr);
 
@@ -1007,21 +1010,48 @@ fn install_and_update_replace_the_live_build_and_move_the_shell() {
             !store.join("21.0.5+11").exists(),
             "{verb}: superseded build survived"
         );
-        assert!(store.join("21.0.9+10").exists());
-        assert_eq!(
-            exported_var(&stdout, "JAVA_HOME").as_deref(),
-            store.join("21.0.9+10").to_str(),
-            "{stdout}"
-        );
+        let new = store.join("21.0.9+10");
+        assert!(new.exists());
+        let lines: Vec<&str> = stdout.lines().collect();
+        assert_eq!(lines.len(), 3, "{verb}: {stdout:?}");
+        assert_eq!(lines[0], format!("export JAVA_HOME='{}' &&", new.display()));
+        assert!(lines[1].starts_with("export PATH='"), "{verb}: {stdout:?}");
+        assert_eq!(lines[2], "# jlo'end", "{verb}: {stdout:?}");
         assert!(stderr.contains("replaced 21.0.5+11"), "{verb}: {stderr}");
     }
 }
 
-/// A shell that was not on the replaced build has nothing to follow, so
-/// stdout - which the wrapper evaluates - stays empty.
+/// Unwrapped, nothing is known to evaluate stdout, so the shell cannot
+/// follow: the build `JAVA_HOME` points at stays, stdout stays empty, and a
+/// hint says how to finish the job.
 #[test]
-fn update_leaves_a_shell_on_another_jdk_alone() {
-    let (_home, store, out) = run_over_an_older_build("update", false);
+fn unwrapped_install_and_update_keep_the_live_build() {
+    for verb in ["install", "update"] {
+        let (_home, store, out) =
+            run_over_an_older_build(&[verb], true, std::process::Stdio::piped());
+        let stderr = String::from_utf8_lossy(&out.stderr);
+
+        assert!(out.status.success(), "{verb}: {stderr}");
+        assert!(
+            store.join("21.0.5+11").exists(),
+            "{verb}: live build deleted"
+        );
+        assert!(store.join("21.0.9+10").exists());
+        assert!(out.stdout.is_empty(), "{verb}: {:?}", out.stdout);
+        assert!(stderr.contains("Kept 21.0.5+11"), "{verb}: {stderr}");
+        assert!(!stderr.contains("replaced"), "{verb}: {stderr}");
+    }
+}
+
+/// A shell that was not on the replaced build has nothing to follow: the
+/// payload is the marker alone, so "nothing to do" is not "cut short".
+#[test]
+fn wrapped_update_leaves_a_shell_on_another_jdk_alone() {
+    let (_home, store, out) = run_over_an_older_build(
+        &["__wrapped", "update"],
+        false,
+        std::process::Stdio::piped(),
+    );
 
     assert!(
         out.status.success(),
@@ -1032,11 +1062,27 @@ fn update_leaves_a_shell_on_another_jdk_alone() {
         !store.join("21.0.5+11").exists(),
         "superseded build survived"
     );
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "# jlo'end\n");
+}
+
+/// The payload is written before anything is deleted, so a payload that
+/// could not be written - the reader gone - leaves the build the shell is on
+/// in place, and the run fails.
+#[test]
+fn a_payload_that_cannot_be_written_deletes_nothing() {
+    let (reader, writer) = std::io::pipe().unwrap();
+    drop(reader);
+    let (_home, store, out) =
+        run_over_an_older_build(&["__wrapped", "update"], true, writer.into());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    assert!(!out.status.success(), "{stderr}");
+    assert!(stderr.contains("could not write to stdout"), "{stderr}");
     assert!(
-        out.stdout.is_empty(),
-        "{:?}",
-        String::from_utf8_lossy(&out.stdout)
+        store.join("21.0.5+11").exists(),
+        "deleted before the shell was told"
     );
+    assert!(store.join("21.0.9+10").exists());
 }
 
 /// A `200 []` for the latest build of `major` - Adoptium's answer for a name
@@ -1897,6 +1943,17 @@ fn env_resolves_the_newest_installed_jdk_and_exports_only_that() {
             .unwrap(),
         )
         .stderr(predicate::str::is_empty());
+
+    // For the wrapper: the same statements, `&&`-joined and marked.
+    cascade_cmd(home.path(), &project, &["__wrapped", "env", "--offline"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::is_match(
+                r"^export JAVA_HOME='[^']*21\.0\.5\+11' &&\nexport PATH='[^']*'\n# jlo'end\n$",
+            )
+            .unwrap(),
+        );
 }
 
 /// `exec` had no cascade coverage at all: the version is optional there too,

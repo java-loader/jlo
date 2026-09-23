@@ -296,8 +296,9 @@ impl Lock {
 // The verb
 // ---------------------------------------------------------------------------
 
-/// Run the install verb. `args` is the raw argv *after* the verb token.
-pub(crate) fn cmd_install(args: &[String]) -> Result<()> {
+/// Run the install verb. `args` is the raw argv *after* the verb token;
+/// `wrapped` is whether the `jlo` shell function evaluates the reload lines.
+pub(crate) fn cmd_install(args: &[String], wrapped: bool) -> Result<()> {
     let mut method = DEFAULT_METHOD.to_string();
     let mut reload = false;
     let mut locked = false;
@@ -335,7 +336,7 @@ pub(crate) fn cmd_install(args: &[String]) -> Result<()> {
 
     report(&layout, had_receipt, symlink.as_deref());
     if reload {
-        print_reload(&layout);
+        print_reload(&layout, wrapped)?;
     }
     Ok(())
 }
@@ -354,18 +355,21 @@ pub(crate) fn cmd_install(args: &[String]) -> Result<()> {
 /// the state the wrapper left behind in this shell and nothing a child process
 /// or another session can fake into existence here.
 ///
-/// Every line is a full `if`, not `[ ... ] && . ...`. The last statement's
-/// status is the status of the whole `eval`, and a `[ -n ... ]` that is simply
-/// false would turn a successful update into a non-zero `jlo selfupdate`.
-fn print_reload(layout: &Layout) {
+/// Every optional line is a full `if`, not `[ ... ] && . ...`: a
+/// `[ -n ... ]` that is simply false would fail the `&&`-joined payload and
+/// turn a successful update into a non-zero `jlo selfupdate`.
+fn print_reload(layout: &Layout, wrapped: bool) -> Result<()> {
     let jlo_sh = sq(&display(&layout.home.join("jlo.sh")));
     let autoload = sq(&display(&layout.home.join("autoload.sh")));
     let completions = sq(&display(&layout.home.join("completions.sh")));
-    crate::ui::print_lines([
-        format!(". {jlo_sh}"),
-        format!("if [ -n \"${{{AUTOLOAD_MARKER}-}}\" ]; then . {autoload}; fi"),
-        format!("if [ -n \"${{{COMPLETIONS_MARKER}-}}\" ]; then . {completions}; fi"),
-    ]);
+    crate::shellenv::emit(
+        &[
+            format!(". {jlo_sh}"),
+            format!("if [ -n \"${{{AUTOLOAD_MARKER}-}}\" ]; then . {autoload}; fi"),
+            format!("if [ -n \"${{{COMPLETIONS_MARKER}-}}\" ]; then . {completions}; fi"),
+        ],
+        wrapped,
+    )
 }
 
 /// Everything under `$JLO_HOME` except the binary, the symlink and the receipt.

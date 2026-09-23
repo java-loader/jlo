@@ -17,8 +17,8 @@
 //!    resolutions, and a release published between them yields a tarball from
 //!    one release and a checksum from another.
 //! 3. **Compare against `CARGO_PKG_VERSION` and stop early** when there is
-//!    nothing to do. Nothing on stdout in that case, so the wrapper's
-//!    `eval ""` is a no-op.
+//!    nothing to do. Nothing to reload in that case: the wrapper gets the
+//!    end marker alone, anyone else nothing.
 //! 4. **Verify, then stage, then `rename`** - into a directory beside the
 //!    target file, never `std::env::temp_dir()`, because `rename` is atomic
 //!    only within one filesystem.
@@ -286,7 +286,7 @@ fn package_name() -> Result<String> {
 // The command
 // ---------------------------------------------------------------------------
 
-pub(crate) fn cmd_selfupdate() -> Result<(), CommandError> {
+pub(crate) fn cmd_selfupdate(wrapped: bool) -> Result<(), CommandError> {
     let layout = Layout::new(crate::jlo_home_dir()?);
     let receipt = install::load_receipt(&layout).map_err(|e| {
         CommandError::with_hint(
@@ -316,10 +316,8 @@ pub(crate) fn cmd_selfupdate() -> Result<(), CommandError> {
     let tag = client.latest_tag()?;
     let latest = version_from_tag(&tag)?;
     if !is_newer(latest, VERSION)? {
-        // Nothing on stdout: the wrapper evals whatever it captures, and an
-        // empty string is the no-op that says "there was nothing to reload".
         ui::created!("{} is already the latest version.", ui::jlo_mark(VERSION));
-        return Ok(());
+        return Ok(crate::shellenv::emit(&[], wrapped)?);
     }
 
     eprintln!(
@@ -353,7 +351,7 @@ pub(crate) fn cmd_selfupdate() -> Result<(), CommandError> {
     // Removed before the `exec`, which runs no destructors.
     drop(staged);
 
-    Ok(publish(&layout, lock)?)
+    Ok(publish(&layout, lock, wrapped)?)
 }
 
 /// Whether this install is one `selfupdate` may replace.
@@ -573,17 +571,23 @@ fn make_executable(_binary: &Path) -> Result<()> {
 /// `exec`, not a child process: the new `jlo-bin` carries its own shell
 /// templates and its own completions, so it is the only thing that can write a
 /// layout guaranteed to match it. `--reload` is what makes it print the
-/// `. jlo.sh` line on stdout for the wrapper to eval.
+/// `. jlo.sh` line on stdout for the wrapper to eval, and the forwarded
+/// wrapped mode is what makes it end that with the marker the wrapper looks
+/// for.
 ///
 /// `lock` stays alive until the call - `exec` replaces the process image and
 /// runs no destructors, so the fd (and the lock on it) carries into the new
 /// program.
 #[cfg(unix)]
-fn publish(layout: &Layout, lock: Lock) -> Result<()> {
+fn publish(layout: &Layout, lock: Lock, wrapped: bool) -> Result<()> {
     use std::os::unix::process::CommandExt as _;
 
     let binary = layout.binary();
-    let error = std::process::Command::new(&binary)
+    let mut command = std::process::Command::new(&binary);
+    if wrapped {
+        command.arg(crate::shellenv::WRAPPED);
+    }
+    let error = command
         .arg(install::VERB)
         .arg("--reload")
         // We hold the lock; the fd carries across the exec, so the new
@@ -601,7 +605,7 @@ fn publish(layout: &Layout, lock: Lock) -> Result<()> {
 }
 
 #[cfg(not(unix))]
-fn publish(_layout: &Layout, _lock: Lock) -> Result<()> {
+fn publish(_layout: &Layout, _lock: Lock, _wrapped: bool) -> Result<()> {
     bail!("'jlo selfupdate' is not supported on this platform; re-run the installer.")
 }
 

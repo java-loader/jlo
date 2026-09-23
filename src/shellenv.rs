@@ -30,6 +30,43 @@ pub(crate) fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', r"'\''"))
 }
 
+/// The argv prefix by which the `jlo` shell function says it will evaluate
+/// stdout. Intercepted before clap, so it never reaches help, completions or
+/// typo suggestions - and an older binary rejects it as an unknown subcommand
+/// before doing any work, so a newer wrapper over it evaluates nothing.
+pub(crate) const WRAPPED: &str = "__wrapped";
+
+/// The last line of every payload written for the wrapper, which evaluates
+/// only output ending in it: help text, an older binary's output and a
+/// payload cut short all lack it. Data cannot forge it, because
+/// [`shell_quote`] spells every `'` in a value as `'\''` and everything
+/// outside quotes is code jlo writes.
+const END: &str = "# jlo'end";
+
+/// Write shell statements to stdout.
+///
+/// For the wrapper they are joined with `&&`, so the first one that fails
+/// stops the rest and fails the `eval`, and end with [`END`] - also when there
+/// are none, so "nothing to do" is told apart from "cut short". Any write
+/// failure is an error: a payload that did not arrive whole is one the shell
+/// did not apply. Anyone else gets one statement per line, as always.
+pub(crate) fn emit(statements: &[String], wrapped: bool) -> anyhow::Result<()> {
+    if !wrapped {
+        ui::print_lines(statements.iter().cloned());
+        return Ok(());
+    }
+    write_payload(&mut std::io::stdout().lock(), statements).context("could not write to stdout")
+}
+
+fn write_payload(out: &mut impl std::io::Write, statements: &[String]) -> std::io::Result<()> {
+    for (i, statement) in statements.iter().enumerate() {
+        let joiner = if i + 1 < statements.len() { " &&" } else { "" };
+        writeln!(out, "{statement}{joiner}")?;
+    }
+    writeln!(out, "{END}")?;
+    out.flush()
+}
+
 /// Prepend `java_path` to `current_path`, dropping any entry already under
 /// `jdk_base`. `jdk_base` must be the JDK install directory ([`JdkStore::base`]) —
 /// the only tree whose PATH entries J'Lo owns. Passing a broader directory (the
@@ -326,6 +363,49 @@ mod tests {
     #[test]
     fn shell_quote_handles_an_empty_value() {
         assert_eq!(shell_quote(""), "''");
+    }
+
+    /// The wrapper evaluates output ending in the marker, so a payload cut
+    /// short inside a value must not end in it - which holds only while no
+    /// quoted value can contain it.
+    #[test]
+    fn a_quoted_value_cannot_contain_the_end_marker() {
+        for raw in [END, "/opt/# jlo'end", "# jlo'end/bin"] {
+            assert!(!shell_quote(raw).contains(END), "{raw}");
+        }
+    }
+
+    fn payload(statements: &[&str]) -> String {
+        let mut out = Vec::new();
+        write_payload(&mut out, &owned(statements)).unwrap();
+        String::from_utf8(out).unwrap()
+    }
+
+    /// `&&`, so an early statement that fails stops the rest and fails the
+    /// wrapper's `eval`; the marker even with nothing to say, so "nothing to
+    /// do" is not mistaken for "cut short".
+    #[test]
+    fn a_payload_is_and_joined_and_always_ends_with_the_marker() {
+        assert_eq!(payload(&["a", "b", "c"]), "a &&\nb &&\nc\n# jlo'end\n");
+        assert_eq!(payload(&["a"]), "a\n# jlo'end\n");
+        assert_eq!(payload(&[]), "# jlo'end\n");
+    }
+
+    /// Unlike `print_lines`, which treats a closed pipe as an ending, a
+    /// payload that did not arrive whole is a failure.
+    #[test]
+    fn a_broken_pipe_fails_the_payload() {
+        struct Closed;
+        impl std::io::Write for Closed {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::ErrorKind::BrokenPipe.into())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let err = write_payload(&mut Closed, &owned(&["a"])).expect_err("the reader is gone");
+        assert_eq!(err.kind(), std::io::ErrorKind::BrokenPipe);
     }
 
     /// Undo `shell_quote` the way a shell would, so the tests above assert a

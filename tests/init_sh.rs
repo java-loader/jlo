@@ -5,10 +5,11 @@
 //! test therefore sources the file belonging to the interpreter it runs, which
 //! is exactly what a real shell does.
 //!
-//! The script is sourced by the user's interactive shell and its `env` branch
-//! evaluates the binary's stdout. Anything printed there is executed, so help
-//! output must never reach it. These tests drive real shells with `JLO_HOME`
-//! pointing at the built binary, or at a stub standing in for it.
+//! The script is sourced by the user's interactive shell and its eval branch
+//! evaluates the binary's stdout - but only a payload ending in the marker
+//! the binary writes in wrapped mode, so help text, an older binary's output
+//! and a cut-short payload never are. These tests drive real shells with
+//! `JLO_HOME` pointing at the built binary, or at a stub standing in for it.
 //!
 //! Most cases run under every interpreter in [`INTERPRETERS`] rather than a
 //! single one: the bug that motivated the capture-then-eval form was visible
@@ -92,6 +93,9 @@ fn init_sh_home() -> tempfile::TempDir {
 /// `$JLO_HOME/bin/`.
 const WRAPPERS: &[&str] = &["jlo-init.bash", "jlo-init.zsh"];
 
+/// A stub line printing the marker a payload has to end in to be evaluated.
+const MARK: &str = "echo \"# jlo'end\"";
+
 fn shell_source(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("shell")
@@ -125,46 +129,8 @@ fn run_wrapper(args: &str) -> Output {
 }
 
 // ---------------------------------------------------------------------------
-// Help must be printed, never evaluated
+// Outside the eval branch, stdout is passed through
 // ---------------------------------------------------------------------------
-
-#[test]
-fn env_help_is_printed_not_sourced() {
-    let out = run_wrapper("env --help");
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-
-    // The help text reached the terminal ...
-    assert!(
-        stdout.contains("Usage: jlo env"),
-        "expected help on stdout, got stdout={stdout:?} stderr={stderr:?}"
-    );
-    // ... and the shell did not try to execute it.
-    assert!(
-        !stderr.contains("command not found"),
-        "help was sourced instead of printed: {stderr:?}"
-    );
-    assert!(out.status.success(), "wrapper failed: {stderr:?}");
-}
-
-#[test]
-fn env_short_help_is_printed_not_sourced() {
-    let out = run_wrapper("env -h");
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("Usage: jlo env"), "got {stdout:?}");
-}
-
-#[test]
-fn use_alias_help_is_printed_not_sourced() {
-    let out = run_wrapper("use --help");
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stdout.contains("Usage: jlo env"),
-        "got {stdout:?} {stderr:?}"
-    );
-    assert!(!stderr.contains("command not found"), "{stderr:?}");
-}
 
 #[test]
 fn top_level_help_still_works_through_the_wrapper() {
@@ -199,7 +165,7 @@ fn env_exports_reach_the_calling_shell() {
         if skip_missing("env_exports_reach_the_calling_shell", sh) {
             continue;
         }
-        let home = jlo_home_with_stub("echo 'export JLO_PROBE=reached'");
+        let home = jlo_home_with_stub(&format!("echo 'export JLO_PROBE=reached'\n{MARK}"));
         let out = run_in(sh, home.path(), "jlo env\necho \"probe=[${JLO_PROBE-}]\"");
         let stdout = String::from_utf8_lossy(&out.stdout);
         assert!(
@@ -217,7 +183,7 @@ fn use_alias_exports_reach_the_calling_shell() {
         if skip_missing("use_alias_exports_reach_the_calling_shell", sh) {
             continue;
         }
-        let home = jlo_home_with_stub("echo 'export JLO_PROBE=reached'");
+        let home = jlo_home_with_stub(&format!("echo 'export JLO_PROBE=reached'\n{MARK}"));
         let out = run_in(
             sh,
             home.path(),
@@ -250,26 +216,10 @@ fn env_reports_success_when_the_binary_succeeds() {
         if skip_missing("env_reports_success_when_the_binary_succeeds", sh) {
             continue;
         }
-        let home = jlo_home_with_stub("echo 'export JLO_PROBE=reached'");
+        let home = jlo_home_with_stub(&format!("echo 'export JLO_PROBE=reached'\n{MARK}"));
         let out = run_in(sh, home.path(), "jlo env\necho \"status=$?\"");
         let stdout = String::from_utf8_lossy(&out.stdout);
         assert!(stdout.contains("status=0"), "{sh}: got {stdout:?}");
-    }
-}
-
-/// A failing run must leave the environment exactly as it was. The binary
-/// emits nothing to stdout when it fails, but the wrapper must not evaluate a
-/// half-written line even if it someday did.
-#[test]
-fn env_does_not_evaluate_output_of_a_failing_run() {
-    for sh in INTERPRETERS {
-        if skip_missing("env_does_not_evaluate_output_of_a_failing_run", sh) {
-            continue;
-        }
-        let home = jlo_home_with_stub("echo 'export JLO_PROBE=leaked'\nexit 3");
-        let out = run_in(sh, home.path(), "jlo env\necho \"probe=[${JLO_PROBE-}]\"");
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        assert!(stdout.contains("probe=[]"), "{sh}: got {stdout:?}");
     }
 }
 
@@ -296,16 +246,16 @@ fn env_does_not_leak_helper_variables() {
         if skip_missing("env_does_not_leak_helper_variables", sh) {
             continue;
         }
-        let home = jlo_home_with_stub("echo 'export JLO_PROBE=reached'");
+        let home = jlo_home_with_stub(&format!("echo 'export JLO_PROBE=reached'\n{MARK}"));
         let out = run_in(
             sh,
             home.path(),
-            "out=mine\nJ=mine\narg=mine\njlo env\n\
-             echo \"out=[${out-UNSET}] J=[${J-UNSET}] arg=[${arg-UNSET}]\"",
+            "out=mine\nJ=mine\nrc=mine\njlo env\n\
+             echo \"out=[${out-UNSET}] J=[${J-UNSET}] rc=[${rc-UNSET}]\"",
         );
         let stdout = String::from_utf8_lossy(&out.stdout);
         assert!(
-            stdout.contains("out=[mine] J=[mine] arg=[mine]"),
+            stdout.contains("out=[mine] J=[mine] rc=[mine]"),
             "{sh}: the wrapper leaked into the caller's namespace: {stdout:?}"
         );
     }
@@ -410,7 +360,7 @@ fn selfupdate_evals_the_reload_line() {
         if skip_missing("selfupdate_evals_the_reload_line", sh) {
             continue;
         }
-        let home = jlo_home_with_stub("echo 'JLO_TEST_RELOADED=yes'");
+        let home = jlo_home_with_stub(&format!("echo 'JLO_TEST_RELOADED=yes'\n{MARK}"));
         let out = run_selfupdate(sh, home.path(), "");
         let stdout = String::from_utf8_lossy(&out.stdout);
         assert!(
@@ -424,15 +374,17 @@ fn selfupdate_evals_the_reload_line() {
     }
 }
 
-/// "Already current" prints nothing at all, so the eval is a no-op - and must
-/// not turn a successful update into a non-zero status.
+/// "Already current" prints the marker alone, so the eval is a no-op - and
+/// must not turn a successful update into a non-zero status.
 #[test]
 fn selfupdate_with_an_empty_stdout_still_succeeds() {
     for sh in INTERPRETERS {
         if skip_missing("selfupdate_with_an_empty_stdout_still_succeeds", sh) {
             continue;
         }
-        let home = jlo_home_with_stub("echo \"J'Lo 0.4.0 is already the latest version.\" >&2");
+        let home = jlo_home_with_stub(&format!(
+            "echo \"J'Lo 0.4.0 is already the latest version.\" >&2\n{MARK}"
+        ));
         let out = run_selfupdate(sh, home.path(), "");
         let stdout = String::from_utf8_lossy(&out.stdout);
         assert!(
@@ -447,8 +399,7 @@ fn selfupdate_with_an_empty_stdout_still_succeeds() {
 }
 
 /// The bug that started this: a failed update must not look like a successful
-/// one. `|| return` propagates the binary's status *before* the eval, so a
-/// half-written reload line is never executed either.
+/// one, and an unmarked reload line is never executed.
 #[test]
 fn selfupdate_propagates_a_failure_without_evaluating() {
     for sh in INTERPRETERS {
@@ -469,8 +420,7 @@ fn selfupdate_propagates_a_failure_without_evaluating() {
     }
 }
 
-/// `--help` and `--version` go to stdout, which this branch evaluates. The
-/// guard loop that has always covered `env`/`use` now covers `selfupdate` too.
+/// `--help` and `--version` go to stdout, unmarked: printed, not evaluated.
 #[test]
 fn selfupdate_help_is_printed_not_evaluated() {
     for sh in INTERPRETERS {
@@ -492,47 +442,206 @@ fn selfupdate_help_is_printed_not_evaluated() {
 }
 
 // ---------------------------------------------------------------------------
-// install/update: the exports that follow a deletion are evaluated even on
-// failure
+// The marker: only a payload ending in it is evaluated, whatever the status
 // ---------------------------------------------------------------------------
 
-/// `install` and `update` delete the build `JAVA_HOME` points at and print
-/// the exports that move the shell onto its replacement. A later name failing
-/// does not bring the deleted build back, so the wrapper must evaluate those
-/// exports anyway - and still hand back the failure. `env`, whose failure
-/// deletes nothing, keeps not evaluating, and help output never is.
+/// Runs `jlo {args}` and reports the status and whether `JLO_PROBE` was set.
+fn probe(sh: &str, home: &Path, args: &str) -> String {
+    let out = run_in(
+        sh,
+        home,
+        &format!("jlo {args}\necho \"status=$?\"\necho \"probe=[${{JLO_PROBE-}}]\""),
+    );
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    )
+}
+
+/// `install` and `update` write the exports that move the shell before they
+/// delete the build it is on, so a later name failing must not stop them
+/// being evaluated - and the failure still reaches the caller.
 #[test]
-fn install_and_update_eval_their_exports_even_when_they_fail() {
+fn a_marked_payload_is_evaluated_even_when_the_run_fails() {
+    for sh in INTERPRETERS {
+        if skip_missing("a_marked_payload_is_evaluated_even_when_the_run_fails", sh) {
+            continue;
+        }
+        let home = jlo_home_with_stub(&format!(
+            "echo 'export JLO_PROBE=moved'\n{MARK}\necho boom >&2\nexit 1"
+        ));
+        for verb in ["update", "install 21"] {
+            let out = probe(sh, home.path(), verb);
+            assert!(out.contains("status=1"), "{sh} {verb}: {out:?}");
+            assert!(out.contains("probe=[moved]"), "{sh} {verb}: {out:?}");
+        }
+    }
+}
+
+/// Help and version text is on stdout without the marker: printed, never
+/// evaluated, status 0 - the argument scan that used to guard this is gone.
+#[test]
+fn help_through_the_eval_branch_is_printed_not_evaluated() {
+    let home = jlo_home();
+    for sh in INTERPRETERS {
+        if skip_missing("help_through_the_eval_branch_is_printed_not_evaluated", sh) {
+            continue;
+        }
+        for args in [
+            "env --help",
+            "env -h",
+            "use -h",
+            "update -hh",
+            "install --help",
+            "selfupdate -h",
+        ] {
+            let out = run_in(sh, home.path(), &format!("jlo {args}\necho \"status=$?\""));
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert!(
+                stdout.contains("Usage: jlo") && stdout.contains("status=0"),
+                "{sh} {args}: {stdout:?} {stderr:?}"
+            );
+            assert!(
+                stderr.is_empty(),
+                "{sh} {args}: help was evaluated: {stderr:?}"
+            );
+        }
+    }
+}
+
+/// A usage error goes to stderr with clap's status; stdout is empty, so
+/// nothing is evaluated or printed.
+#[test]
+fn an_invalid_flag_fails_without_evaluating() {
+    let home = jlo_home();
+    for sh in INTERPRETERS {
+        if skip_missing("an_invalid_flag_fails_without_evaluating", sh) {
+            continue;
+        }
+        let out = run_in(sh, home.path(), "jlo env --bogus\necho \"status=$?\"");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(stdout, "status=2\n", "{sh}: {stderr:?}");
+        assert!(stderr.contains("--bogus"), "{sh}: {stderr:?}");
+    }
+}
+
+/// A payload cut short never ends in the marker - not even when a value
+/// carries text that looks like it, since a quoted `'` is spelled `'\''`.
+/// Cut just before the marker or inside a value, whatever the status, none
+/// of it is evaluated.
+#[test]
+fn a_truncated_payload_is_not_evaluated() {
+    for sh in INTERPRETERS {
+        if skip_missing("a_truncated_payload_is_not_evaluated", sh) {
+            continue;
+        }
+        for cut in [
+            r"export JLO_PROBE='x # jlo'\''end'",
+            r"export JLO_PROBE='x # jlo'\''end' &&\nexport PATH='/cut",
+        ] {
+            for status in [0, 1] {
+                let home = jlo_home_with_stub(&format!("printf '%b' \"{cut}\"\nexit {status}"));
+                let out = probe(sh, home.path(), "env");
+                assert!(
+                    out.contains("probe=[]"),
+                    "{sh} {cut} exit {status}: {out:?}"
+                );
+            }
+        }
+    }
+}
+
+/// A newer wrapper over an older binary: the prefix is an unknown
+/// subcommand there, rejected before any JDK command runs.
+#[test]
+fn a_binary_that_rejects_the_prefix_is_not_evaluated() {
+    for sh in INTERPRETERS {
+        if skip_missing("a_binary_that_rejects_the_prefix_is_not_evaluated", sh) {
+            continue;
+        }
+        let home = jlo_home_with_stub(&format!(
+            "if [ \"$1\" = __wrapped ]; then echo \"error: unrecognized subcommand '__wrapped'\" >&2; exit 2; fi\n\
+             echo 'export JLO_PROBE=old'\n{MARK}"
+        ));
+        let out = probe(sh, home.path(), "update");
+        assert!(out.contains("status=2"), "{sh}: {out:?}");
+        assert!(out.contains("probe=[]"), "{sh}: {out:?}");
+    }
+}
+
+/// The payload is `&&`-joined, so a first statement that fails - a reload
+/// `.` that cannot open its file - stops the rest and fails the call, even
+/// though the binary succeeded.
+#[test]
+fn a_failing_first_statement_fails_the_call() {
+    for sh in INTERPRETERS {
+        if skip_missing("a_failing_first_statement_fails_the_call", sh) {
+            continue;
+        }
+        let home = jlo_home_with_stub(&format!(
+            "echo \". '/nonexistent/jlo.sh' &&\"\necho 'export JLO_PROBE=reached'\n{MARK}"
+        ));
+        let out = probe(sh, home.path(), "selfupdate");
+        assert!(!out.contains("status=0"), "{sh}: {out:?}");
+        assert!(out.contains("probe=[]"), "{sh}: {out:?}");
+    }
+}
+
+/// Unmarked output is printed; when that printing fails, the call fails.
+#[test]
+fn a_failed_print_of_unmarked_output_fails_the_call() {
+    for sh in INTERPRETERS {
+        if skip_missing("a_failed_print_of_unmarked_output_fails_the_call", sh) {
+            continue;
+        }
+        let home = jlo_home_with_stub("echo 'Usage: jlo env'");
+        let out = run_in(
+            sh,
+            home.path(),
+            "if jlo env --help >&-; then echo status=0; else echo status=failed; fi",
+        );
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            stdout.contains("status=failed"),
+            "{sh}: {stdout:?} {:?}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
+
+/// A shell that cannot assign `JAVA_HOME` or `PATH` could not follow a
+/// deletion, so it is refused before the binary runs.
+#[test]
+fn a_read_only_environment_is_refused_before_the_binary_runs() {
     for sh in INTERPRETERS {
         if skip_missing(
-            "install_and_update_eval_their_exports_even_when_they_fail",
+            "a_read_only_environment_is_refused_before_the_binary_runs",
             sh,
         ) {
             continue;
         }
-        let home = jlo_home_with_stub("echo 'JLO_TEST_MOVED=yes'\necho boom >&2\nexit 1");
-        // `-ah` is a short-flag cluster holding help: printed, never
-        // evaluated, like `--help`.
-        for (verb, moved) in [
-            ("update", "yes"),
-            ("install 21", "yes"),
-            ("env 21", "no"),
-            ("update -ah", "no"),
-            ("update -ha", "no"),
-        ] {
+        for var in ["JAVA_HOME", "PATH"] {
+            let home = jlo_home_with_stub(&format!(
+                "touch \"$JLO_HOME/called\"\necho 'export JLO_PROBE=reached'\n{MARK}"
+            ));
             let out = run_in(
                 sh,
                 home.path(),
-                &format!("jlo {verb}\necho \"status=$?\"\necho \"moved=${{JLO_TEST_MOVED-no}}\""),
+                &format!("readonly {var}\njlo update\necho \"status=$?\""),
             );
             let stdout = String::from_utf8_lossy(&out.stdout);
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert!(stdout.contains("status=1"), "{sh} {var}: {stdout:?}");
             assert!(
-                stdout.contains("status=1"),
-                "{sh} {verb}: the failure never reached the caller: {stdout:?}"
+                stderr.contains("JAVA_HOME or PATH is read-only"),
+                "{sh} {var}: {stderr:?}"
             );
             assert!(
-                stdout.contains(&format!("moved={moved}")),
-                "{sh} {verb}: expected moved={moved}: {stdout:?}"
+                !home.path().join("called").exists(),
+                "{sh} {var}: the binary ran"
             );
         }
     }

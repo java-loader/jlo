@@ -93,14 +93,21 @@ fn main() {
 }
 
 fn run() -> Result<(), CommandError> {
+    // Exactly one prefix is stripped: a second one is left for clap to reject.
+    let mut argv: Vec<String> = env::args().collect();
+    let wrapped = argv.get(1).is_some_and(|arg| arg == shellenv::WRAPPED);
+    if wrapped {
+        argv.remove(1);
+    }
+    let first = argv.get(1).map(String::as_str);
+
     // The easter egg is deliberately not a clap subcommand: `hide = true`
     // only suppresses it from `--help`. `clap_complete` still emits hidden
     // subcommands into generated completion scripts, and clap's "did you
     // mean" suggestion engine still offers it for typos (e.g. `jlo sng`).
     // Intercepting the raw token before `Cli::parse()` keeps it out of
     // help, completions, and typo suggestions in one move.
-    let argv: Vec<String> = env::args().skip(1).collect();
-    if argv.first().map(String::as_str) == Some("sing") {
+    if first == Some("sing") {
         eprintln!("There are no Easter Eggs in this program. Trust me. 💃");
         return Ok(());
     }
@@ -109,8 +116,8 @@ fn run() -> Result<(), CommandError> {
     // is sharper still: it writes the shell layout, so it must not show up in
     // the completions it generates. `install.sh`, `install-local.sh` and
     // `selfupdate` are its only callers.
-    if argv.first().map(String::as_str) == Some(install::VERB) {
-        return Ok(install::cmd_install(&argv[1..])?);
+    if first == Some(install::VERB) {
+        return Ok(install::cmd_install(&argv[2..], wrapped)?);
     }
 
     // A receipt that disagrees with this binary is the known-incomplete state:
@@ -118,7 +125,9 @@ fn run() -> Result<(), CommandError> {
     // rather than reporting it, which is why there is no `--repair` verb.
     install::self_heal();
 
-    let cli = cli::Cli::parse();
+    // `parse_from`, not `parse`: the latter would reread the prefix from the
+    // process's own argv.
+    let cli = cli::Cli::parse_from(argv);
 
     let Some(command) = cli.command else {
         cli::print_help();
@@ -130,13 +139,13 @@ fn run() -> Result<(), CommandError> {
     let client = AdoptiumClient::new(api_url);
 
     match command {
-        cli::Command::Env { version, offline } => cmd_env(&client, version, offline),
+        cli::Command::Env { version, offline } => cmd_env(&client, version, offline, wrapped),
         cli::Command::Home { version, offline } => cmd_home(&client, version, offline),
         cli::Command::Exec { args } => cmd_exec(&client, &args),
         cli::Command::Current => cmd_current(),
         cli::Command::List { offline } => cmd_list(&client, offline),
-        cli::Command::Install { versions } => cmd_install(&client, versions),
-        cli::Command::Update { versions } => cmd_update(&client, versions),
+        cli::Command::Install { versions } => cmd_install(&client, versions, wrapped),
+        cli::Command::Update { versions } => cmd_update(&client, versions, wrapped),
         cli::Command::Remove {
             versions,
             superseded,
@@ -146,7 +155,7 @@ fn run() -> Result<(), CommandError> {
             global,
             force,
         } => cmd_init(&client, version, global, force),
-        cli::Command::Selfupdate => selfupdate::cmd_selfupdate(),
+        cli::Command::Selfupdate => selfupdate::cmd_selfupdate(wrapped),
         cli::Command::Completions { shell } => {
             cmd_completions(shell);
             Ok(())
@@ -173,10 +182,11 @@ fn cmd_env(
     client: &AdoptiumClient,
     version: Option<String>,
     offline: bool,
+    wrapped: bool,
 ) -> Result<(), CommandError> {
     let store = JdkStore::discover()?;
     let resolved = resolve_java_version_from(version, &store, client, offline)?;
-    setup(client, &store, resolved.request, offline)?;
+    setup(client, &store, resolved.request, offline, wrapped)?;
 
     // The exports on stdout are the whole effect of this command. If stdout is
     // a terminal nothing captured them, so the exit code says success while
@@ -562,10 +572,14 @@ fn cmd_init(
 /// argument it answers "make sure the JDK this directory wants is here", the
 /// same resolution `env`, `home` and `exec` do, so it works on a machine with
 /// nothing installed yet.
-fn cmd_install(client: &AdoptiumClient, versions: Vec<String>) -> Result<(), CommandError> {
+fn cmd_install(
+    client: &AdoptiumClient,
+    versions: Vec<String>,
+    wrapped: bool,
+) -> Result<(), CommandError> {
     let store = JdkStore::discover()?;
     let requests = requested_versions(versions, "install", &store, client)?;
-    install_names(client, &store, requests)
+    install_names(client, &store, requests, wrapped)
 }
 
 /// `jlo update`: the names given, or every installed name.
@@ -579,7 +593,11 @@ fn cmd_install(client: &AdoptiumClient, versions: Vec<String>) -> Result<(), Com
 /// Someone who installed `28-ea` wants it current, and the stream's weekly
 /// builds are replaced rather than piling up, so following it costs a
 /// download, not the disk.
-fn cmd_update(client: &AdoptiumClient, versions: Vec<String>) -> Result<(), CommandError> {
+fn cmd_update(
+    client: &AdoptiumClient,
+    versions: Vec<String>,
+    wrapped: bool,
+) -> Result<(), CommandError> {
     let store = JdkStore::discover()?;
     let requests = if versions.is_empty() {
         let installed = store
@@ -592,42 +610,39 @@ fn cmd_update(client: &AdoptiumClient, versions: Vec<String>) -> Result<(), Comm
     } else {
         requested_versions(versions, "update", &store, client)?
     };
-    install_names(client, &store, requests)
+    install_names(client, &store, requests, wrapped)
 }
 
 /// Bring each name to its latest build, deleting the builds each new one
 /// supersedes - the one operation behind `install` and `update`, which differ
 /// only in what an empty version list means.
 ///
-/// Including the build `$JAVA_HOME` points at: J'Lo keeps one build per name,
-/// whichever verb put the newer one there. The calling shell follows the
-/// replacement because the wrapper evaluates both verbs' stdout, which
-/// carries the same `export` lines `jlo env` would print - and only when the
-/// live build was one of those deleted.
-///
-/// Written even when a later name failed: the deletions before the failure
-/// have happened, and a shell left on a removed JDK is worse than an error
-/// the wrapper returns after moving it. The wrapper evaluates these verbs'
-/// output regardless of the status for exactly this reason.
+/// The build `$JAVA_HOME` points at goes too only when `wrapped`: then the
+/// wrapper evaluates stdout, which carries the `export` lines that move the
+/// shell onto the replacement, written before anything is deleted. Unwrapped,
+/// nothing is known to evaluate them, so that build stays.
 fn install_names(
     client: &AdoptiumClient,
     store: &JdkStore,
     requests: HashSet<Request>,
+    wrapped: bool,
 ) -> Result<(), CommandError> {
-    // A dry run of the exports, before anything is deleted: every reason
-    // they can fail - an undecodable `PATH`, a store path that is not UTF-8
-    // or cannot sit in `PATH` - is a property of the environment and the
-    // store, not of the build, so the store itself stands in for it. Failing
-    // once the live build is gone would strand the shell on it.
-    export_lines(store, store.base())?;
-
     let active = active_java_home();
-    let run = store::install_each(client, store, requests, active.as_deref());
-
-    if let Some(java_home) = &run.repointed {
-        ui::print_lines(export_lines(store, java_home)?);
-    }
-    ui::update_report(&run, !std::io::stdout().is_terminal());
+    let run = store::install_each(
+        client,
+        store,
+        requests,
+        active.as_deref(),
+        wrapped,
+        |repointed| {
+            let exports = match repointed {
+                Some(java_home) => export_lines(store, java_home)?,
+                None => Vec::new(),
+            };
+            shellenv::emit(&exports, wrapped)
+        },
+    );
+    ui::update_report(&run);
 
     if let Some(e) = run.error {
         return Err(e);
@@ -661,6 +676,7 @@ fn setup(
     store: &JdkStore,
     request: Request,
     offline: bool,
+    wrapped: bool,
 ) -> Result<(), CommandError> {
     let java_home = if offline {
         offline_java_home(store, request, "env")?
@@ -668,7 +684,7 @@ fn setup(
         resolve_java_home(client, store, request)?
     };
 
-    ui::print_lines(export_lines(store, &java_home)?);
+    shellenv::emit(&export_lines(store, &java_home)?, wrapped)?;
 
     Ok(())
 }
@@ -677,9 +693,7 @@ fn setup(
 /// it differs, `PATH` when the JDK's `bin` is not already where it belongs.
 ///
 /// Collected rather than printed as they are decided: both lines are one
-/// environment, and `print_lines` is also the only writer here that treats
-/// a closed pipe as an ending rather than panicking - `jlo env | head` is an
-/// ordinary thing to type.
+/// environment, written in one go by `shellenv::emit`.
 fn export_lines(store: &JdkStore, java_home: &Path) -> anyhow::Result<Vec<String>> {
     let mut exports = Vec::new();
 
@@ -778,7 +792,7 @@ mod tests {
 
     #[test]
     fn cmd_env_rejects_an_unsupported_version() {
-        let err = cmd_env(&offline_client(), Some("nope".to_string()), false)
+        let err = cmd_env(&offline_client(), Some("nope".to_string()), false, false)
             .expect_err("'nope' is not a major version");
         assert_eq!(
             format!("{:#}", err.error),
@@ -792,7 +806,7 @@ mod tests {
     /// JDK matches Java nope".
     #[test]
     fn cmd_env_offline_rejects_an_unsupported_version() {
-        let err = cmd_env(&offline_client(), Some("nope".to_string()), true)
+        let err = cmd_env(&offline_client(), Some("nope".to_string()), true, false)
             .expect_err("'nope' is not a major version");
         assert_eq!(
             format!("{:#}", err.error),
@@ -803,8 +817,8 @@ mod tests {
 
     #[test]
     fn cmd_update_rejects_a_list_of_only_invalid_versions() {
-        let err =
-            cmd_update(&offline_client(), owned(&["abc"])).expect_err("nothing was left to update");
+        let err = cmd_update(&offline_client(), owned(&["abc"]), false)
+            .expect_err("nothing was left to update");
         assert_eq!(
             format!("{:#}", err.error),
             "no valid Java versions provided to update"
@@ -815,7 +829,7 @@ mod tests {
     /// actually typed - the two commands share the check, not the wording.
     #[test]
     fn cmd_install_rejects_a_list_of_only_invalid_versions() {
-        let err = cmd_install(&offline_client(), owned(&["abc"]))
+        let err = cmd_install(&offline_client(), owned(&["abc"]), false)
             .expect_err("nothing was left to install");
         assert_eq!(
             format!("{:#}", err.error),

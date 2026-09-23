@@ -290,8 +290,9 @@ generated files, and prints it in the lines it tells you to add.
 In interactive shells, `jlo` is a shell function (defined by the wrapper `jlo.sh` sources) — this is what lets `jlo env` mutate your
 current session. Non-interactive shells (CI jobs, `Makefile` recipes, scripts, AI coding agents) don't load that
 function, so J'Lo's installer also places a real `jlo` binary on your `PATH` at `~/.local/bin/jlo`. Every subcommand
-works there directly except `env`/`use`, which must mutate the current shell. `jlo selfupdate` works there too; it
-just cannot reload a shell function that was never loaded.
+works there directly except `env`/`use`, which must mutate the current shell. `jlo install` and `jlo update` work there
+but keep the build `JAVA_HOME` points at, since they cannot move that shell off it; `jlo remove --superseded` clears it
+later. `jlo selfupdate` works there too; it just cannot reload a shell function that was never loaded.
 
 **`jlo exec` is the answer whenever there is no shell to configure.** It runs one command with the right Java on
 `PATH` and changes nothing outside that command; `jlo home` prints the `JAVA_HOME` path when you only need the path.

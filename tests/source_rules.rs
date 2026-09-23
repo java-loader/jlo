@@ -39,9 +39,9 @@ fn code_lines(source: &str) -> impl Iterator<Item = (usize, &str)> {
 /// is not a cosmetic bug - the shell tries to execute it.
 ///
 /// One writer is allowed, and it is the one machine-output path that does not
-/// go through `ui::print_lines`: `jlo home`'s bare path. (`print_lines` itself
-/// writes with `writeln!`, because it has to treat a closed pipe as an ending
-/// rather than a panic.) Anything else is a bug, whether or not a test happens
+/// go through `ui::print_lines`: `jlo home`'s bare path. (`print_lines` and
+/// the wrapper's payload writer in `shellenv` use `writeln!`, because they
+/// have to handle a failed write rather than panic on it.) Anything else is a bug, whether or not a test happens
 /// to cover the path it sits on.
 #[test]
 fn stdout_is_written_only_by_the_one_machine_output_path() {

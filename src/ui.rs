@@ -214,14 +214,9 @@ fn replaced_line(request: crate::request::Request, removed: &[String]) -> String
     )
 }
 
-/// The lines `install` and `update` end on when they deleted anything: how
-/// many, and whether the shell moved with it.
-///
-/// `captured` is stdout not being a terminal - the same proxy `jlo env` uses
-/// for "the wrapper is evaluating this". When it is a terminal the exports
-/// went nowhere, and this shell is now pointing at a directory that is gone,
-/// so that is said instead of the move.
-pub(crate) fn update_report(run: &crate::store::InstallRun, captured: bool) {
+/// The lines `install` and `update` end on: how many builds they deleted,
+/// and whether the shell moved - or why the build it is on was kept.
+pub(crate) fn update_report(run: &crate::store::InstallRun) {
     let count = run.removed_count();
     if count > 0 {
         eprintln!(
@@ -232,18 +227,26 @@ pub(crate) fn update_report(run: &crate::store::InstallRun, captured: bool) {
         );
     }
     if let Some(java_home) = &run.repointed {
-        if captured {
-            eprintln!(
-                "{}",
-                style(format!("  JAVA_HOME now points at {}", tilde(java_home)))
-                    .dim()
-                    .for_stderr()
-            );
-        } else {
-            warning!("JAVA_HOME still points at a JDK this command removed");
-            hint!("{NO_ACTIVE_JDK_HINT}");
-        }
+        eprintln!(
+            "{}",
+            style(format!("  JAVA_HOME now points at {}", tilde(java_home)))
+                .dim()
+                .for_stderr()
+        );
     }
+    if let Some(version) = &run.kept_active {
+        hint!("{}", kept_active_hint(version));
+    }
+}
+
+/// Said when `install` or `update` kept a superseded build because
+/// `JAVA_HOME` points at it: only the `jlo` shell function can move a shell,
+/// and it did not run this command.
+fn kept_active_hint(version: &str) -> String {
+    format!(
+        "Kept {version}, which JAVA_HOME points at. Run 'jlo env' in the shell using it, \
+         then 'jlo remove --superseded'."
+    )
 }
 
 /// Diagnostic prefixes.
