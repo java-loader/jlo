@@ -66,8 +66,13 @@ pub(crate) struct PruneReport {
 
 impl PruneReport {
     pub(crate) fn removed_count(&self) -> usize {
-        self.removed.iter().map(|(_, v)| v.len()).sum()
+        removed_count(&self.removed)
     }
+}
+
+/// How many builds a `(name, removed version names)` list deleted.
+fn removed_count(removed: &[(Request, Vec<String>)]) -> usize {
+    removed.iter().map(|(_, v)| v.len()).sum()
 }
 
 /// What a `jlo remove` run did. The counterpart to [`PruneReport`] for the
@@ -515,7 +520,6 @@ impl JdkStore {
                 .filter(|c| c.name.as_deref().is_some_and(|n| is_older_than(n, &newest)))
             {
                 let name = old_jdk.name.as_deref().unwrap_or("unknown").to_string();
-                let path = &old_jdk.path;
                 // Both spellings of the entry are compared, as in
                 // `Self::remove`: `owns` is deliberately not `java_home_in`,
                 // so a bundle whose `Contents/Home` has gone unreadable is
@@ -524,12 +528,7 @@ impl JdkStore {
                     report.skipped_in_use = Some(name);
                     continue;
                 }
-                match remove_install(&self.base, &name) {
-                    Ok(()) => removed.push(name),
-                    Err(e) => report
-                        .failures
-                        .push(format!("could not remove {path:?}: {e}")),
-                }
+                remove_recorded(&self.base, name, &mut removed, &mut report.failures);
             }
 
             if !removed.is_empty() {
@@ -662,13 +661,12 @@ impl JdkStore {
         // `list` yields newest first, so the removals are reported that way
         // too - the same order as `jlo list --offline`.
         for jdk in managed {
-            let path = self.base.join(&jdk.version);
-            match remove_install(&self.base, &jdk.version) {
-                Ok(()) => report.removed.push(jdk.version.clone()),
-                Err(e) => report
-                    .failures
-                    .push(format!("could not remove {path:?}: {e}")),
-            }
+            remove_recorded(
+                &self.base,
+                jdk.version.clone(),
+                &mut report.removed,
+                &mut report.failures,
+            );
         }
 
         Ok(report)
@@ -793,7 +791,7 @@ pub(crate) struct InstallRun {
 
 impl InstallRun {
     pub(crate) fn removed_count(&self) -> usize {
-        self.replaced.iter().map(|(_, v)| v.len()).sum()
+        removed_count(&self.replaced)
     }
 }
 
@@ -917,10 +915,7 @@ fn replace(
             for old in builds {
                 // Filtered on the name in `superseded_by`, so it is present.
                 let Some(name) = old.name else { continue };
-                match remove_install(&store.base, &name) {
-                    Ok(()) => removed.push(name),
-                    Err(e) => failures.push(format!("could not remove {:?}: {e}", old.path)),
-                }
+                remove_recorded(&store.base, name, &mut removed, &mut failures);
             }
         }
     }
@@ -1204,6 +1199,21 @@ pub(crate) fn same_path(a: &Path, b: &Path) -> bool {
     match (a.canonicalize(), b.canonicalize()) {
         (Ok(a), Ok(b)) => a == b,
         _ => false,
+    }
+}
+
+/// [`remove_install`], with the outcome recorded: the name in `removed`, or
+/// the reason in `failures`. One place for the failure wording, which the
+/// three deleting paths share.
+fn remove_recorded(
+    base: &Path,
+    name: String,
+    removed: &mut Vec<String>,
+    failures: &mut Vec<String>,
+) {
+    match remove_install(base, &name) {
+        Ok(()) => removed.push(name),
+        Err(e) => failures.push(format!("could not remove {:?}: {e}", base.join(&name))),
     }
 }
 
