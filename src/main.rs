@@ -121,7 +121,7 @@ fn run() -> Result<(), CommandError> {
     // the completions it generates. `install.sh`, `install-local.sh` and
     // `selfupdate` are its only callers.
     if first == Some(install::VERB) {
-        return Ok(install::cmd_install(&argv[2..], wrapped)?);
+        return install::cmd_install(&argv[2..], wrapped);
     }
 
     // A receipt that disagrees with this binary is the known-incomplete state:

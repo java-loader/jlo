@@ -26,6 +26,7 @@
 //! the documented repair for both, and for anything else the receipt does not
 //! speak to.
 
+use crate::CommandError;
 use crate::store::same_path;
 use crate::ui;
 use anyhow::{Context, Result, anyhow};
@@ -331,7 +332,7 @@ impl Drop for Lock {
 
 /// Run the install verb. `args` is the raw argv *after* the verb token;
 /// `wrapped` is whether the `jlo` shell function evaluates the reload lines.
-pub(crate) fn cmd_install(args: &[String], wrapped: bool) -> Result<()> {
+pub(crate) fn cmd_install(args: &[String], wrapped: bool) -> Result<(), CommandError> {
     let mut method = DEFAULT_METHOD.to_string();
     let mut reload = false;
     let mut locked = false;
@@ -348,7 +349,7 @@ pub(crate) fn cmd_install(args: &[String], wrapped: bool) -> Result<()> {
             "--reload" => reload = true,
             "--locked" => locked = true,
             "--publish-self" => publish_self = true,
-            other => return Err(anyhow!("unknown option {other:?} for {VERB}")),
+            other => return Err(anyhow!("unknown option {other:?} for {VERB}").into()),
         }
     }
 
@@ -372,7 +373,14 @@ pub(crate) fn cmd_install(args: &[String], wrapped: bool) -> Result<()> {
     let had_receipt = read_receipt(&layout).is_some();
 
     if publish_self {
-        publish_binary(&layout)?;
+        // Nothing under `$JLO_HOME` has been written yet, for `install.sh`
+        // and `selfupdate` alike: whatever was installed before is intact.
+        publish_binary(&layout).map_err(|e| {
+            CommandError::with_hint(
+                e,
+                "J'Lo was not changed; any existing install is still in place.",
+            )
+        })?;
     }
     write_layout(&layout)?;
     let symlink = ensure_symlink(&layout);
