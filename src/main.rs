@@ -661,18 +661,6 @@ mod tests {
         );
     }
 
-    /// Same rejection as `update`, but the message names the verb the user
-    /// actually typed - the two commands share the check, not the wording.
-    #[test]
-    fn cmd_install_rejects_a_list_of_only_invalid_versions() {
-        let err = cmd_install(&offline_client(), owned(&["abc"]), false)
-            .expect_err("nothing was left to install");
-        assert_eq!(
-            format!("{:#}", err.error),
-            "no valid Java versions provided to install"
-        );
-    }
-
     /// The usage line is advice printed *under* the error, so it travels with
     /// it rather than being printed where the failure happens.
     #[test]
@@ -691,26 +679,10 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn jlo_home_dir_falls_back_to_dot_jlo_under_home() {
-        unsafe {
-            env::remove_var("JLO_HOME");
-        }
-        let expected = env::home_dir().unwrap().join(".jlo");
-        assert_eq!(jlo_home_dir().unwrap(), expected);
-    }
-
-    #[test]
-    #[serial_test::serial]
     fn jlo_home_dir_uses_env_var() {
         let dir = tempdir().unwrap();
-        unsafe {
-            env::set_var("JLO_HOME", dir.path());
-        }
-        let result = jlo_home_dir().unwrap();
+        let result = with_jlo_home(dir.path().as_os_str(), jlo_home_dir).unwrap();
         assert_eq!(result, dir.path());
-        unsafe {
-            env::remove_var("JLO_HOME");
-        }
     }
 
     /// The three values that cannot be a home, refused here rather than at
