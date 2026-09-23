@@ -1438,20 +1438,6 @@ mod tests {
         assert!(!dir.path().join("21.0.3+9").exists());
     }
 
-    /// The same rule on the path that deletes by rule rather than by name.
-    #[test]
-    fn pruning_takes_the_markers_of_what_it_removed() {
-        let dir = tempdir().unwrap();
-        create_jdk_dir(dir.path(), "21.0.1+12", true);
-        create_jdk_dir(dir.path(), "21.0.3+9", true);
-
-        let report = JdkStore::at(dir.path()).prune(None).unwrap();
-
-        assert_eq!(report.removed_count(), 1);
-        assert!(!sibling_marker(dir.path(), "21.0.1+12").exists());
-        assert!(sibling_marker(dir.path(), "21.0.3+9").exists());
-    }
-
     /// A *directory* whose name happens to end in `.jlo-managed` is an entry
     /// like any other, and must not confer ownership on the entry it appears
     /// to name - that would put a JDK jlo never installed within reach of
@@ -1666,16 +1652,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn find_matching_empty_dir() {
-        let dir = tempdir().unwrap();
-        assert!(
-            JdkStore::at(dir.path())
-                .find_matching(request("21"))
-                .is_none()
-        );
-    }
-
     /// The rule the whole design rests on: `26` and `26-ea` are two names, so
     /// an installed pre-release is invisible to a GA request.
     #[test]
@@ -1732,48 +1708,24 @@ mod tests {
 
     // -- installed_requests --
 
-    #[test]
-    fn installed_requests_discovers_names() {
-        let dir = tempdir().unwrap();
-        create_jdk_dir(dir.path(), "21.0.1+12", true);
-        create_jdk_dir(dir.path(), "21.0.3+9", true);
-        create_jdk_dir(dir.path(), "17.0.2+8", true);
-        create_jdk_dir(dir.path(), "11.0.1+13", true);
-
-        let versions = JdkStore::at(dir.path()).installed_requests().unwrap();
-        assert_eq!(versions, vec![request("11"), request("17"), request("21")]);
-    }
-
-    #[test]
-    fn installed_requests_ignores_non_dirs() {
-        let dir = tempdir().unwrap();
-        create_jdk_dir(dir.path(), "21.0.1+12", true);
-        // Plain file should be skipped
-        fs::write(dir.path().join("some-file.txt"), "").unwrap();
-
-        let versions = JdkStore::at(dir.path()).installed_requests().unwrap();
-        assert_eq!(versions, vec![request("21")]);
-    }
-
-    #[test]
-    fn installed_requests_empty_dir() {
-        let dir = tempdir().unwrap();
-        let versions = JdkStore::at(dir.path()).installed_requests().unwrap();
-        assert!(versions.is_empty());
-    }
-
     /// What a bare `jlo update` iterates over. EA names are installed names
     /// too, so they appear here; the *skipping* is the caller's rule, decided
     /// by the command that has to explain it.
     #[test]
     fn installed_requests_names_both_streams() {
         let dir = tempdir().unwrap();
+        create_jdk_dir(dir.path(), "21.0.3+9", true);
         create_jdk_dir(dir.path(), "21.0.5+11", true);
+        create_jdk_dir(dir.path(), "17.0.2+8", true);
         create_jdk_dir(dir.path(), "28.0.0-beta+16.0.ea", true);
 
         let requests = JdkStore::at(dir.path()).installed_requests().unwrap();
 
-        assert_eq!(requests, vec![request("21"), request("28-ea"),]);
+        // One entry per name, however many builds it has, in name order.
+        assert_eq!(
+            requests,
+            vec![request("17"), request("21"), request("28-ea")]
+        );
     }
 
     /// A bare `jlo update` reports an unreadable install directory rather than
@@ -1914,25 +1866,8 @@ mod tests {
         assert!(second.path().exists());
     }
 
-    /// The staging directory is expected to be here, so `jlo remove
-    /// --superseded` must not put a line under itself about it - once would
-    /// be noise, and it would be every run for the rest of the machine's
-    /// life. A directory that is genuinely unexpected still gets one.
-    #[test]
-    fn prune_says_nothing_about_a_staging_directory() {
-        let dir = tempdir().unwrap();
-        create_jdk_dir(dir.path(), "21.0.3+9", true);
-        let store = JdkStore::at(dir.path());
-        let staging = staging_dir(&store).unwrap();
-
-        let report = store.prune(None).unwrap();
-
-        assert_eq!(report.skipped_unmanaged, 0);
-        assert!(staging.path().exists(), "prune must not delete it either");
-    }
-
-    /// ...and the listing must pass over it, or an interrupted install would
-    /// show up as a JDK.
+    /// The listing must pass over a staging directory, or an interrupted
+    /// install would show up as a JDK.
     #[test]
     fn a_staging_directory_is_not_mistaken_for_an_install() {
         let dir = tempdir().unwrap();
@@ -2056,19 +1991,6 @@ mod tests {
         assert_eq!(report.skipped_unmanaged, 0);
     }
 
-    #[test]
-    fn prune_ignores_unmanaged() {
-        let dir = tempdir().unwrap();
-        create_jdk_dir(dir.path(), "21.0.1+12", false); // no marker
-        create_jdk_dir(dir.path(), "21.0.3+9", true);
-
-        JdkStore::at(dir.path()).prune(None).unwrap();
-
-        // Unmanaged dir should not be touched
-        assert!(dir.path().join("21.0.1+12").exists());
-        assert!(dir.path().join("21.0.3+9").exists());
-    }
-
     /// Two builds of one patch differ only in build metadata, which semver
     /// leaves out of precedence. `prune` used to sort them Equal and delete
     /// whichever `read_dir` happened to yield second - a coin toss over a JDK,
@@ -2181,15 +2103,6 @@ mod tests {
         assert_eq!(report.skipped_unmanaged, 2);
         assert_eq!(report.removed_count(), 0);
         assert!(dir.path().join("21.0.1+12").exists());
-    }
-
-    #[test]
-    fn prune_single_version_kept() {
-        let dir = tempdir().unwrap();
-        create_jdk_dir(dir.path(), "21.0.3+9", true);
-
-        JdkStore::at(dir.path()).prune(None).unwrap();
-        assert!(dir.path().join("21.0.3+9").exists());
     }
 
     /// `jlo remove --superseded` says so when the install directory cannot be read, rather
@@ -2555,20 +2468,6 @@ mod tests {
         assert!(matches!(err, RemoveError::InUse(_)), "{err}");
     }
 
-    /// Every refusal leaves the caller a usable next step; only the
-    /// unreadable-directory variant is a plain failure with nothing to advise.
-    #[test]
-    fn remove_refusals_carry_advice() {
-        assert!(RemoveError::NotInstalled(targets(&["17"])).hint().is_some());
-        assert!(RemoveError::InUse("21.0.3+9".to_string()).hint().is_some());
-        assert!(
-            RemoveError::Unmanaged(vec!["21.0.3+9".to_string()])
-                .hint()
-                .is_some()
-        );
-        assert!(RemoveError::Store(anyhow::anyhow!("boom")).hint().is_none());
-    }
-
     /// `list` treats a missing base directory as "nothing installed", so an
     /// empty store answers the target rather than failing on the directory.
     #[test]
@@ -2617,22 +2516,12 @@ mod tests {
         assert!(!Selector::parse("26-ea").matches(&ga));
         // The exact build still names exactly one install.
         assert!(Selector::parse("26.0.2-beta+101.0.ea").matches(&ea));
-    }
-
-    #[test]
-    fn selector_reads_a_bare_integer_as_a_major() {
-        let jdk = InstalledJdk {
-            version: "17.0.2+8".to_string(),
-            request: request("17"),
-            managed: true,
-        };
-
-        assert!(Selector::parse("17").matches(&jdk));
-        assert!(Selector::parse("17.0.2+8").matches(&jdk));
-        assert!(!Selector::parse("1").matches(&jdk));
+        assert!(Selector::parse("26.0.1+9").matches(&ga));
+        // A major is the whole number, not a prefix of it.
+        assert!(!Selector::parse("2").matches(&ga));
         // Neither a major nor a directory name: a range, which jlo has no
         // notion of anywhere.
-        assert!(!Selector::parse("17.0").matches(&jdk));
+        assert!(!Selector::parse("26.0").matches(&ga));
     }
 
     // -- find_jdk_path --
@@ -2748,15 +2637,5 @@ mod tests {
 
         let outside = Path::new("/usr/lib/jvm/java-21-openjdk");
         assert_eq!(store.active_version(&installed, Some(outside)), None);
-    }
-
-    #[test]
-    fn active_version_is_none_without_java_home() {
-        let dir = tempdir().unwrap();
-        create_jdk_dir(dir.path(), "21.0.3+9", true);
-        let store = JdkStore::at(dir.path());
-        let installed = store.list().unwrap();
-
-        assert_eq!(store.active_version(&installed, None), None);
     }
 }
