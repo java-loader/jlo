@@ -496,6 +496,8 @@ fn jdk_arch() -> anyhow::Result<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::request::request;
+    use std::io::Read;
 
     // -- metadata validation --
 
@@ -550,36 +552,13 @@ mod tests {
         }
     }
 
-    // -- jdk_os / jdk_arch smoke tests --
-}
-
-#[cfg(test)]
-mod client_tests {
-    use super::*;
-    use crate::request::request;
-    use std::io::Read;
+    // -- client --
 
     const ASSETS_FIXTURE: &str = include_str!("../tests/fixtures/assets_latest.json");
     const RELEASES_FIXTURE: &str = include_str!("../tests/fixtures/available_releases.json");
     const FAKE_PACKAGE: &[u8] = b"fake-jdk-package-bytes";
     const FAKE_PACKAGE_CHECKSUM: &str =
         "c24e5c702f84a86d7be63da2e942872b1cc66a2a35c0168a18042170119201b0";
-
-    fn metadata_mock(
-        server: &mut mockito::ServerGuard,
-        status: usize,
-        body: &str,
-    ) -> mockito::Mock {
-        server
-            .mock(
-                "GET",
-                mockito::Matcher::Regex(r"^/v3/assets/latest/21/hotspot".to_string()),
-            )
-            .match_query(mockito::Matcher::Any)
-            .with_status(status)
-            .with_body(body)
-            .create()
-    }
 
     fn fixture_with_package_field(field: &str, value: serde_json::Value) -> String {
         let mut json: serde_json::Value = serde_json::from_str(ASSETS_FIXTURE).unwrap();
@@ -608,7 +587,7 @@ mod client_tests {
     #[test]
     fn fetch_metadata_happy_path() {
         let mut server = mockito::Server::new();
-        let _m = metadata_mock(&mut server, 200, ASSETS_FIXTURE);
+        let _m = major_mock(&mut server, 21, 200, ASSETS_FIXTURE);
 
         let client = AdoptiumClient::new(server.url());
         let metadata = client
@@ -635,7 +614,7 @@ mod client_tests {
     #[test]
     fn fetch_metadata_http_error_reports_status() {
         let mut server = mockito::Server::new();
-        let _m = metadata_mock(&mut server, 500, "boom");
+        let _m = major_mock(&mut server, 21, 500, "boom");
 
         let client = AdoptiumClient::new(server.url());
         let err = client.fetch_metadata(request("21")).unwrap_err();
@@ -646,7 +625,7 @@ mod client_tests {
     #[test]
     fn fetch_metadata_malformed_json_errors() {
         let mut server = mockito::Server::new();
-        let _m = metadata_mock(&mut server, 200, "this is not json");
+        let _m = major_mock(&mut server, 21, 200, "this is not json");
 
         let client = AdoptiumClient::new(server.url());
         let err = client.fetch_metadata(request("21")).unwrap_err();
@@ -663,7 +642,7 @@ mod client_tests {
     #[test]
     fn fetch_metadata_empty_array_means_not_offered() {
         let mut server = mockito::Server::new();
-        let _m = metadata_mock(&mut server, 200, "[]");
+        let _m = major_mock(&mut server, 21, 200, "[]");
 
         let client = AdoptiumClient::new(server.url());
         let metadata = client
@@ -677,7 +656,7 @@ mod client_tests {
     fn fetch_metadata_missing_field_names_the_field() {
         let mut server = mockito::Server::new();
         let body = fixture_without_package_field("checksum");
-        let _m = metadata_mock(&mut server, 200, &body);
+        let _m = major_mock(&mut server, 21, 200, &body);
 
         let client = AdoptiumClient::new(server.url());
         let err = client.fetch_metadata(request("21")).unwrap_err();
@@ -689,7 +668,7 @@ mod client_tests {
     fn fetch_metadata_empty_field_is_incomplete() {
         let mut server = mockito::Server::new();
         let body = fixture_with_package_field("checksum", serde_json::Value::String(String::new()));
-        let _m = metadata_mock(&mut server, 200, &body);
+        let _m = major_mock(&mut server, 21, 200, &body);
 
         let client = AdoptiumClient::new(server.url());
         let err = client.fetch_metadata(request("21")).unwrap_err();
@@ -1073,16 +1052,7 @@ mod client_tests {
     #[test]
     fn fetch_metadata_reads_the_ea_release_shape() {
         let mut server = mockito::Server::new();
-        let mock = server
-            .mock(
-                "GET",
-                mockito::Matcher::Regex(r"^/v3/assets/feature_releases/28/ea".to_string()),
-            )
-            .with_status(200)
-            .with_body(include_str!(
-                "../tests/fixtures/feature_releases_28_ea.json"
-            ))
-            .create();
+        let mock = ea_mock(&mut server, 28, 200, EA_FIXTURE);
 
         let client = AdoptiumClient::new(server.url());
         let metadata = client
@@ -1100,41 +1070,13 @@ mod client_tests {
         assert!(!metadata.download_link.is_empty());
     }
 
-    /// A GA request must still go to the latest endpoint - the two URLs are
-    /// the only thing that keeps the streams apart at the network seam.
-    #[test]
-    fn fetch_metadata_still_uses_the_latest_endpoint_for_ga() {
-        let mut server = mockito::Server::new();
-        let mock = server
-            .mock(
-                "GET",
-                mockito::Matcher::Regex(r"^/v3/assets/latest/21/hotspot".to_string()),
-            )
-            .with_status(200)
-            .with_body(ASSETS_FIXTURE)
-            .create();
-
-        let client = AdoptiumClient::new(server.url());
-        client
-            .fetch_metadata(request("21"))
-            .expect("the GA fixture is a complete asset");
-        mock.assert();
-    }
-
     /// An empty array is a 200, not an error: it means Adoptium has no EA
     /// build for this major on this OS/arch. Saying so beats a silent GA
     /// substitution, which would hand back a different JDK than was asked for.
     #[test]
     fn an_empty_ea_stream_is_not_offered_rather_than_the_ga_build() {
         let mut server = mockito::Server::new();
-        let _mock = server
-            .mock(
-                "GET",
-                mockito::Matcher::Regex(r"^/v3/assets/feature_releases/11/ea".to_string()),
-            )
-            .with_status(200)
-            .with_body("[]")
-            .create();
+        let _mock = ea_mock(&mut server, 11, 200, "[]");
 
         // Only the EA endpoint is mocked, so a fallback to the GA one would
         // come back as an error rather than as `None`.
