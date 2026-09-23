@@ -345,21 +345,14 @@ mod tests {
     }
 
     #[test]
-    fn load_empty_file() {
+    fn load_refuses_a_file_without_a_version() {
         let dir = tempdir().unwrap();
         let file = dir.path().join(".jlorc");
-        fs::write(&file, "").unwrap();
-        let err = load(&file).unwrap_err();
-        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
-    }
-
-    #[test]
-    fn load_only_comments() {
-        let dir = tempdir().unwrap();
-        let file = dir.path().join(".jlorc");
-        fs::write(&file, "# just a comment\n# another\n").unwrap();
-        let err = load(&file).unwrap_err();
-        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        for content in ["", "# just a comment\n# another\n"] {
+            fs::write(&file, content).unwrap();
+            let err = load(&file).unwrap_err();
+            assert_eq!(err.kind(), std::io::ErrorKind::InvalidData, "{content:?}");
+        }
     }
 
     #[test]
@@ -444,37 +437,6 @@ mod tests {
     /// `$HOME` boundary is a path comparison.
     fn canon(p: &Path) -> PathBuf {
         p.canonicalize().unwrap()
-    }
-
-    #[test]
-    fn find_project_config_finds_jlorc_in_start_dir() {
-        let home = tempdir().unwrap();
-        let home = canon(home.path());
-        let project = home.join("project");
-        fs::create_dir_all(&project).unwrap();
-        fs::write(project.join(".jlorc"), "21\n").unwrap();
-
-        assert_eq!(
-            find_project_config(&project, Some(&home)),
-            Some(project.join(".jlorc"))
-        );
-    }
-
-    #[test]
-    fn find_project_config_walks_up_from_subdirectory() {
-        // The bug: `jlo env` in project/src/main used to miss project/.jlorc
-        // and silently fall through to the user default.
-        let home = tempdir().unwrap();
-        let home = canon(home.path());
-        let project = home.join("project");
-        let deep = project.join("src").join("main");
-        fs::create_dir_all(&deep).unwrap();
-        fs::write(project.join(".jlorc"), "21\n").unwrap();
-
-        assert_eq!(
-            find_project_config(&deep, Some(&home)),
-            Some(project.join(".jlorc"))
-        );
     }
 
     #[test]
@@ -631,7 +593,7 @@ mod tests {
 
     // -- find_in: the walk, plus where the answer came from --
     //
-    // Same temp-dir fixtures as the `find_project_config` tests below; the
+    // Same temp-dir fixtures as the `find_project_config` tests above; the
     // only addition is that the `Source` variant is asserted, because that is
     // the fact the bare `String` used to drop.
 
@@ -720,15 +682,5 @@ mod tests {
             err.to_string().contains("could not load configuration"),
             "{err}"
         );
-    }
-
-    #[test]
-    fn find_project_config_returns_none_when_absent() {
-        let home = tempdir().unwrap();
-        let home = canon(home.path());
-        let project = home.join("project");
-        fs::create_dir_all(&project).unwrap();
-
-        assert_eq!(find_project_config(&project, Some(&home)), None);
     }
 }
