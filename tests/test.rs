@@ -1,6 +1,5 @@
-// Test code: `unwrap` failures are test failures, and `env::set_var` needs
-// `unsafe` under edition 2024 despite the serial_test guard.
-#![allow(unsafe_code, clippy::unwrap_used)]
+// Test code: an `unwrap` failure here is a test failure, which is the point.
+#![allow(clippy::unwrap_used)]
 
 mod common;
 
@@ -317,7 +316,6 @@ fn install_rejects_an_invalid_version_without_writing_to_stdout() {
 /// fails here is the request for the latest release, not the resolution.
 /// `install` has no --offline flag, so there is nothing to stop it earlier.
 #[test]
-#[serial]
 fn install_without_a_version_falls_through_to_the_latest_release() {
     let home = tempfile::tempdir().unwrap();
     let project = tempfile::tempdir().unwrap();
@@ -627,14 +625,23 @@ fn network_test_home() -> std::path::PathBuf {
     home
 }
 
+/// `jlo-bin` run from `project`, which doubles as its `JLO_HOME`, against the
+/// shared store.
+fn network_cmd(project: &std::path::Path) -> Command {
+    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
+    cmd.current_dir(project)
+        .env("HOME", network_test_home())
+        .env("JLO_HOME", project);
+    cmd
+}
+
 #[test]
-#[serial]
 fn init_with_version() {
     let temp_dir = tempfile::tempdir().unwrap();
-    std::env::set_current_dir(&temp_dir).unwrap();
 
     let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
     cmd.args(["init", "21"])
+        .current_dir(temp_dir.path())
         // An explicit version never asks Adoptium anything.
         .env("JLO_ADOPTIUM_API_URL", "http://127.0.0.1:1")
         .assert()
@@ -643,19 +650,15 @@ fn init_with_version() {
         .stderr(predicate::str::contains("Java 21"))
         .stdout("");
 
-    let content = std::fs::read_to_string(".jlorc").unwrap();
+    let content = std::fs::read_to_string(temp_dir.path().join(".jlorc")).unwrap();
     let lines: Vec<_> = content.lines().collect();
     assert_eq!(lines[1], "21");
-
-    std::env::set_current_dir(std::env::temp_dir()).unwrap();
-    temp_dir.close().unwrap();
 }
 
 /// A bare `jlo init` pins the latest release, which is the one thing it asks
 /// Adoptium for - so mockito answers, rather than this being a fourth
 /// real-network test. ADR-0002 names three, and now there are three.
 #[test]
-#[serial]
 fn init() {
     let mut server = mockito::Server::new();
     let _r = server
@@ -663,13 +666,11 @@ fn init() {
         .with_body(include_str!("fixtures/available_releases.json"))
         .create();
 
-    // create a temp dir and switch to it
     let temp_dir = tempfile::tempdir().unwrap();
-    std::env::set_current_dir(&temp_dir).unwrap();
 
-    // run init
     let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
     cmd.arg("init")
+        .current_dir(temp_dir.path())
         .env("JLO_ADOPTIUM_API_URL", server.url())
         .assert()
         .success()
@@ -680,7 +681,7 @@ fn init() {
         .stdout("");
 
     // check if .jlorc contains a valid major version
-    let content = std::fs::read_to_string(".jlorc").unwrap();
+    let content = std::fs::read_to_string(temp_dir.path().join(".jlorc")).unwrap();
     let lines: Vec<_> = content.lines().collect();
     assert_eq!(
         lines[0],
@@ -692,6 +693,7 @@ fn init() {
     // run init again to check for existing file error
     let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
     cmd.arg("init")
+        .current_dir(temp_dir.path())
         .env("JLO_ADOPTIUM_API_URL", server.url())
         .assert()
         .failure()
@@ -703,31 +705,17 @@ fn init() {
             .unwrap(),
         )
         .stdout("");
-
-    // leave temp dir and clean up
-    std::env::set_current_dir(std::env::temp_dir()).unwrap();
-    temp_dir.close().unwrap();
 }
 
 #[test]
 #[serial]
 fn home() {
-    // create a temp dir and set its path to JLO_HOME
-    let temp_dir = tempfile::tempdir().unwrap();
-    // The JDK store is $HOME-derived (ADR-0005), so every command below is
-    // given one under `target/` rather than the developer's own.
-    let home = network_test_home();
-    unsafe {
-        std::env::set_var("JLO_HOME", temp_dir.path());
-    }
-
-    // switch to temp dir and create .jlorc with "25"
-    std::env::set_current_dir(&temp_dir).unwrap();
-    std::fs::write(".jlorc", "25").unwrap();
+    let project = tempfile::tempdir().unwrap();
+    std::fs::write(project.path().join(".jlorc"), "25").unwrap();
+    let jlo = || network_cmd(project.path());
 
     // run home (version resolved from .jlorc)
-    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
-    cmd.env("HOME", &home);
+    let mut cmd = jlo();
     let assert = cmd.arg("home").assert().success().code(0);
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
 
@@ -744,48 +732,29 @@ fn home() {
     );
 
     // explicit version argument resolves the same way
-    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
-    cmd.env("HOME", &home);
+    let mut cmd = jlo();
     let assert = cmd.args(["home", "25"]).assert().success().code(0);
     let stdout_explicit = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
     assert_eq!(stdout_explicit, stdout);
-
-    // leave temp dir and clean up
-    std::env::set_current_dir(std::env::temp_dir()).unwrap();
-    unsafe {
-        std::env::remove_var("JLO_HOME");
-    }
-    temp_dir.close().unwrap();
 }
 
 #[cfg(unix)]
 #[test]
 #[serial]
 fn exec() {
-    // create a temp dir and set its path to JLO_HOME
-    let temp_dir = tempfile::tempdir().unwrap();
-    // The JDK store is $HOME-derived (ADR-0005), so every command below is
-    // given one under `target/` rather than the developer's own.
-    let home = network_test_home();
-    unsafe {
-        std::env::set_var("JLO_HOME", temp_dir.path());
-    }
-
-    // switch to temp dir and create .jlorc with "25"
-    std::env::set_current_dir(&temp_dir).unwrap();
-    std::fs::write(".jlorc", "25").unwrap();
+    let project = tempfile::tempdir().unwrap();
+    std::fs::write(project.path().join(".jlorc"), "25").unwrap();
+    let jlo = || network_cmd(project.path());
 
     // exit code of the child propagates through exec
-    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
-    cmd.env("HOME", &home);
+    let mut cmd = jlo();
     cmd.args(["exec", "25", "--", "sh", "-c", "exit 7"])
         .assert()
         .failure()
         .code(7);
 
     // JAVA_HOME is set in the child and its bin is first on PATH
-    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
-    cmd.env("HOME", &home);
+    let mut cmd = jlo();
     let assert = cmd
         .args([
             "exec",
@@ -810,8 +779,7 @@ fn exec() {
     );
 
     // version resolved from .jlorc when omitted (no explicit version before --)
-    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
-    cmd.env("HOME", &home);
+    let mut cmd = jlo();
     cmd.args(["exec", "--", "java", "-version"])
         .assert()
         .success()
@@ -819,8 +787,7 @@ fn exec() {
         .stderr(predicate::str::contains("openjdk version \"25"));
 
     // missing '--' is a usage error
-    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
-    cmd.env("HOME", &home);
+    let mut cmd = jlo();
     cmd.args(["exec", "25", "java", "-version"])
         .assert()
         .failure()
@@ -828,8 +795,7 @@ fn exec() {
         .stderr(predicate::str::contains("expected '--'"));
 
     // a command that cannot be launched exits 127 with an error on stderr
-    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
-    cmd.env("HOME", &home);
+    let mut cmd = jlo();
     cmd.args(["exec", "25", "--", "definitely-not-a-real-command-xyz"])
         .assert()
         .failure()
@@ -842,8 +808,7 @@ fn exec() {
     // execute a program literally named "--" (regression test: the
     // version-omitted path used to silently drop the second `--` because
     // clap eats the leading separator before `cmd_exec` ever sees it).
-    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
-    cmd.env("HOME", &home);
+    let mut cmd = jlo();
     cmd.args([
         "exec",
         "25",
@@ -856,52 +821,27 @@ fn exec() {
     .code(127)
     .stderr(predicate::str::contains("could not execute '--'"));
 
-    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
-    cmd.env("HOME", &home);
+    let mut cmd = jlo();
     cmd.args(["exec", "--", "--", "definitely-not-a-real-command-xyz"])
         .assert()
         .failure()
         .code(127)
         .stderr(predicate::str::contains("could not execute '--'"));
-
-    // leave temp dir and clean up
-    std::env::set_current_dir(std::env::temp_dir()).unwrap();
-    unsafe {
-        std::env::remove_var("JLO_HOME");
-    }
-    temp_dir.close().unwrap();
 }
 
 #[test]
 #[serial]
 fn env() {
-    // create a temp dir and set its path to JLO_HOME
-    let temp_dir = tempfile::tempdir().unwrap();
-    // The JDK store is $HOME-derived (ADR-0005), so every command below is
-    // given one under `target/` rather than the developer's own.
-    let home = network_test_home();
-    unsafe {
-        std::env::set_var("JLO_HOME", temp_dir.path());
-    }
-
-    // switch to temp dir and create .jlorc with "25"
-    std::env::set_current_dir(&temp_dir).unwrap();
-    std::fs::write(".jlorc", "25").unwrap();
+    let project = tempfile::tempdir().unwrap();
+    std::fs::write(project.path().join(".jlorc"), "25").unwrap();
+    let jlo = || network_cmd(project.path());
 
     // run env
-    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
-    cmd.env("HOME", &home);
+    let mut cmd = jlo();
     cmd.arg("env").assert().success().code(0).stdout(
         predicate::str::contains("export JAVA_HOME='")
             .and(predicate::str::contains("export PATH='")),
     );
-
-    // leave temp dir and clean up
-    std::env::set_current_dir(std::env::temp_dir()).unwrap();
-    unsafe {
-        std::env::remove_var("JLO_HOME");
-    }
-    temp_dir.close().unwrap();
 }
 
 #[test]
@@ -1331,22 +1271,21 @@ fn exported_path(stdout: &str) -> Option<String> {
 /// The marker file is the assertion: if it exists, evaluating `jlo env`'s
 /// output executed an attacker's command in the user's session.
 #[test]
-#[serial]
 fn env_does_not_let_a_hostile_path_execute_when_evaluated() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    unsafe {
-        std::env::set_var("JLO_HOME", temp_dir.path());
-    }
-    std::env::set_current_dir(&temp_dir).unwrap();
-    std::fs::write(".jlorc", "25").unwrap();
+    let (home, project) = store_fixture(&["25.0.4+101"]);
+    std::fs::write(project.join(".jlorc"), "25").unwrap();
 
-    let marker = temp_dir.path().join("pwned");
+    let marker = home.path().join("pwned");
     let payload = format!("$(touch '{}')", marker.display());
     let input_path = format!("/usr/bin:/bin:{payload}");
 
     let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
     let assert = cmd
         .arg("env")
+        .current_dir(&project)
+        .env("HOME", home.path())
+        .env("JLO_HOME", home.path().join(".jlo"))
+        .env("JLO_ADOPTIUM_API_URL", "http://127.0.0.1:1")
         .env("PATH", &input_path)
         .assert()
         .success()
@@ -1381,12 +1320,6 @@ fn env_does_not_let_a_hostile_path_execute_when_evaluated() {
             "{sh}: evaluating jlo env's output executed an injected command"
         );
     }
-
-    std::env::set_current_dir(std::env::temp_dir()).unwrap();
-    unsafe {
-        std::env::remove_var("JLO_HOME");
-    }
-    temp_dir.close().unwrap();
 }
 
 #[test]
@@ -1421,7 +1354,6 @@ fn completions_do_not_hit_the_network() {
 /// stack-trace-shaped diagnostic. `jlo list` has always handled this; `env`
 /// writes to the same channel and must behave the same way.
 #[test]
-#[serial]
 fn env_survives_a_reader_that_stops_early() {
     let home = tempfile::tempdir().unwrap();
     // The store is derived from $HOME, so a throwaway home is enough to stand
@@ -1602,7 +1534,6 @@ fn env_writes_exports_to_stdout_and_nothing_to_stderr() {
 /// `/usr/libexec/java_home` cannot see. On stderr, so `JH=$(jlo home 25)`
 /// still gets only the path.
 #[test]
-#[serial]
 #[cfg(target_os = "macos")]
 fn home_warns_that_a_pre_bundle_install_is_invisible_to_java_home() {
     let (home, project) = store_fixture(&["25.0.4+101"]);
@@ -1626,7 +1557,6 @@ fn home_warns_that_a_pre_bundle_install_is_invisible_to_java_home() {
 /// ever used - which is why a dead API URL is enough here. Without this the
 /// online path could lose the warning with every test still green.
 #[test]
-#[serial]
 #[cfg(target_os = "macos")]
 fn the_online_funnel_warns_about_a_pre_bundle_install_too() {
     let (home, project) = store_fixture(&["25.0.4+101"]);
@@ -1648,7 +1578,6 @@ fn the_online_funnel_warns_about_a_pre_bundle_install_too() {
 /// and stays silent; a rule that silenced every `env` would pass the pair
 /// above and this would catch it.
 #[test]
-#[serial]
 #[cfg(target_os = "macos")]
 fn online_env_warns_about_a_pre_bundle_install() {
     let (home, project) = store_fixture(&["25.0.4+101"]);
@@ -1672,7 +1601,6 @@ fn online_env_warns_about_a_pre_bundle_install() {
 /// --offline` is how the autoload hook runs, on every new shell and every
 /// `cd`; a warning there would print forever and train the user to ignore it.
 #[test]
-#[serial]
 #[cfg(target_os = "macos")]
 fn env_offline_stays_silent_about_a_pre_bundle_install() {
     let (home, project) = store_fixture(&["25.0.4+101"]);
@@ -1902,7 +1830,6 @@ fn exec_resolves_the_newest_installed_jdk_for_the_child() {
 /// pre-release answers a bare `jlo env --offline` with a failure, not with the
 /// beta.
 #[test]
-#[serial]
 fn bare_env_offline_ignores_an_ea_install() {
     let (home, project) = store_fixture(&["28.0.0-beta+16.0.ea"]);
 
