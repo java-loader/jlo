@@ -434,10 +434,8 @@ fn cmd_init(
     };
 
     conf::init(request, global, force).map_err(|e| {
-        // `--force` answers exactly one of the failures below, so the hint is
-        // keyed off the message `conf` produced. Read it before the context is
-        // attached: `to_string` renders only the outermost message.
-        let already_exists = e.to_string().contains("already exists");
+        // `--force` answers exactly one of the failures below.
+        let already_exists = e.is::<conf::AlreadyExists>();
         let e = e.context("could not create config file");
         if already_exists {
             CommandError::with_hint(e, "Re-run with --force to overwrite it.")

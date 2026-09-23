@@ -252,6 +252,19 @@ fn load(path: &Path) -> Result<Request, std::io::Error> {
     })
 }
 
+/// The one `init` failure `--force` answers, as a type so the caller can
+/// offer that flag without matching on the message.
+#[derive(Debug)]
+pub(crate) struct AlreadyExists(PathBuf);
+
+impl std::fmt::Display for AlreadyExists {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "file '{}' already exists", self.0.display())
+    }
+}
+
+impl std::error::Error for AlreadyExists {}
+
 /// Write `request` to the project `.jlorc` in the current directory, or with
 /// `global` to `$JLO_HOME/default.jlorc`.
 pub(crate) fn init(request: Request, global: bool, force: bool) -> anyhow::Result<()> {
@@ -285,7 +298,7 @@ fn init_config(path: &Path, request: Request, force: bool) -> anyhow::Result<()>
                 .map_err(|e| anyhow!("could not open file '{}': {e}", path.display()))?
         }
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            return Err(anyhow!("file '{}' already exists", path.display()));
+            return Err(AlreadyExists(path.to_path_buf()).into());
         }
         Err(e) => return Err(anyhow!(e)),
     };
@@ -407,6 +420,7 @@ mod tests {
         fs::write(&file, "17\n").unwrap();
 
         let err = init_config(&file, Request::parse("21").unwrap(), false).unwrap_err();
+        assert!(err.is::<AlreadyExists>(), "{err:#}");
         assert!(err.to_string().contains("already exists"));
     }
 
