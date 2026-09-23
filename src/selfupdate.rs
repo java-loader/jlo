@@ -407,10 +407,9 @@ fn is_newer(candidate: &str, current: &str) -> Result<bool> {
 /// A staging directory beside the target file, removed on drop.
 ///
 /// Beside it, and not under `std::env::temp_dir()`: `rename` is atomic only
-/// within one filesystem, and it fails rather than degrading - `EXDEV` on
-/// Unix, and Rust's `MoveFileEx` call on Windows omits `MOVEFILE_COPY_ALLOWED`
-/// so a cross-volume move errors there too. "Somewhere under `$JLO_HOME`" is
-/// not enough either, because `bin/` can itself be a mount point or a symlink.
+/// within one filesystem, and it fails with `EXDEV` rather than degrading.
+/// "Somewhere under `$JLO_HOME`" is not enough either, because `bin/` can
+/// itself be a mount point or a symlink.
 #[derive(Debug)]
 struct Staged {
     dir: PathBuf,
@@ -509,16 +508,10 @@ fn verify_staged_version(binary: &Path, expected: &str) -> Result<()> {
     Ok(())
 }
 
-#[cfg(unix)]
 fn make_executable(binary: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt as _;
     fs::set_permissions(binary, fs::Permissions::from_mode(0o755))
         .with_context(|| format!("could not make {binary:?} executable"))
-}
-
-#[cfg(not(unix))]
-fn make_executable(_binary: &Path) -> Result<()> {
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -537,7 +530,6 @@ fn make_executable(_binary: &Path) -> Result<()> {
 /// `lock` stays alive until the call - `exec` replaces the process image and
 /// runs no destructors, so the fd (and the lock on it) carries into the new
 /// program.
-#[cfg(unix)]
 fn publish(layout: &Layout, lock: Lock, wrapped: bool) -> Result<()> {
     use std::os::unix::process::CommandExt as _;
 
@@ -561,11 +553,6 @@ fn publish(layout: &Layout, lock: Lock, wrapped: bool) -> Result<()> {
     Err(anyhow!(
         "J'Lo {VERSION} was replaced, but the new binary {binary:?} could not be started: {error}."
     ))
-}
-
-#[cfg(not(unix))]
-fn publish(_layout: &Layout, _lock: Lock, _wrapped: bool) -> Result<()> {
-    bail!("'jlo selfupdate' is not supported on this platform; re-run the installer.")
 }
 
 #[cfg(test)]

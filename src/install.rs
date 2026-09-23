@@ -204,7 +204,6 @@ const LOCK_FILE: &str = ".selfupdate.lock";
 /// only one of them takes guards nothing. The binary, the generated scripts
 /// and the receipt are separate filesystem writes, and no `rename` makes them
 /// one transaction.
-#[cfg(unix)]
 #[derive(Debug)]
 pub(crate) struct Lock {
     /// Never read: the lock lives on the open file description, so holding
@@ -219,7 +218,6 @@ pub(crate) struct Lock {
     path: PathBuf,
 }
 
-#[cfg(unix)]
 impl Lock {
     /// `None` when somebody else holds it. Fails only when the lock file
     /// itself cannot be opened or locked.
@@ -311,31 +309,9 @@ impl Lock {
 /// the unlink and locked it after sees `nlink == 0` in [`Lock::try_acquire`]
 /// and opens the path again, so it can never end up guarding an inode that
 /// nobody else will ever reach.
-#[cfg(unix)]
 impl Drop for Lock {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.path);
-    }
-}
-
-#[cfg(not(unix))]
-#[derive(Debug)]
-pub(crate) struct Lock;
-
-#[cfg(not(unix))]
-impl Lock {
-    pub(crate) fn try_acquire(_home: &Path) -> Result<Option<Self>> {
-        Ok(None)
-    }
-
-    pub(crate) fn acquire(_home: &Path) -> Result<Self> {
-        Err(anyhow!(
-            "J'Lo cannot lock its install directory on this platform."
-        ))
-    }
-
-    pub(crate) fn inherited(_home: &Path) -> Self {
-        Self
     }
 }
 
@@ -830,7 +806,6 @@ unset _jlo_d
 /// An optional convenience, so any failure is a warning. We only ever create or
 /// refresh a symlink that already points at our own binary; an unrelated file,
 /// directory or symlink at that path is left untouched.
-#[cfg(unix)]
 fn ensure_symlink(layout: &Layout) -> Option<PathBuf> {
     let local_bin = std::env::home_dir()?.join(".local").join("bin");
     let link = local_bin.join("jlo");
@@ -865,11 +840,6 @@ fn ensure_symlink(layout: &Layout) -> Option<PathBuf> {
         return None;
     }
     Some(link)
-}
-
-#[cfg(not(unix))]
-fn ensure_symlink(_layout: &Layout) -> Option<PathBuf> {
-    None
 }
 
 // ---------------------------------------------------------------------------
@@ -1610,7 +1580,6 @@ mod tests {
     /// update. This is the other half: that ours is still held after the
     /// `exec`, which is a property of the descriptor rather than of anything
     /// observable from outside.
-    #[cfg(unix)]
     #[test]
     // The underscore says "nothing reads this in production", which is still
     // true; this test reads it precisely because the field's whole purpose is

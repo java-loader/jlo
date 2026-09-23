@@ -209,9 +209,8 @@ pub(crate) fn restore_leading_separator(args: &[String]) -> Vec<String> {
 }
 
 /// Replace the current process with `command`, having set `JAVA_HOME` and
-/// prepended the JDK's `bin` to `PATH`. On Unix this is a real `execvp`, so the
-/// child's exit code and signals propagate transparently.
-#[cfg(unix)]
+/// prepended the JDK's `bin` to `PATH`. A real `execvp`, so the child's exit
+/// code and signals propagate transparently.
 pub(crate) fn exec_command(java_home: &Path, command: &[String]) -> ! {
     use std::os::unix::process::CommandExt;
     use std::process::Command;

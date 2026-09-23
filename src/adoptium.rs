@@ -469,7 +469,7 @@ pub(crate) fn platform() -> String {
 
 fn jdk_os() -> anyhow::Result<&'static str> {
     match env::consts::OS {
-        "linux" | "windows" | "solaris" | "aix" => Ok(env::consts::OS),
+        "linux" | "solaris" | "aix" => Ok(env::consts::OS),
         "macos" => Ok("mac"),
         _ => bail!("unsupported OS: {}", env::consts::OS),
     }

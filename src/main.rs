@@ -1,3 +1,9 @@
+// Linux and macOS are the whole of the supported surface: `exec`, the
+// install lock and `selfupdate`'s handover are Unix system calls, and a build
+// that compiled elsewhere would only fail at run time.
+#[cfg(not(unix))]
+compile_error!("jlo supports Linux and macOS only");
+
 mod adoptium;
 mod cli;
 mod conf;
@@ -256,19 +262,9 @@ fn cmd_exec(client: &AdoptiumClient, args: &[String]) -> Result<(), CommandError
     // No --offline flag on `exec`: the command's whole job is to run
     // something on that JDK, so declining to fetch it would only move the
     // failure. The cascade may therefore reach its last stage here.
-    #[cfg(unix)]
-    {
-        let store = JdkStore::discover()?;
-        let target = resolve::java_home(client, &store, version, false, Verb::Exec)?;
-        shellenv::exec_command(&target.java_home, &command)
-    }
-    // A real `execvp` is Unix-only. Refused here, after the arguments are
-    // checked and before anything is downloaded.
-    #[cfg(not(unix))]
-    {
-        let _ = (client, version, command);
-        Err(anyhow!("'jlo exec' is not supported on this platform").into())
-    }
+    let store = JdkStore::discover()?;
+    let target = resolve::java_home(client, &store, version, false, Verb::Exec)?;
+    shellenv::exec_command(&target.java_home, &command)
 }
 
 /// Print the JDKs Adoptium offers for this machine, newest first, annotated
