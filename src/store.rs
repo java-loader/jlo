@@ -400,9 +400,8 @@ impl JdkStore {
     }
 
     /// Every managed JDK strictly older than the newest managed JDK of its
-    /// name, newest first - the one rule behind [`Self::superseded_count`],
-    /// [`Self::prune`] and the builds `install`/`update` replace, so the hint,
-    /// the deletion and the replacement cannot disagree.
+    /// name, newest first - the one rule behind [`Self::superseded_count`]
+    /// and [`Self::prune`], so the hint and the deletion cannot disagree.
     ///
     /// Grouped by name, not by major: a pre-release sorts above the release
     /// it previews, so a major-keyed group would make the released build
@@ -426,6 +425,25 @@ impl JdkStore {
             }
         }
         Ok(superseded)
+    }
+
+    /// The managed builds of `request` strictly older than `installed` - the
+    /// build this `install`/`update` run put down - newest first.
+    ///
+    /// Bounded by that build, not by the name's current newest: a concurrent
+    /// run may have installed a newer one meanwhile, and measuring against it
+    /// would delete the very build this run exports as `JAVA_HOME`.
+    fn superseded_by(
+        &self,
+        request: Request,
+        installed: &str,
+    ) -> anyhow::Result<Vec<InstalledJdk>> {
+        Ok(self
+            .list()?
+            .into_iter()
+            .filter(|jdk| jdk.managed && jdk.request == request)
+            .filter(|jdk| is_older_than(&jdk.version, installed))
+            .collect())
     }
 
     /// Remove every managed JDK that is not the newest of its name.
@@ -768,7 +786,7 @@ pub(crate) fn install_each(
     let mut installed = Vec::new();
     for (request, metadata) in offered {
         match install_latest(client, store, request, &metadata) {
-            Ok(Some(build)) => installed.push((request, build)),
+            Ok(Some(java_home)) => installed.push((request, metadata.semver, java_home)),
             Ok(None) => {}
             Err(e) => {
                 // Stop, as a failed download always has - but keep what the
@@ -781,14 +799,8 @@ pub(crate) fn install_each(
 
     let mut repointed = None;
     let mut doomed = Vec::new();
-    for (request, java_home) in &installed {
-        // The build just installed is newer than every install of its name,
-        // so it is the head `superseded` measures the name's builds against.
-        let superseded = store.superseded().map(|all| {
-            let mut builds: Vec<InstalledJdk> = all
-                .into_iter()
-                .filter(|old| old.request == *request)
-                .collect();
+    for (request, version, java_home) in &installed {
+        let superseded = store.superseded_by(*request, version).map(|mut builds| {
             let live = builds.iter().position(|old| {
                 active.is_some_and(|active| owns(&store.base.join(&old.version), active))
             });
@@ -1074,8 +1086,9 @@ fn base_dir_for(os: &str, home: &Path) -> PathBuf {
 
 /// Whether `version` is strictly older than `newest`. The single definition
 /// behind every "superseded" decision - [`JdkStore::superseded`], which
-/// `prune`, the superseded hint and the builds `install`/`update` replace all
-/// share, [`supersedes_every_install`] and `install_latest`'s "the offer is behind
+/// `prune` and the superseded hint share, [`JdkStore::superseded_by`], which
+/// `install`/`update` replace by, [`supersedes_every_install`] and
+/// `install_latest`'s "the offer is behind
 /// the store" - so the hint that offers a deletion, the listing and the
 /// deletion itself can never disagree. Two spellings of one version compare
 /// equal, so neither is older; a name that does not parse is never older,
@@ -1907,7 +1920,9 @@ mod tests {
 
     /// What `jlo update` deletes after installing `21.0.5+11`: every older
     /// managed build of *that name* - and nothing of the sibling stream,
-    /// nothing unmanaged, nothing newer.
+    /// nothing unmanaged, nothing newer. `21.0.7+6` stands for a concurrent
+    /// run that installed past this one: measured against it, `21.0.5+11` -
+    /// the build this run exports - would be deleted too.
     #[test]
     fn an_update_supersedes_the_older_builds_of_its_name_only() {
         let dir = tempdir().unwrap();
@@ -1916,9 +1931,12 @@ mod tests {
         create_jdk_dir(base, "21.0.3+9", true);
         create_jdk_dir(base, "21.0.2+13", false);
         create_jdk_dir(base, "21.0.5+11", true);
+        create_jdk_dir(base, "21.0.7+6", true);
         create_jdk_dir(base, "21.0.0-beta+4.0.ea", true);
 
-        let superseded = JdkStore::at(base).superseded().unwrap();
+        let superseded = JdkStore::at(base)
+            .superseded_by(request("21"), "21.0.5+11")
+            .unwrap();
 
         let names: Vec<_> = superseded.iter().map(|jdk| jdk.version.as_str()).collect();
         assert_eq!(names, vec!["21.0.3+9", "21.0.1+12"]);
