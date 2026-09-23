@@ -569,7 +569,7 @@ fn write_layout(layout: &Layout) -> Result<()> {
         compat_autoload_sh(layout).as_bytes(),
     )?;
 
-    write_completions(layout);
+    let mut partial = write_completions(layout);
 
     // The one file a user cannot skip: it defines the wrapper function and
     // exports the JLO_HOME the rest of the layout hangs off. A failure here
@@ -578,7 +578,6 @@ fn write_layout(layout: &Layout) -> Result<()> {
     write_atomic(&layout.home.join("jlo.sh"), jlo_sh(layout).as_bytes())
         .context("could not write jlo.sh; J'Lo cannot be loaded from your shell profile.")?;
 
-    let mut partial = false;
     if let Err(e) = write_atomic(
         &layout.home.join("autoload.sh"),
         autoload_sh(layout).as_bytes(),
@@ -593,32 +592,28 @@ fn write_layout(layout: &Layout) -> Result<()> {
         ui::warning!("{e:#} Tab completion is unavailable.");
         partial = true;
     }
+    // One recovery line for every optional file that did not land, however
+    // many of them failed.
     if partial {
-        hint_at_the_repair();
+        ui::hint!("Re-run the installer once that path is writable to restore it.");
     }
     Ok(())
-}
-
-/// The one recovery line, printed wherever something optional did not land.
-/// Shared so the completion scripts and the stubs cannot drift into saying it
-/// differently, or one of them into not saying it at all.
-fn hint_at_the_repair() {
-    ui::hint!("Re-run the installer once that path is writable to restore it.");
 }
 
 /// Completion scripts, generated from this binary's own clap tree.
 ///
 /// Written at install time rather than loaded via `source <(jlo completions
 /// bash)` so that shell startup costs no subprocess. A failure is a
-/// convenience lost, not a broken install.
-fn write_completions(layout: &Layout) {
+/// convenience lost, not a broken install: it is warned about here, and
+/// reported as `true` so the caller prints the one repair hint for every
+/// optional file that did not land.
+fn write_completions(layout: &Layout) -> bool {
     if let Err(e) = fs::create_dir_all(&layout.completions) {
         ui::warning!(
             "could not create {:?}: {e}. Shell completions are unavailable.",
             layout.completions
         );
-        hint_at_the_repair();
-        return;
+        return true;
     }
     let mut partial = false;
     for (shell, name) in [
@@ -631,9 +626,7 @@ fn write_completions(layout: &Layout) {
             partial = true;
         }
     }
-    if partial {
-        hint_at_the_repair();
-    }
+    partial
 }
 
 // ---------------------------------------------------------------------------
