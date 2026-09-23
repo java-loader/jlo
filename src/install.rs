@@ -656,16 +656,26 @@ fn init_stub(layout: &Layout, note: &str) -> String {
 {DIALECT_DISPATCH}\
 _jlo_rc=0
 if [ -n \"$_jlo_d\" ]; then
-  if [ -s \"$JLO_HOME/bin/jlo-init.$_jlo_d\" ] && [ -r \"$JLO_HOME/bin/jlo-init.$_jlo_d\" ]; then
-    . \"$JLO_HOME/bin/jlo-init.$_jlo_d\" || _jlo_rc=$?
-  else
-    _jlo_rc=1
-  fi
+{load}
 fi
 unset _jlo_d
 {RETURN_STATUS}",
-        home = sq(&display(&layout.home))
+        home = sq(&display(&layout.home)),
+        load = guarded_source("\"$JLO_HOME/bin/jlo-init.$_jlo_d\"", None),
     )
+}
+
+/// Source `path` - a shell word, quoted by the caller - with its failure, or a
+/// missing target, left in `_jlo_rc` for [`RETURN_STATUS`], and `marker` set
+/// only once it has actually loaded. Indented for a block one level deep.
+fn guarded_source(path: &str, marker: Option<&str>) -> String {
+    let load = match marker {
+        None => format!("    . {path} || _jlo_rc=$?\n"),
+        Some(marker) => {
+            format!("    if . {path}; then\n      {marker}=1\n    else\n      _jlo_rc=$?\n    fi\n")
+        }
+    };
+    format!("  if [ -s {path} ] && [ -r {path} ]; then\n{load}  else\n    _jlo_rc=1\n  fi")
 }
 
 /// The comment the two shims carry: what they are, why they exist, and when
@@ -729,20 +739,13 @@ fn autoload_stub(layout: &Layout, note: &str) -> String {
 _jlo_rc=0
 if [ -n \"$_jlo_d\" ] && typeset -f jlo >/dev/null 2>&1; then
   _jlo_f={prefix}\"$_jlo_d\"
-  if [ -s \"$_jlo_f\" ] && [ -r \"$_jlo_f\" ]; then
-    if . \"$_jlo_f\"; then
-      {AUTOLOAD_MARKER}=1
-    else
-      _jlo_rc=$?
-    fi
-  else
-    _jlo_rc=1
-  fi
+{load}
   unset _jlo_f
 fi
 unset _jlo_d
 {RETURN_STATUS}",
-        prefix = sq(&display(&layout.bin.join("jlo-autoload.")))
+        prefix = sq(&display(&layout.bin.join("jlo-autoload."))),
+        load = guarded_source("\"$_jlo_f\"", Some(AUTOLOAD_MARKER)),
     )
 }
 
@@ -762,15 +765,7 @@ fn completions_sh(layout: &Layout) -> String {
 {DIALECT_DISPATCH}\
 _jlo_rc=0
 if [ \"$_jlo_d\" = bash ]; then
-  if [ -s {comp_bash} ] && [ -r {comp_bash} ]; then
-    if . {comp_bash}; then
-      {COMPLETIONS_MARKER}=1
-    else
-      _jlo_rc=$?
-    fi
-  else
-    _jlo_rc=1
-  fi
+{load_bash}
 fi
 if [ \"$_jlo_d\" = zsh ]; then
   if [ -s {comp_zsh} ] && [ -r {comp_zsh} ]; then
@@ -800,7 +795,10 @@ if [ \"$_jlo_d\" = zsh ]; then
 fi
 unset _jlo_d
 {RETURN_STATUS}",
-        comp_bash = sq(&display(&layout.completions.join("jlo.bash"))),
+        load_bash = guarded_source(
+            &sq(&display(&layout.completions.join("jlo.bash"))),
+            Some(COMPLETIONS_MARKER)
+        ),
         comp_zsh = sq(&display(&layout.completions.join("_jlo"))),
         comp_dir = sq(&display(&layout.completions)),
     )
