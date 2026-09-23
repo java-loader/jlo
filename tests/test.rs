@@ -122,64 +122,42 @@ fn removed_and_hidden_names_are_nowhere_to_be_found() {
     }
 }
 
+/// The whole point of the flag: an agent or a CI step can ask "is this JDK
+/// here?" without risking a several-hundred-megabyte answer. The API URL
+/// points at a port nothing listens on, so a network attempt would surface as
+/// a connection error rather than this message - and major 99 does not exist,
+/// so no real install can satisfy it either.
+///
+/// For `env` it is also the autoload hook's contract: entering a directory
+/// whose .jlorc pins an uninstalled version must cost nothing. Empty stdout is
+/// the load-bearing half - the hook *sources* this stream, so a decline that
+/// emitted a partial export would leave the shell worse off than one that
+/// emitted none.
 #[test]
-fn home_offline_fails_without_touching_the_network() {
-    // The whole point of the flag: an agent or a CI step can ask "is this
-    // JDK here?" without risking a several-hundred-megabyte answer. The API
-    // URL points at a port nothing listens on, so a network attempt would
-    // surface as a connection error rather than this message - and major 99
-    // does not exist, so no real install can satisfy it either.
-    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
-    cmd.args(["home", "--offline", "99"])
-        .env("JLO_ADOPTIUM_API_URL", "http://127.0.0.1:1")
-        .assert()
-        .failure()
-        .code(1)
-        .stdout(predicate::str::is_empty())
-        .stderr(predicate::str::contains("no installed JDK matches Java 99"))
-        .stderr(predicate::str::contains("without --offline"));
-}
-
-/// The autoload hook's contract, checked at the binary rather than through a
-/// shell: entering a directory whose .jlorc pins an uninstalled version must
-/// cost nothing. Empty stdout is the load-bearing half - the hook *sources*
-/// this stream, so a decline that emitted a partial export would leave the
-/// shell worse off than one that emitted none.
-#[test]
-fn env_offline_fails_without_touching_the_network() {
-    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
-    cmd.args(["env", "--offline", "99"])
-        .env("JLO_ADOPTIUM_API_URL", "http://127.0.0.1:1")
-        .assert()
-        .failure()
-        .code(1)
-        .stdout(predicate::str::is_empty())
-        .stderr(predicate::str::contains("no installed JDK matches Java 99"))
-        .stderr(predicate::str::contains(
-            "Run 'jlo env 99' without --offline to install it.",
-        ));
-}
-
-#[test]
-fn remove_refuses_a_version_that_is_not_installed() {
-    // Major 99 is not a real release, so this exercises the refusal without
-    // depending on - or touching - whatever the host has installed.
-    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
-    cmd.args(["remove", "99"])
-        .env("JLO_ADOPTIUM_API_URL", "http://127.0.0.1:1")
-        .assert()
-        .failure()
-        .code(1)
-        .stderr(predicate::str::contains("no installed JDK matches '99'"))
-        .stderr(predicate::str::contains("Nothing was removed"))
-        .stderr(predicate::str::contains("jlo list --offline"));
+fn offline_fails_without_touching_the_network() {
+    for verb in ["home", "env"] {
+        Command::cargo_bin("jlo-bin")
+            .unwrap()
+            .args([verb, "--offline", "99"])
+            .env("JLO_ADOPTIUM_API_URL", "http://127.0.0.1:1")
+            .assert()
+            .failure()
+            .code(1)
+            .stdout(predicate::str::is_empty())
+            .stderr(predicate::str::contains("no installed JDK matches Java 99"))
+            .stderr(predicate::str::contains(format!(
+                "Run 'jlo {verb} 99' without --offline to install it."
+            )));
+    }
 }
 
 #[test]
 fn remove_names_every_version_that_missed_in_one_message() {
-    // None of 97, 98, 99 is a real release. All three have to be named at
-    // once: since the rule is that none of them ran, reporting only the
-    // first would send the user through one rerun per typo.
+    // None of 97, 98, 99 is a real release, so this exercises the refusal
+    // without depending on - or touching - whatever the host has installed.
+    // All three have to be named at once: since the rule is that none of
+    // them ran, reporting only the first would send the user through one
+    // rerun per typo.
     let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
     cmd.args(["remove", "97", "98", "99"])
         .env("JLO_ADOPTIUM_API_URL", "http://127.0.0.1:1")
@@ -189,7 +167,8 @@ fn remove_names_every_version_that_missed_in_one_message() {
         .stderr(predicate::str::contains(
             "no installed JDK matches '97', '98' or '99'",
         ))
-        .stderr(predicate::str::contains("Nothing was removed"));
+        .stderr(predicate::str::contains("Nothing was removed"))
+        .stderr(predicate::str::contains("jlo list --offline"));
 }
 
 #[test]
@@ -273,15 +252,9 @@ fn install_rejects_an_invalid_version_without_writing_to_stdout() {
 /// `install` has no --offline flag, so there is nothing to stop it earlier.
 #[test]
 fn install_without_a_version_falls_through_to_the_latest_release() {
-    let home = tempfile::tempdir().unwrap();
-    let project = tempfile::tempdir().unwrap();
+    let (home, project) = store_fixture(&[]);
 
-    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
-    cmd.arg("install")
-        .current_dir(project.path())
-        .env("HOME", home.path())
-        .env("JLO_HOME", home.path().join(".jlo"))
-        .env("JLO_ADOPTIUM_API_URL", "http://127.0.0.1:1")
+    fixture_cmd(home.path(), &project, &["install"])
         .assert()
         .failure()
         .code(1)
@@ -1161,13 +1134,7 @@ fn env_does_not_let_a_hostile_path_execute_when_evaluated() {
     let payload = format!("$(touch '{}')", marker.display());
     let input_path = format!("/usr/bin:/bin:{payload}");
 
-    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
-    let assert = cmd
-        .arg("env")
-        .current_dir(&project)
-        .env("HOME", home.path())
-        .env("JLO_HOME", home.path().join(".jlo"))
-        .env("JLO_ADOPTIUM_API_URL", "http://127.0.0.1:1")
+    let assert = fixture_cmd(home.path(), &project, &["env"])
         .env("PATH", &input_path)
         .assert()
         .success()
@@ -1256,9 +1223,8 @@ fn env_survives_a_reader_that_stops_early() {
 // (`VER=$(jlo current)` must get the answer and nothing else), so a combined
 // assertion would pass with them swapped.
 //
-// Offline by construction - nothing here needs JLO_ADOPTIUM_API_URL - and
-// `current_never_touches_the_network` pins that down by pointing the client at
-// a dead port.
+// Offline by construction, which `current_never_touches_the_network` pins down
+// by pointing the client at a dead port itself.
 
 /// A temp `$HOME` holding the named JDK installs, plus the project directory
 /// the command runs from. The project sits *inside* `$HOME` so the `.jlorc`
@@ -1275,15 +1241,17 @@ fn store_fixture(versions: &[&str]) -> (tempfile::TempDir, std::path::PathBuf) {
     (home, project)
 }
 
-/// Every `jlo current` invocation starts from a shell that inherits nothing:
-/// `$JLO_HOME` points at a directory with no default.jlorc, so "nothing
-/// configured" is genuinely nothing.
-fn current_cmd(home: &std::path::Path, project: &std::path::Path) -> Command {
+/// `jlo-bin <args>` run from a [`store_fixture`] project, from a shell that
+/// inherits nothing: `$JLO_HOME` points at a directory with no default.jlorc,
+/// so "nothing configured" is genuinely nothing, and the network is wired to
+/// fail.
+fn fixture_cmd(home: &std::path::Path, project: &std::path::Path, args: &[&str]) -> Command {
     let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
-    cmd.arg("current")
+    cmd.args(args)
         .current_dir(project)
         .env("HOME", home)
         .env("JLO_HOME", home.join(".jlo"))
+        .env("JLO_ADOPTIUM_API_URL", "http://127.0.0.1:1")
         .env_remove("JAVA_HOME");
     cmd
 }
@@ -1294,7 +1262,7 @@ fn current_cmd(home: &std::path::Path, project: &std::path::Path) -> Command {
 fn current_without_java_home_has_no_answer() {
     let (home, project) = store_fixture(&["25.0.4+101"]);
 
-    current_cmd(home.path(), &project)
+    fixture_cmd(home.path(), &project, &["current"])
         .assert()
         .failure()
         .code(1)
@@ -1312,7 +1280,7 @@ fn current_warns_but_still_answers_when_the_config_disagrees() {
     let (home, project) = store_fixture(&["25.0.4+101"]);
     std::fs::write(project.join(".jlorc"), "21\n").unwrap();
 
-    current_cmd(home.path(), &project)
+    fixture_cmd(home.path(), &project, &["current"])
         .env("JAVA_HOME", jdk_store_in(home.path()).join("25.0.4+101"))
         .assert()
         .success()
@@ -1332,7 +1300,7 @@ fn current_reports_a_removed_install_rather_than_calling_it_foreign() {
     let jdk = jdk_store_in(home.path()).join("25.0.4+101");
     std::fs::remove_dir_all(&jdk).unwrap();
 
-    current_cmd(home.path(), &project)
+    fixture_cmd(home.path(), &project, &["current"])
         .env("JAVA_HOME", &jdk)
         .assert()
         .failure()
@@ -1351,7 +1319,7 @@ fn current_reports_a_removed_install_rather_than_calling_it_foreign() {
 fn current_never_touches_the_network() {
     let (home, project) = store_fixture(&["25.0.4+101"]);
 
-    current_cmd(home.path(), &project)
+    fixture_cmd(home.path(), &project, &["current"])
         .env("JAVA_HOME", jdk_store_in(home.path()).join("25.0.4+101"))
         .env("JLO_ADOPTIUM_API_URL", "http://127.0.0.1:1")
         .assert()
@@ -1373,13 +1341,7 @@ fn env_writes_exports_to_stdout_and_nothing_to_stderr() {
     let (home, project) = store_fixture(&["25.0.4+101"]);
     std::fs::write(project.join(".jlorc"), "25\n").unwrap();
 
-    Command::cargo_bin("jlo-bin")
-        .unwrap()
-        .args(["env", "--offline"])
-        .current_dir(&project)
-        .env("HOME", home.path())
-        .env("JLO_HOME", home.path().join(".jlo"))
-        .env_remove("JAVA_HOME")
+    fixture_cmd(home.path(), &project, &["env", "--offline"])
         .env("PATH", "/usr/bin")
         .assert()
         .success()
@@ -1389,100 +1351,74 @@ fn env_writes_exports_to_stdout_and_nothing_to_stderr() {
 }
 
 // -- the pre-bundle macOS layout --
-//
-// `store_fixture` builds a flat install carrying the in-directory marker,
-// which is exactly what jlo wrote before it kept the macOS bundle. Both tests
-// pass the same fixture and the same `--offline`, and differ only in the verb:
-// that is the whole of the rule, so they are worth having as a pair.
 
-/// A person asking where a JDK is gets told when that JDK is one
-/// `/usr/libexec/java_home` cannot see. On stderr, so `JH=$(jlo home 25)`
-/// still gets only the path.
+/// `store_fixture` builds a flat install carrying the in-directory marker,
+/// which is exactly what jlo wrote before it kept the macOS bundle. A person
+/// asking where a JDK is gets told when that JDK is one
+/// `/usr/libexec/java_home` cannot see - on stderr, so `JH=$(jlo home 25)`
+/// still gets only the path. Every row is the same fixture; they differ only
+/// in the verb and the funnel it resolves through.
 #[test]
 #[cfg(target_os = "macos")]
-fn home_warns_that_a_pre_bundle_install_is_invisible_to_java_home() {
-    let (home, project) = store_fixture(&["25.0.4+101"]);
+fn a_pre_bundle_install_is_warned_about_everywhere_but_the_autoload_hook() {
+    for (args, stdout, warns, why) in [
+        (
+            &["home", "--offline", "25"][..],
+            "25.0.4+101",
+            true,
+            "the offline funnel",
+        ),
+        (
+            &["home", "25"],
+            "25.0.4+101",
+            true,
+            // An installed JDK is answered before the client is ever used,
+            // which is why the dead API URL is enough. Without this row the
+            // online path could lose the warning with every test still green.
+            "the online funnel",
+        ),
+        (
+            &["env", "25"],
+            "export JAVA_HOME=",
+            true,
+            // Only `env --offline` is the hook; a rule that silenced every
+            // `env` would pass the other rows and fail this one.
+            "online env",
+        ),
+        (
+            &["env", "--offline", "25"],
+            "export JAVA_HOME=",
+            false,
+            // How the autoload hook runs, on every new shell and every `cd`:
+            // a warning there would print forever and train the user to
+            // ignore it.
+            "the autoload hook",
+        ),
+    ] {
+        let (home, project) = store_fixture(&["25.0.4+101"]);
+        let out = fixture_cmd(home.path(), &project, args)
+            .env("PATH", "/usr/bin")
+            .output()
+            .unwrap();
+        let (out_s, err_s) = (
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr),
+        );
 
-    Command::cargo_bin("jlo-bin")
-        .unwrap()
-        .args(["home", "--offline", "25"])
-        .current_dir(&project)
-        .env("HOME", home.path())
-        .env("JLO_HOME", home.path().join(".jlo"))
-        .env("JLO_ADOPTIUM_API_URL", "http://127.0.0.1:1")
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("25.0.4+101"))
-        .stderr(predicate::str::contains("java_home"))
-        .stderr(predicate::str::contains("jlo install 25"));
-}
-
-/// The other funnel. `home` without `--offline` resolves through
-/// `resolve_java_home`, and an installed JDK is answered before the client is
-/// ever used - which is why a dead API URL is enough here. Without this the
-/// online path could lose the warning with every test still green.
-#[test]
-#[cfg(target_os = "macos")]
-fn the_online_funnel_warns_about_a_pre_bundle_install_too() {
-    let (home, project) = store_fixture(&["25.0.4+101"]);
-
-    Command::cargo_bin("jlo-bin")
-        .unwrap()
-        .args(["home", "25"])
-        .current_dir(&project)
-        .env("HOME", home.path())
-        .env("JLO_HOME", home.path().join(".jlo"))
-        .env("JLO_ADOPTIUM_API_URL", "http://127.0.0.1:1")
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("25.0.4+101"))
-        .stderr(predicate::str::contains("java_home"));
-}
-
-/// The online `env` path warns too. Only `env --offline` is the autoload hook
-/// and stays silent; a rule that silenced every `env` would pass the pair
-/// above and this would catch it.
-#[test]
-#[cfg(target_os = "macos")]
-fn online_env_warns_about_a_pre_bundle_install() {
-    let (home, project) = store_fixture(&["25.0.4+101"]);
-
-    Command::cargo_bin("jlo-bin")
-        .unwrap()
-        .args(["env", "25"])
-        .current_dir(&project)
-        .env("HOME", home.path())
-        .env("JLO_HOME", home.path().join(".jlo"))
-        .env_remove("JAVA_HOME")
-        .env("PATH", "/usr/bin")
-        .env("JLO_ADOPTIUM_API_URL", "http://127.0.0.1:1")
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("export JAVA_HOME="))
-        .stderr(predicate::str::contains("java_home"));
-}
-
-/// The same install, the same flag, the other verb - and silence. `env
-/// --offline` is how the autoload hook runs, on every new shell and every
-/// `cd`; a warning there would print forever and train the user to ignore it.
-#[test]
-#[cfg(target_os = "macos")]
-fn env_offline_stays_silent_about_a_pre_bundle_install() {
-    let (home, project) = store_fixture(&["25.0.4+101"]);
-
-    Command::cargo_bin("jlo-bin")
-        .unwrap()
-        .args(["env", "--offline", "25"])
-        .current_dir(&project)
-        .env("HOME", home.path())
-        .env("JLO_HOME", home.path().join(".jlo"))
-        .env_remove("JAVA_HOME")
-        .env("PATH", "/usr/bin")
-        .env("JLO_ADOPTIUM_API_URL", "http://127.0.0.1:1")
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("export JAVA_HOME="))
-        .stderr(predicate::str::is_empty());
+        assert!(out.status.success(), "{why} {args:?}: {err_s}");
+        assert!(out_s.contains(stdout), "{why} {args:?}: {out_s:?}");
+        if warns {
+            assert!(
+                err_s.contains("java_home") && err_s.contains("jlo install 25"),
+                "{why} {args:?} must warn: {err_s:?}"
+            );
+        } else {
+            assert!(
+                err_s.is_empty(),
+                "{why} {args:?} must stay silent: {err_s:?}"
+            );
+        }
+    }
 }
 
 // -- every rule survives without colour --
@@ -1583,18 +1519,6 @@ fn a_deletion_report_reads_the_same_with_colour_off() {
 // points `JLO_ADOPTIUM_API_URL` at a port nothing listens on, which turns
 // "no network access" into an assertion rather than a claim.
 
-/// A command run against a fixture store, with the network wired to fail.
-fn cascade_cmd(home: &std::path::Path, project: &std::path::Path, args: &[&str]) -> Command {
-    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
-    cmd.args(args)
-        .current_dir(project)
-        .env("HOME", home)
-        .env("JLO_HOME", home.join(".jlo"))
-        .env("JLO_ADOPTIUM_API_URL", "http://127.0.0.1:1")
-        .env_remove("JAVA_HOME");
-    cmd
-}
-
 fn installed_path(home: &std::path::Path, version: &str) -> String {
     format!("{}\n", jdk_store_in(home).join(version).display())
 }
@@ -1606,7 +1530,7 @@ fn installed_path(home: &std::path::Path, version: &str) -> String {
 fn a_bare_command_reaches_for_the_latest_release_when_nothing_is_installed() {
     let (home, project) = store_fixture(&[]);
 
-    cascade_cmd(home.path(), &project, &["home"])
+    fixture_cmd(home.path(), &project, &["home"])
         .assert()
         .failure()
         .code(1)
@@ -1621,7 +1545,7 @@ fn a_bare_command_reaches_for_the_latest_release_when_nothing_is_installed() {
 fn home_resolves_the_newest_installed_jdk() {
     let (home, project) = store_fixture(&["17.0.11+9", "21.0.5+11"]);
 
-    cascade_cmd(home.path(), &project, &["home"])
+    fixture_cmd(home.path(), &project, &["home"])
         .assert()
         .success()
         .code(0)
@@ -1635,7 +1559,7 @@ fn home_resolves_the_newest_installed_jdk() {
 fn env_resolves_the_newest_installed_jdk_and_exports_only_that() {
     let (home, project) = store_fixture(&["21.0.5+11"]);
 
-    cascade_cmd(home.path(), &project, &["env", "--offline"])
+    fixture_cmd(home.path(), &project, &["env", "--offline"])
         .assert()
         .success()
         .code(0)
@@ -1648,7 +1572,7 @@ fn env_resolves_the_newest_installed_jdk_and_exports_only_that() {
         .stderr(predicate::str::is_empty());
 
     // For the wrapper: the same statements, `&&`-joined and marked.
-    cascade_cmd(home.path(), &project, &["__wrapped", "env", "--offline"])
+    fixture_cmd(home.path(), &project, &["__wrapped", "env", "--offline"])
         .assert()
         .success()
         .stdout(
@@ -1666,7 +1590,7 @@ fn env_resolves_the_newest_installed_jdk_and_exports_only_that() {
 fn exec_resolves_the_newest_installed_jdk_for_the_child() {
     let (home, project) = store_fixture(&["21.0.5+11"]);
 
-    cascade_cmd(
+    fixture_cmd(
         home.path(),
         &project,
         &["exec", "--", "sh", "-c", "echo \"$JAVA_HOME\""],
@@ -1684,7 +1608,7 @@ fn exec_resolves_the_newest_installed_jdk_for_the_child() {
 fn bare_env_offline_ignores_an_ea_install() {
     let (home, project) = store_fixture(&["28.0.0-beta+16.0.ea"]);
 
-    cascade_cmd(home.path(), &project, &["env", "--offline"])
+    fixture_cmd(home.path(), &project, &["env", "--offline"])
         .assert()
         .failure()
         .stdout("");
@@ -1710,7 +1634,7 @@ fn install_resolves_the_newest_installed_jdk() {
 
     let (home, project) = store_fixture(&["21.0.5+11"]);
 
-    cascade_cmd(home.path(), &project, &["install"])
+    fixture_cmd(home.path(), &project, &["install"])
         .env("JLO_ADOPTIUM_API_URL", server.url())
         .assert()
         .success()
@@ -1752,7 +1676,7 @@ fn a_bare_update_asks_about_every_installed_name() {
     let (home, project) = store_fixture(&["17.0.11+10", "21.0.11+10", "28.0.0-beta+16.0.ea"]);
     std::fs::write(project.join(".jlorc"), "25").unwrap();
 
-    cascade_cmd(home.path(), &project, &["update"])
+    fixture_cmd(home.path(), &project, &["update"])
         .env("JLO_ADOPTIUM_API_URL", server.url())
         .assert()
         .success()

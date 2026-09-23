@@ -1442,44 +1442,64 @@ fn a_stale_receipt_makes_the_next_invocation_rewrite_the_files() {
 /// The guard that keeps the self-heal from reaching into an install this
 /// binary is not. Without it every `cargo test` run - and every developer
 /// build executed from `target/` - would rewrite the real `~/.jlo`.
+///
+/// Two halves: the binary path, and the `$JLO_HOME`. The binary path can line
+/// up while the receipt describes a different `$JLO_HOME` - a copied install,
+/// or one reached through a `JLO_HOME` pointing elsewhere - and rewriting the
+/// original's scripts from there is exactly the clobber the guard exists for.
 #[test]
-fn a_receipt_naming_a_different_binary_is_left_alone() {
-    let (dir, _) = install(None);
-    let home = dir.path().join("home");
-    let jlo = home.join(".jlo");
-    let receipt = jlo.join("install-receipt.json");
+fn a_receipt_naming_another_install_is_left_alone() {
+    for (field, theirs, what) in [
+        (
+            "binary",
+            "/somewhere/else/jlo-bin",
+            "an install the receipt says belongs to another path",
+        ),
+        (
+            "jlo_home",
+            "/somewhere/else",
+            "a layout whose receipt describes another JLO_HOME",
+        ),
+    ] {
+        let (dir, _) = install(None);
+        let home = dir.path().join("home");
+        let jlo = home.join(".jlo");
+        let receipt = jlo.join("install-receipt.json");
+        let ours = match field {
+            "binary" => jlo.join("bin/jlo-bin"),
+            _ => jlo.clone(),
+        };
 
-    let body = std::fs::read_to_string(&receipt).unwrap();
-    let foreign = body
-        .replacen(
-            &format!("\"version\": \"{}\"", env!("CARGO_PKG_VERSION")),
-            "\"version\": \"0.0.1-stale\"",
-            1,
-        )
-        .replacen(
-            &format!("\"binary\": \"{}\"", jlo.join("bin/jlo-bin").display()),
-            "\"binary\": \"/somewhere/else/jlo-bin\"",
-            1,
+        let body = std::fs::read_to_string(&receipt).unwrap();
+        let foreign = body
+            .replacen(
+                &format!("\"version\": \"{}\"", env!("CARGO_PKG_VERSION")),
+                "\"version\": \"0.0.1-stale\"",
+                1,
+            )
+            .replacen(
+                &format!("\"{field}\": \"{}\"", ours.display()),
+                &format!("\"{field}\": \"{theirs}\""),
+                1,
+            );
+        assert!(foreign.contains(theirs), "{field}: receipt shape changed");
+        std::fs::write(&receipt, &foreign).unwrap();
+        std::fs::remove_file(jlo.join("jlo.sh")).unwrap();
+
+        let out = Command::new(jlo.join("bin").join("jlo-bin"))
+            .arg("--version")
+            .env("HOME", &home)
+            .env("JLO_HOME", &jlo)
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        assert!(!jlo.join("jlo.sh").exists(), "the binary rewrote {what}");
+        assert_eq!(
+            std::fs::read_to_string(&receipt).unwrap(),
+            foreign,
+            "{field}: the receipt of a foreign install was overwritten"
         );
-    std::fs::write(&receipt, &foreign).unwrap();
-    std::fs::remove_file(jlo.join("jlo.sh")).unwrap();
-
-    let out = Command::new(jlo.join("bin").join("jlo-bin"))
-        .arg("--version")
-        .env("HOME", &home)
-        .env("JLO_HOME", &jlo)
-        .output()
-        .unwrap();
-    assert!(out.status.success());
-    assert!(
-        !jlo.join("jlo.sh").exists(),
-        "the binary rewrote an install the receipt says belongs to another path"
-    );
-    assert_eq!(
-        std::fs::read_to_string(&receipt).unwrap(),
-        foreign,
-        "the receipt of a foreign install was overwritten"
-    );
+    }
 }
 
 /// The detection reads the profile, and a commented-out line is not an active
@@ -1674,46 +1694,6 @@ fn an_already_correct_symlink_is_not_recreated() {
         (before.ino(), before.dev()),
         (after.ino(), after.dev()),
         "the installer replaced a symlink that was already right"
-    );
-}
-
-/// The other half of the ownership check. The binary path can line up while
-/// the receipt describes a different `$JLO_HOME` - a copied install, or one
-/// reached through a `JLO_HOME` pointing elsewhere - and rewriting the
-/// original's scripts from there is exactly the clobber the guard exists for.
-#[test]
-fn a_receipt_naming_a_different_jlo_home_is_left_alone() {
-    let (dir, _) = install(None);
-    let home = dir.path().join("home");
-    let jlo = home.join(".jlo");
-    let receipt = jlo.join("install-receipt.json");
-
-    let body = std::fs::read_to_string(&receipt).unwrap();
-    let foreign = body
-        .replacen(
-            &format!("\"version\": \"{}\"", env!("CARGO_PKG_VERSION")),
-            "\"version\": \"0.0.1-stale\"",
-            1,
-        )
-        .replacen(
-            &format!("\"jlo_home\": \"{}\"", jlo.display()),
-            "\"jlo_home\": \"/somewhere/else\"",
-            1,
-        );
-    assert!(foreign.contains("/somewhere/else"), "receipt shape changed");
-    std::fs::write(&receipt, &foreign).unwrap();
-    std::fs::remove_file(jlo.join("jlo.sh")).unwrap();
-
-    let out = Command::new(jlo.join("bin").join("jlo-bin"))
-        .arg("--version")
-        .env("HOME", &home)
-        .env("JLO_HOME", &jlo)
-        .output()
-        .unwrap();
-    assert!(out.status.success());
-    assert!(
-        !jlo.join("jlo.sh").exists(),
-        "the binary rewrote a layout whose receipt describes another JLO_HOME"
     );
 }
 
