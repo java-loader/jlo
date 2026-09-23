@@ -8,10 +8,65 @@ use std::env;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Component, Path};
-use ureq::Agent;
 use ureq::tls::{RootCerts, TlsConfig, TlsProvider};
+use ureq::{Agent, Body};
 
 const USER_AGENT: &str = concat!("J'Lo/", env!("CARGO_PKG_VERSION"));
+
+/// The HTTP agent every remote jlo talks to is reached through.
+///
+/// Statuses are inspected by the callers, so keep ureq from turning a non-2xx
+/// response into an error and losing the message wording. ureq defaults its
+/// TLS provider to Rustls regardless of which TLS feature is enabled, and
+/// panics on the first https request if that provider was not compiled in. It
+/// also defaults to bundled Mozilla roots. Select native-tls with the platform
+/// trust store, which is what jlo has always used and what TLS-intercepting
+/// corporate proxies need.
+pub(crate) fn agent() -> Agent {
+    Agent::config_builder()
+        .user_agent(USER_AGENT)
+        .http_status_as_error(false)
+        .tls_config(
+            TlsConfig::builder()
+                .provider(TlsProvider::NativeTls)
+                .root_certs(RootCerts::PlatformVerifier)
+                .build(),
+        )
+        .build()
+        .into()
+}
+
+/// Stream a response body into `file`, reporting progress to `ui`, and return
+/// the SHA256 of what was written as lowercase hex. Comparing it is left to the
+/// caller, which knows what to name in the mismatch.
+pub(crate) fn stream_hashed(
+    body: &mut Body,
+    file: &mut File,
+    ui: &InstallUi,
+) -> anyhow::Result<String> {
+    let total_size = body
+        .content_length()
+        .context("could not determine the download size: no Content-Length header")?;
+    ui.start_download(total_size);
+
+    let mut hasher = Sha256::new();
+    let mut downloaded: u64 = 0;
+    let mut buffer = [0; 8192];
+    let mut reader = body.as_reader();
+    loop {
+        let n = reader
+            .read(&mut buffer)
+            .context("could not read package data from the response")?;
+        if n == 0 {
+            break;
+        }
+        file.write_all(&buffer[..n])?;
+        downloaded += n as u64;
+        ui.set_downloaded(downloaded);
+        hasher.update(&buffer[..n]);
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
 
 #[derive(Debug)]
 pub(crate) struct JdkMetadata {
@@ -190,26 +245,8 @@ pub(crate) struct AdoptiumClient {
 
 impl AdoptiumClient {
     pub(crate) fn new(base_url: impl Into<String>) -> Self {
-        // Statuses are inspected explicitly below, so keep ureq from turning a
-        // non-2xx response into an error and losing the message wording.
-        // ureq defaults its TLS provider to Rustls regardless of which TLS
-        // feature is enabled, and panics on the first https request if that
-        // provider was not compiled in. It also defaults to bundled Mozilla
-        // roots. Select native-tls with the platform trust store, which is what
-        // jlo has always used and what TLS-intercepting corporate proxies need.
-        let agent: Agent = Agent::config_builder()
-            .user_agent(USER_AGENT)
-            .http_status_as_error(false)
-            .tls_config(
-                TlsConfig::builder()
-                    .provider(TlsProvider::NativeTls)
-                    .root_certs(RootCerts::PlatformVerifier)
-                    .build(),
-            )
-            .build()
-            .into();
         Self {
-            agent,
+            agent: agent(),
             base_url: base_url.into(),
         }
     }
@@ -444,32 +481,7 @@ impl AdoptiumClient {
             );
         }
 
-        let total_size = response
-            .body()
-            .content_length()
-            .context("could not determine the download size: no Content-Length header")?;
-
-        ui.start_download(total_size);
-
-        let mut hasher = Sha256::new();
-
-        let mut downloaded: u64 = 0;
-        let mut buffer = [0; 8192];
-        let mut reader = response.body_mut().as_reader();
-        loop {
-            let n = reader
-                .read(&mut buffer)
-                .context("could not read package data from the response")?;
-            if n == 0 {
-                break;
-            }
-            file.write_all(&buffer[..n])?;
-            downloaded += n as u64;
-            ui.set_downloaded(downloaded);
-            hasher.update(&buffer[..n]);
-        }
-
-        let hash = hex::encode(hasher.finalize());
+        let hash = stream_hashed(response.body_mut(), file, ui)?;
         if hash != metadata.checksum {
             bail!(
                 "checksum mismatch: expected {}, got {}",

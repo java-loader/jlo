@@ -38,13 +38,10 @@ use crate::extract;
 use crate::install::{self, Layout, Lock};
 use crate::ui::{self, InstallUi};
 use anyhow::{Context, Result, anyhow, bail};
-use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
 use std::fs::{self, File};
-use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use ureq::Agent;
-use ureq::tls::{RootCerts, TlsConfig, TlsProvider};
 
 /// The release root. `JLO_RELEASE_API_URL` overrides it, mirroring
 /// `JLO_ADOPTIUM_API_URL` (ADR-0002), which is what makes the whole path
@@ -58,7 +55,6 @@ pub(crate) const RELEASES_URL: &str = "https://github.com/java-loader/jlo/releas
 const TAG_PREFIX: &str = "jlo-bin-v";
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
-const USER_AGENT: &str = concat!("J'Lo/", env!("CARGO_PKG_VERSION"));
 
 /// Install methods `selfupdate` recognises. Anything else in the receipt stops
 /// the update, for the same reason a malformed receipt does.
@@ -89,23 +85,8 @@ impl std::fmt::Debug for ReleaseClient {
 
 impl ReleaseClient {
     pub(crate) fn new(base_url: impl Into<String>) -> Self {
-        // Same agent configuration as `AdoptiumClient`, and for the same
-        // reasons: statuses are inspected here rather than turned into errors
-        // that lose the wording, and ureq defaults to Rustls with bundled
-        // Mozilla roots regardless of which TLS feature is compiled in.
-        let agent: Agent = Agent::config_builder()
-            .user_agent(USER_AGENT)
-            .http_status_as_error(false)
-            .tls_config(
-                TlsConfig::builder()
-                    .provider(TlsProvider::NativeTls)
-                    .root_certs(RootCerts::PlatformVerifier)
-                    .build(),
-            )
-            .build()
-            .into();
         Self {
-            agent,
+            agent: crate::adoptium::agent(),
             base_url: base_url.into(),
         }
     }
@@ -196,32 +177,10 @@ impl ReleaseClient {
             bail!("could not download {url}: HTTP {}", response.status());
         }
 
-        let total_size = response
-            .body()
-            .content_length()
-            .context("could not determine the download size: no Content-Length header")?;
-        ui.start_download(total_size);
-
-        let mut hasher = Sha256::new();
-        let mut downloaded: u64 = 0;
-        let mut buffer = [0; 8192];
-        let mut reader = response.body_mut().as_reader();
-        loop {
-            let n = reader
-                .read(&mut buffer)
-                .context("could not read package data from the response")?;
-            if n == 0 {
-                break;
-            }
-            file.write_all(&buffer[..n])?;
-            downloaded += n as u64;
-            ui.set_downloaded(downloaded);
-            hasher.update(&buffer[..n]);
-        }
+        let hash = crate::adoptium::stream_hashed(response.body_mut(), file, ui)?;
         file.sync_all()
             .context("could not flush the downloaded package to disk")?;
 
-        let hash = hex::encode(hasher.finalize());
         if hash != expected {
             bail!("checksum mismatch for {package}: expected {expected}, got {hash}");
         }
@@ -705,6 +664,7 @@ mod tests {
 #[cfg(test)]
 mod http_tests {
     use super::*;
+    use sha2::Digest as _;
 
     #[test]
     fn latest_tag_reads_the_redirect() {
@@ -765,7 +725,7 @@ mod http_tests {
     }
 
     fn sha256(bytes: &[u8]) -> String {
-        hex::encode(Sha256::digest(bytes))
+        hex::encode(sha2::Sha256::digest(bytes))
     }
 
     #[test]
