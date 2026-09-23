@@ -5,7 +5,10 @@
 mod common;
 
 use assert_cmd::Command;
-use common::{INTERPRETERS, chmod, fake_jdk_archive, latest, offer, shells};
+use common::{
+    INTERPRETERS, chmod, fake_jdk_archive, install_fake_jdk, jdk_store_in, latest, offer, shells,
+    squote,
+};
 use predicates::prelude::*;
 use serial_test::serial;
 
@@ -525,22 +528,6 @@ fn list_offline_succeeds_without_network() {
         .code(0)
         .stdout(predicate::str::is_empty())
         .stderr(predicate::str::contains("No JDKs installed"));
-}
-
-/// The JDK store lives under `$HOME`, so a `jlo list` test that does not
-/// override it lists whatever the developer happens to have installed.
-fn jdk_store_in(home: &std::path::Path) -> std::path::PathBuf {
-    if cfg!(target_os = "macos") {
-        home.join("Library/Java/JavaVirtualMachines")
-    } else {
-        home.join(".jdks")
-    }
-}
-
-fn install_fake_jdk(home: &std::path::Path, version: &str) {
-    let dir = jdk_store_in(home).join(version);
-    std::fs::create_dir_all(dir.join("bin")).unwrap();
-    std::fs::write(dir.join(".jlo-managed"), "").unwrap();
 }
 
 #[test]
@@ -1381,7 +1368,7 @@ fn env_does_not_let_a_hostile_path_execute_when_evaluated() {
         let _ = std::fs::remove_file(&marker);
         let out = std::process::Command::new(sh)
             .arg("-c")
-            .arg(format!("eval {}", shell_single_quote(&stdout)))
+            .arg(format!("eval {}", squote(&stdout)))
             .output()
             .unwrap();
         assert!(
@@ -1400,12 +1387,6 @@ fn env_does_not_let_a_hostile_path_execute_when_evaluated() {
         std::env::remove_var("JLO_HOME");
     }
     temp_dir.close().unwrap();
-}
-
-/// Hand a string to `sh -c` as one literal argument. Mirrors `shell_quote` in
-/// `src/main.rs`; kept separate so a bug there cannot hide itself here.
-fn shell_single_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', r"'\''"))
 }
 
 #[test]
@@ -1443,21 +1424,16 @@ fn completions_do_not_hit_the_network() {
 #[serial]
 fn env_survives_a_reader_that_stops_early() {
     let home = tempfile::tempdir().unwrap();
-    // Mirrors base_dir_for(): the store is derived from $HOME, so a throwaway
-    // home is enough to stand a JDK up without installing one.
-    let store = if cfg!(target_os = "macos") {
-        home.path().join("Library/Java/JavaVirtualMachines")
-    } else {
-        home.path().join(".jdks")
-    };
-    std::fs::create_dir_all(store.join("21.0.5+11/bin")).unwrap();
+    // The store is derived from $HOME, so a throwaway home is enough to stand
+    // a JDK up without installing one.
+    std::fs::create_dir_all(jdk_store_in(home.path()).join("21.0.5+11/bin")).unwrap();
 
     let bin = assert_cmd::cargo::cargo_bin("jlo-bin");
     let out = std::process::Command::new("/bin/bash")
         .arg("-c")
         .arg(format!(
             "set -o pipefail; {} env --offline 21 | true",
-            shell_escape(&bin.display().to_string())
+            squote(&bin)
         ))
         .env("HOME", home.path())
         .env("JLO_ADOPTIUM_API_URL", "http://127.0.0.1:1")
@@ -1476,12 +1452,6 @@ fn env_survives_a_reader_that_stops_early() {
     );
 }
 
-/// POSIX single-quoting, so a cargo target directory with an odd character in
-/// it cannot break the `-c` string above.
-fn shell_escape(value: &str) -> String {
-    format!("'{}'", value.replace('\'', r"'\''"))
-}
-
 // -- jlo current --
 //
 // One test per case in the command's table, each asserting stdout, stderr and
@@ -1493,16 +1463,6 @@ fn shell_escape(value: &str) -> String {
 // `current_never_touches_the_network` pins that down by pointing the client at
 // a dead port.
 
-/// The store directory `JdkStore::discover` derives from `$HOME`. Not
-/// configurable, which is why these tests move `$HOME` instead.
-fn store_base(home: &std::path::Path) -> std::path::PathBuf {
-    if cfg!(target_os = "macos") {
-        home.join("Library/Java/JavaVirtualMachines")
-    } else {
-        home.join(".jdks")
-    }
-}
-
 /// A temp `$HOME` holding the named JDK installs, plus the project directory
 /// the command runs from. The project sits *inside* `$HOME` so the `.jlorc`
 /// walk stops there rather than climbing into the real filesystem and finding
@@ -1510,19 +1470,12 @@ fn store_base(home: &std::path::Path) -> std::path::PathBuf {
 fn store_fixture(versions: &[&str]) -> (tempfile::TempDir, std::path::PathBuf) {
     let home = tempfile::tempdir().unwrap();
     for version in versions {
-        let jdk = store_base(home.path()).join(version);
-        std::fs::create_dir_all(jdk.join("bin")).unwrap();
-        std::fs::write(jdk.join("bin").join("java"), "").unwrap();
-        std::fs::File::create(jdk.join(".jlo-managed")).unwrap();
+        install_fake_jdk(home.path(), version);
     }
 
     let project = home.path().join("project");
     std::fs::create_dir_all(&project).unwrap();
     (home, project)
-}
-
-fn current_fixture(version: &str) -> (tempfile::TempDir, std::path::PathBuf) {
-    store_fixture(&[version])
 }
 
 /// Every `jlo current` invocation starts from a shell that inherits nothing:
@@ -1542,7 +1495,7 @@ fn current_cmd(home: &std::path::Path, project: &std::path::Path) -> Command {
 /// `VER=$(jlo current)` an empty string and a success code.
 #[test]
 fn current_without_java_home_has_no_answer() {
-    let (home, project) = current_fixture("25.0.4+101");
+    let (home, project) = store_fixture(&["25.0.4+101"]);
 
     current_cmd(home.path(), &project)
         .assert()
@@ -1559,11 +1512,11 @@ fn current_without_java_home_has_no_answer() {
 /// want to read the version.
 #[test]
 fn current_warns_but_still_answers_when_the_config_disagrees() {
-    let (home, project) = current_fixture("25.0.4+101");
+    let (home, project) = store_fixture(&["25.0.4+101"]);
     std::fs::write(project.join(".jlorc"), "21\n").unwrap();
 
     current_cmd(home.path(), &project)
-        .env("JAVA_HOME", store_base(home.path()).join("25.0.4+101"))
+        .env("JAVA_HOME", jdk_store_in(home.path()).join("25.0.4+101"))
         .assert()
         .success()
         .code(0)
@@ -1578,8 +1531,8 @@ fn current_warns_but_still_answers_when_the_config_disagrees() {
 /// the install *was* ours, it is simply gone.
 #[test]
 fn current_reports_a_removed_install_rather_than_calling_it_foreign() {
-    let (home, project) = current_fixture("25.0.4+101");
-    let jdk = store_base(home.path()).join("25.0.4+101");
+    let (home, project) = store_fixture(&["25.0.4+101"]);
+    let jdk = jdk_store_in(home.path()).join("25.0.4+101");
     std::fs::remove_dir_all(&jdk).unwrap();
 
     current_cmd(home.path(), &project)
@@ -1599,10 +1552,10 @@ fn current_reports_a_removed_install_rather_than_calling_it_foreign() {
 /// error instead of the answer.
 #[test]
 fn current_never_touches_the_network() {
-    let (home, project) = current_fixture("25.0.4+101");
+    let (home, project) = store_fixture(&["25.0.4+101"]);
 
     current_cmd(home.path(), &project)
-        .env("JAVA_HOME", store_base(home.path()).join("25.0.4+101"))
+        .env("JAVA_HOME", jdk_store_in(home.path()).join("25.0.4+101"))
         .env("JLO_ADOPTIUM_API_URL", "http://127.0.0.1:1")
         .assert()
         .success()
@@ -1620,7 +1573,7 @@ fn current_never_touches_the_network() {
 /// every cd.
 #[test]
 fn env_writes_exports_to_stdout_and_nothing_to_stderr() {
-    let (home, project) = current_fixture("25.0.4+101");
+    let (home, project) = store_fixture(&["25.0.4+101"]);
     std::fs::write(project.join(".jlorc"), "25\n").unwrap();
 
     Command::cargo_bin("jlo-bin")
@@ -1652,7 +1605,7 @@ fn env_writes_exports_to_stdout_and_nothing_to_stderr() {
 #[serial]
 #[cfg(target_os = "macos")]
 fn home_warns_that_a_pre_bundle_install_is_invisible_to_java_home() {
-    let (home, project) = current_fixture("25.0.4+101");
+    let (home, project) = store_fixture(&["25.0.4+101"]);
 
     Command::cargo_bin("jlo-bin")
         .unwrap()
@@ -1676,7 +1629,7 @@ fn home_warns_that_a_pre_bundle_install_is_invisible_to_java_home() {
 #[serial]
 #[cfg(target_os = "macos")]
 fn the_online_funnel_warns_about_a_pre_bundle_install_too() {
-    let (home, project) = current_fixture("25.0.4+101");
+    let (home, project) = store_fixture(&["25.0.4+101"]);
 
     Command::cargo_bin("jlo-bin")
         .unwrap()
@@ -1698,7 +1651,7 @@ fn the_online_funnel_warns_about_a_pre_bundle_install_too() {
 #[serial]
 #[cfg(target_os = "macos")]
 fn online_env_warns_about_a_pre_bundle_install() {
-    let (home, project) = current_fixture("25.0.4+101");
+    let (home, project) = store_fixture(&["25.0.4+101"]);
 
     Command::cargo_bin("jlo-bin")
         .unwrap()
@@ -1722,7 +1675,7 @@ fn online_env_warns_about_a_pre_bundle_install() {
 #[serial]
 #[cfg(target_os = "macos")]
 fn env_offline_stays_silent_about_a_pre_bundle_install() {
-    let (home, project) = current_fixture("25.0.4+101");
+    let (home, project) = store_fixture(&["25.0.4+101"]);
 
     Command::cargo_bin("jlo-bin")
         .unwrap()
@@ -1864,7 +1817,7 @@ fn cascade_cmd(home: &std::path::Path, project: &std::path::Path, args: &[&str])
 }
 
 fn installed_path(home: &std::path::Path, version: &str) -> String {
-    format!("{}\n", store_base(home).join(version).display())
+    format!("{}\n", jdk_store_in(home).join(version).display())
 }
 
 /// Stage 4, reached only when nothing is configured *and* nothing is

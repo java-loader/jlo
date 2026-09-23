@@ -1,7 +1,7 @@
 //! Helpers shared by the integration test crates. Each crate uses a different
 //! subset, so every item carries its own `dead_code` allow.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Every interpreter the shell code must work under.
@@ -92,4 +92,36 @@ pub(crate) fn offer(
     latest(server, major).with_body(format!(
         r#"[{{"version":{{"semver":"{version}"}},"binary":{{"package":{{"name":"jdk.tar.gz","link":"{link}","checksum":"{checksum}"}}}}}}]"#
     ))
+}
+
+/// The JDK store `JdkStore::discover` derives from `$HOME`. It is not
+/// configurable, which is why the tests move `$HOME` instead.
+#[allow(dead_code)]
+pub(crate) fn jdk_store_in(home: &Path) -> PathBuf {
+    if cfg!(target_os = "macos") {
+        home.join("Library/Java/JavaVirtualMachines")
+    } else {
+        home.join(".jdks")
+    }
+}
+
+/// A flat, jlo-managed JDK named `version` in the store under `home`.
+#[allow(dead_code)]
+pub(crate) fn install_fake_jdk(home: &Path, version: &str) -> PathBuf {
+    let jdk = jdk_store_in(home).join(version);
+    std::fs::create_dir_all(jdk.join("bin")).unwrap();
+    std::fs::write(jdk.join("bin").join("java"), "").unwrap();
+    std::fs::write(jdk.join(".jlo-managed"), "").unwrap();
+    jdk
+}
+
+/// POSIX single-quoting, so a value can be embedded in a `sh -c` string as one
+/// literal word. Mirrors `shell_quote` in `src/shellenv.rs`; kept separate so a
+/// bug there cannot hide itself here.
+#[allow(dead_code)]
+pub(crate) fn squote(value: impl AsRef<Path>) -> String {
+    format!(
+        "'{}'",
+        value.as_ref().display().to_string().replace('\'', r"'\''")
+    )
 }

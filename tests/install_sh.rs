@@ -15,7 +15,7 @@
 
 mod common;
 
-use common::{INTERPRETERS, chmod, shells, skip_missing};
+use common::{INTERPRETERS, chmod, shells, skip_missing, squote};
 use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -203,12 +203,6 @@ fn install(jlo_home: Option<&str>) -> (tempfile::TempDir, Output) {
 /// there for the shell wrapper to eval.
 fn printed(out: &Output) -> String {
     String::from_utf8_lossy(&out.stderr).into_owned()
-}
-
-/// POSIX single-quoting, so a path containing an apostrophe can be embedded in
-/// the `-c` string these tests build.
-fn squote(path: &Path) -> String {
-    format!("'{}'", path.display().to_string().replace('\'', "'\\''"))
 }
 
 /// Sources `script` in a fresh interactive-style shell and runs `body`.
@@ -908,7 +902,7 @@ fn a_failure_to_write_the_required_entry_fails_the_install() {
 /// and whether that function has been read yet. `-f` on purpose - the
 /// developer's own dotfiles must not decide whether this passes.
 fn zsh_completion_state(home: &Path, pre: &str) -> Output {
-    let entry = squote(&home.join(".jlo").join("completions.sh"));
+    let entry = squote(home.join(".jlo").join("completions.sh"));
     let script = format!(
         r#"{pre}
 . {entry}
@@ -1185,7 +1179,7 @@ fn an_unmanaged_jlo_on_path_is_left_untouched() {
 /// Sources `jlo.sh` under `sh` and reports which wrapper file it loaded, or
 /// `NONE` when it loaded none.
 fn dispatched_dialect(sh: &str, home: &Path, prologue: &str) -> String {
-    let entry = squote(&home.join(".jlo").join("jlo.sh"));
+    let entry = squote(home.join(".jlo").join("jlo.sh"));
     let out = Command::new(sh)
         .arg("-c")
         .arg(format!(
@@ -1252,7 +1246,7 @@ fn the_dialect_dispatch_is_a_clean_no_op_under_a_non_bash_sh() {
         .arg("-c")
         .arg(format!(
             "set -eu\n. {}\necho \"rc=$?\"\n",
-            squote(&home.join(".jlo").join("jlo.sh"))
+            squote(home.join(".jlo").join("jlo.sh"))
         ))
         .env("HOME", &home)
         .env_remove("JLO_HOME")
@@ -1739,7 +1733,7 @@ fn reload_in(sh: &str, home: &Path, jlo: &Path, enabled: &[&str]) -> Output {
     for name in std::iter::once("jlo.sh").chain(enabled.iter().copied()) {
         sources.push('.');
         sources.push(' ');
-        sources.push_str(&squote(&jlo.join(name)));
+        sources.push_str(&squote(jlo.join(name)));
         sources.push('\n');
     }
     let reload = Command::new(jlo.join("bin").join("jlo-bin"))
@@ -1880,7 +1874,7 @@ fn a_stub_whose_target_cannot_be_loaded_fails_when_sourced() {
                     None
                 } else {
                     let pre = if needs_wrapper {
-                        format!(". {}\n", squote(&jlo.join("jlo.sh")))
+                        format!(". {}\n", squote(jlo.join("jlo.sh")))
                     } else {
                         String::new()
                     };
@@ -1891,7 +1885,7 @@ fn a_stub_whose_target_cannot_be_loaded_fails_when_sourced() {
                                 "{pre}. {}\n\
                                  echo \"status=$?\"\n\
                                  echo \"markers=[${{_JLO_AUTOLOAD-}}${{_JLO_COMPLETIONS-}}]\"",
-                                squote(&jlo.join(stub))
+                                squote(jlo.join(stub))
                             ))
                             .env("HOME", &home)
                             .env_remove("JLO_HOME")
@@ -1923,7 +1917,7 @@ fn a_stub_whose_target_cannot_be_loaded_fails_when_sourced() {
             let original = std::fs::read(&target).unwrap();
             std::fs::remove_file(&target).unwrap();
             let pre = if needs_wrapper {
-                format!(". {}\n", squote(&jlo.join("jlo.sh")))
+                format!(". {}\n", squote(jlo.join("jlo.sh")))
             } else {
                 String::new()
             };
@@ -1931,7 +1925,7 @@ fn a_stub_whose_target_cannot_be_loaded_fails_when_sourced() {
                 .arg("-c")
                 .arg(format!(
                     "set -e\n{pre}. {}\necho survived",
-                    squote(&jlo.join(stub))
+                    squote(jlo.join(stub))
                 ))
                 .env("HOME", &home)
                 .env_remove("JLO_HOME")
@@ -1985,9 +1979,9 @@ fn a_reload_that_cannot_load_a_stub_fails_the_selfupdate() {
                     "set {options}\n. {jlo_sh}\n. {autoload}\n. {completions}\n\
                      {breakage}\n\
                      if jlo selfupdate; then echo status=0; else echo \"status=$?\"; fi",
-                    jlo_sh = squote(&jlo.join("jlo.sh")),
-                    autoload = squote(&jlo.join("autoload.sh")),
-                    completions = squote(&jlo.join("completions.sh")),
+                    jlo_sh = squote(jlo.join("jlo.sh")),
+                    autoload = squote(jlo.join("autoload.sh")),
+                    completions = squote(jlo.join("completions.sh")),
                 ))
                 .env("HOME", &home)
                 .env_remove("JLO_HOME")
@@ -2082,8 +2076,8 @@ fn the_old_profile_paths_load_the_new_wrapper() {
                  typeset -f jlo_after_cd\n\
                  echo \"marker=[${{_JLO_AUTOLOAD-}}]\"\n\
                  /bin/sh -c 'echo \"home=[$JLO_HOME]\"'",
-                init = squote(&bin.join("jlo-init.sh")),
-                auto = squote(&bin.join("jlo-autoload.sh")),
+                init = squote(bin.join("jlo-init.sh")),
+                auto = squote(bin.join("jlo-autoload.sh")),
             ))
             .env("HOME", &home)
             .env_remove("JLO_HOME")

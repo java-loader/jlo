@@ -24,7 +24,9 @@
 
 mod common;
 
-use common::{INTERPRETERS, bash_bin, chmod, fake_jdk_archive, offer, shells};
+use common::{
+    INTERPRETERS, bash_bin, chmod, fake_jdk_archive, install_fake_jdk, jdk_store_in, offer, shells,
+};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -687,15 +689,9 @@ fn a_later_failure_still_moves_the_shell_off_the_replaced_build() {
 
             let jlo = jlo_home();
             let home = tempfile::tempdir().unwrap();
-            let store = if cfg!(target_os = "macos") {
-                home.path().join("Library/Java/JavaVirtualMachines")
-            } else {
-                home.path().join(".jdks")
-            };
+            let store = jdk_store_in(home.path());
             for version in ["17.0.5+8", "21.0.5+11"] {
-                let jdk = store.join(version);
-                std::fs::create_dir_all(jdk.join("bin")).unwrap();
-                std::fs::write(jdk.join(".jlo-managed"), "").unwrap();
+                install_fake_jdk(home.path(), version);
             }
             let old = store.join("17.0.5+8");
             let new = store.join("17.0.9+10");
