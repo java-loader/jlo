@@ -946,6 +946,111 @@ fn update_reports_api_http_error() {
         .stderr(predicate::str::contains("HTTP 500"));
 }
 
+/// A tar.gz holding one JDK root with a `bin/java`, as Adoptium ships it -
+/// enough for the whole download, verify, extract and move pipeline.
+fn fake_jdk_archive(root: &str) -> Vec<u8> {
+    let mut builder = tar::Builder::new(flate2::write::GzEncoder::new(
+        Vec::new(),
+        flate2::Compression::fast(),
+    ));
+    let mut header = tar::Header::new_gnu();
+    header.set_size(0);
+    header.set_mode(0o755);
+    header.set_cksum();
+    builder
+        .append_data(&mut header, format!("{root}/bin/java"), std::io::empty())
+        .unwrap();
+    builder.into_inner().unwrap().finish().unwrap()
+}
+
+/// `jlo update 21` against a store holding 21.0.5+11, with Adoptium offering
+/// 21.0.9+10. Returns the store and the command's output; `JAVA_HOME` points
+/// at the old build when `active`.
+fn run_update_over_an_older_build(
+    active: bool,
+) -> (tempfile::TempDir, std::path::PathBuf, std::process::Output) {
+    use sha2::Digest;
+
+    let mut server = mockito::Server::new();
+    let archive = fake_jdk_archive("jdk-21.0.9+10");
+    let checksum = hex::encode(sha2::Sha256::digest(&archive));
+    let _meta = server
+        .mock(
+            "GET",
+            mockito::Matcher::Regex(r"^/v3/assets/latest/21/hotspot".to_string()),
+        )
+        .match_query(mockito::Matcher::Any)
+        .with_body(format!(
+            r#"[{{"version":{{"semver":"21.0.9+10"}},"binary":{{"package":{{"name":"jdk.tar.gz","link":"{}/jdk.tar.gz","checksum":"{checksum}"}}}}}}]"#,
+            server.url()
+        ))
+        .create();
+    let _pkg = server
+        .mock("GET", "/jdk.tar.gz")
+        .with_body(archive)
+        .create();
+
+    let home = tempfile::tempdir().unwrap();
+    install_fake_jdk(home.path(), "21.0.5+11");
+    let store = jdk_store_in(home.path());
+
+    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
+    cmd.args(["update", "21"])
+        .env("HOME", home.path())
+        .env("JLO_ADOPTIUM_API_URL", server.url())
+        .env_remove("JAVA_HOME");
+    if active {
+        cmd.env("JAVA_HOME", store.join("21.0.5+11"));
+    }
+    let out = cmd.output().unwrap();
+    (home, store, out)
+}
+
+/// One build per name: the update deletes the build it supersedes, the live
+/// one included, and prints the exports that move the calling shell onto
+/// the replacement - the wrapper evaluates them.
+#[test]
+fn update_replaces_the_live_build_and_moves_the_shell() {
+    let (_home, store, out) = run_update_over_an_older_build(true);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    assert!(out.status.success(), "{stderr}");
+    assert!(
+        !store.join("21.0.5+11").exists(),
+        "superseded build survived"
+    );
+    assert!(store.join("21.0.9+10").exists());
+    assert_eq!(
+        exported_var(&stdout, "JAVA_HOME").as_deref(),
+        store.join("21.0.9+10").to_str(),
+        "{stdout}"
+    );
+    assert!(stderr.contains("replaced 21.0.5+11"), "{stderr}");
+}
+
+/// A shell that was not on the replaced build has nothing to follow, so
+/// stdout - which the wrapper evaluates - stays empty.
+#[test]
+fn update_leaves_a_shell_on_another_jdk_alone() {
+    let (_home, store, out) = run_update_over_an_older_build(false);
+
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !store.join("21.0.5+11").exists(),
+        "superseded build survived"
+    );
+    assert!(
+        out.stdout.is_empty(),
+        "{:?}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
 #[test]
 fn init_uses_latest_version_from_api() {
     let mut server = mockito::Server::new();

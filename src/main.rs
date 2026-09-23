@@ -566,21 +566,25 @@ fn cmd_init(
 fn cmd_install(client: &AdoptiumClient, versions: Vec<String>) -> Result<(), CommandError> {
     let store = JdkStore::discover()?;
     let versions = requested_versions(versions, "install", &store, client)?;
-    Ok(store::install_each(client, &store, versions)?)
+    let run = store::install_each(client, &store, versions, store::Superseded::Keep);
+    match run.error {
+        Some(e) => Err(e.into()),
+        None => Ok(()),
+    }
 }
 
-/// The names `--all` moves: the installed ones, minus the pre-release
-/// streams.
+/// Bring names up to date, deleting the builds each new one supersedes.
 ///
-/// EA builds appear weekly, so `--all` including them would make a routine
-/// update a ~200 MB subscription - and a pre-release is something the user
-/// chose deliberately, so moving it is something they ask for by name.
-fn updatable(installed: impl IntoIterator<Item = Request>) -> Vec<Request> {
-    let mut names: Vec<Request> = installed.into_iter().filter(|r| !r.is_ea()).collect();
-    names.sort();
-    names
-}
-
+/// Including the build `$JAVA_HOME` points at: J'Lo keeps one build per
+/// name, and `update` is the verb that keeps it so. The calling shell follows
+/// the replacement because the wrapper evaluates this command's stdout, which
+/// carries the same `export` lines `jlo env` would print - and only when the
+/// live build was one of those deleted.
+///
+/// Written even when a later name failed: the deletions before the failure
+/// have happened, and a shell left on a removed JDK is worse than an error
+/// the wrapper returns after moving it. The wrapper evaluates `update`'s
+/// output regardless of the status for exactly this reason.
 fn cmd_update(
     client: &AdoptiumClient,
     versions: Vec<String>,
@@ -590,32 +594,55 @@ fn cmd_update(
 
     // `--all` and explicit versions are mutually exclusive (clap enforces it),
     // so these two arms are the whole input space.
+    //
+    // `--all` is every installed name, pre-release streams included: leaving
+    // them out would be the special case. Someone who installed `28-ea`
+    // wants it current, and the stream's weekly builds are replaced rather
+    // than piling up, so following it costs a download, not the disk.
     let versions_to_install = if all {
         let installed = store
             .installed_requests()
             .context("could not determine installed JDK versions")?;
-        let empty_store = installed.is_empty();
-        let names = updatable(installed);
-
-        if names.is_empty() {
-            // Two states, two sentences: "nothing installed" and "nothing
-            // installed that --all moves" are different facts, and the second
-            // one has to name the way out.
-            return Err(if empty_store {
-                anyhow!("no installed JDKs to update").into()
-            } else {
-                anyhow!(
-                    "no released JDKs to update; run 'jlo update <major>-ea' to move a pre-release"
-                )
-                .into()
-            });
+        if installed.is_empty() {
+            return Err(anyhow!("no installed JDKs to update").into());
         }
-        names.into_iter().collect()
+        installed.into_iter().collect()
     } else {
         requested_versions(versions, "update", &store, client)?
     };
 
-    Ok(store::install_each(client, &store, versions_to_install)?)
+    // A dry run of the exports, before anything is deleted: every reason
+    // they can fail - an undecodable `PATH`, a store path that is not UTF-8
+    // or cannot sit in `PATH` - is a property of the environment and the
+    // store, not of the build, so the store itself stands in for it. Failing
+    // once the live build is gone would strand the shell on it.
+    export_lines(&store, store.base())?;
+
+    let active = active_java_home();
+    let run = store::install_each(
+        client,
+        &store,
+        versions_to_install,
+        store::Superseded::Replace(active.as_deref()),
+    );
+
+    if let Some(java_home) = &run.repointed {
+        ui::print_lines(export_lines(&store, java_home)?);
+    }
+    ui::update_report(&run, !std::io::stdout().is_terminal());
+
+    if let Some(e) = run.error {
+        return Err(e.into());
+    }
+    let failures = run.failures.len();
+    if failures > 0 {
+        return Err(anyhow!(
+            "{failures} superseded JDK{} could not be removed",
+            if failures == 1 { "" } else { "s" }
+        )
+        .into());
+    }
+    Ok(())
 }
 
 /// Emit the `export` lines for the requested version.
@@ -643,10 +670,19 @@ fn setup(
         resolve_java_home(client, store, request)?
     };
 
-    // Collected rather than printed as they are decided: both lines are one
-    // environment, and `print_lines` is also the only writer here that treats
-    // a closed pipe as an ending rather than panicking - `jlo env | head` is
-    // an ordinary thing to type.
+    ui::print_lines(export_lines(store, &java_home)?);
+
+    Ok(())
+}
+
+/// The `export` lines that point this shell at `java_home`: `JAVA_HOME` when
+/// it differs, `PATH` when the JDK's `bin` is not already where it belongs.
+///
+/// Collected rather than printed as they are decided: both lines are one
+/// environment, and `print_lines` is also the only writer here that treats
+/// a closed pipe as an ending rather than panicking - `jlo env | head` is an
+/// ordinary thing to type.
+fn export_lines(store: &JdkStore, java_home: &Path) -> anyhow::Result<Vec<String>> {
     let mut exports = Vec::new();
 
     let current_java_home = env::var("JAVA_HOME").unwrap_or_default();
@@ -655,7 +691,7 @@ fn setup(
     // bytes it cannot decode and hands back a path that does not exist, and
     // the caller then exports it as `JAVA_HOME`. An undecodable install
     // directory is unusable, so say so rather than exporting a near miss.
-    let java_home_str = path_str(&java_home)?;
+    let java_home_str = path_str(java_home)?;
     if current_java_home != java_home_str {
         exports.push(format!("export JAVA_HOME={}", shell_quote(java_home_str)));
     }
@@ -667,9 +703,7 @@ fn setup(
         exports.push(format!("export PATH={}", shell_quote(&updated_path)));
     }
 
-    ui::print_lines(exports);
-
-    Ok(())
+    Ok(exports)
 }
 
 /// J'Lo's own state directory — where `default.jlorc` lives.
@@ -726,7 +760,6 @@ pub(crate) fn jlo_home_dir() -> anyhow::Result<PathBuf> {
 #[allow(unsafe_code)]
 mod tests {
     use super::*;
-    use crate::request::Stream;
     use tempfile::tempdir;
 
     fn owned(items: &[&str]) -> Vec<String> {
@@ -777,31 +810,6 @@ mod tests {
         assert_eq!(
             format!("{:#}", err.error),
             "no valid Java versions provided to update"
-        );
-    }
-
-    /// `jlo update --all` moves released builds only. EA builds appear weekly,
-    /// so including them would turn --all into a standing subscription; the
-    /// user names the stream when they want it moved.
-    #[test]
-    fn update_all_selects_ga_names_only() {
-        let installed = vec![
-            Request {
-                major: 21,
-                stream: Stream::Ga,
-            },
-            Request {
-                major: 28,
-                stream: Stream::Ea,
-            },
-        ];
-
-        assert_eq!(
-            updatable(installed),
-            vec![Request {
-                major: 21,
-                stream: Stream::Ga
-            }]
         );
     }
 

@@ -87,7 +87,7 @@ of them; `-h` gives the short form of either.
 | `jlo current` | Say which JDK is active in this shell, and why. |
 | `jlo list` | Show what Adoptium offers and what is installed. `jlo ls` is an alias. |
 | `jlo install [VERSION...]` | Download a major version without changing any shell. |
-| `jlo update [VERSION...]` | Bring installed JDKs up to their latest minor release. `--all` for every installed release; a pre-release only moves when named. |
+| `jlo update [VERSION...]` | Bring installed JDKs up to their latest minor release, replacing the build each one supersedes. `--all` for every installed name. |
 | `jlo remove <VERSION...>` | Delete installed JDKs by name, or `--superseded` to delete them by rule. |
 | `jlo init [VERSION]` | Write a `.jlorc` pinning this project's version. `--global` for the user-wide default. |
 | `jlo selfupdate` | Update J'Lo itself. |

@@ -4,22 +4,25 @@
 # zsh copy lives beside it. Splitting the two is what lets each one be written
 # for a single parser - this file never has to also be valid sh or zsh.
 jlo() {
-  local J arg out
+  local J arg out rc
   J="${JLO_HOME-}/bin/jlo-bin"
   # "${1-}", not "$1": a bare `jlo` under a profile running `set -u` would
   # otherwise abort the shell on an unbound parameter before the binary is
   # ever reached - the same rule the autoload hook already follows for
   # $_JLO_LAST_DIR.
   case "${1-}" in
-    env|use|selfupdate)
+    env|use|selfupdate|update)
       # The branch below *evaluates* stdout, so help and version output - which
       # clap prints to stdout - must never reach it. Scoped to these three verbs
       # on purpose: a wrapper-wide scan would hijack a child's flags in
-      # 'jlo exec -- ./gradlew --help'. env/use take at most a version, and
-      # selfupdate takes nothing.
+      # 'jlo exec -- ./gradlew --help'. env/use take at most a version,
+      # update takes versions or --all, and selfupdate takes nothing - none
+      # of them hands flags on to a child.
       for arg in "$@"; do
         case "$arg" in
-          -h|--help|-V|--version)
+          # The last pattern is a cluster of short flags: 'update -ah' is
+          # help too.
+          -h|--help|-V|--version|-[hV]*|-[!-]*[hV]*)
             "$J" "$@"
             return
             ;;
@@ -32,18 +35,33 @@ jlo() {
       # in every shell, so the wrapper could not tell success from failure.
       #
       # The assignment is its own statement: `local out="$(...)"` would report
-      # `local`'s status, not the binary's. `|| return` then propagates the
-      # failure instead of eval-ing a half-written environment - see the
-      # explicit `return 0` in jlo_after_cd, which keeps that status out of the
-      # user's prompt.
+      # `local`'s status, not the binary's. A failure then returns that status
+      # instead of eval-ing a half-written environment - see the explicit
+      # `return 0` in jlo_after_cd, which keeps that status out of the user's
+      # prompt.
       #
       # 'selfupdate' rides the same branch: the binary prints the reload line
       # (`. $JLO_HOME/jlo.sh`, plus whichever optional stubs this shell had
       # enabled) on stdout, and eval-ing it replaces the resident jlo function
       # with the one the new binary just generated. An update that was already
       # current prints nothing, so `eval ""` is a no-op.
-      out="$("$J" "$@")" || return
-      eval "$out"
+      #
+      # 'update' rides it too, and is the one verb whose output is evaluated
+      # on failure as well: it deletes the build each new one supersedes,
+      # including the one JAVA_HOME points at, and prints the exports that
+      # move this shell onto the replacement. A later name failing does not
+      # undo that deletion, so skipping the eval would leave the shell on a
+      # JDK that is gone. The binary writes those lines in one go after the
+      # work is done, so there is no half-written environment to fear here.
+      if out="$("$J" "$@")"; then
+        eval "$out"
+      else
+        rc=$?
+        if [ "$1" = update ]; then
+          eval "$out"
+        fi
+        return "$rc"
+      fi
       ;;
     *)
       "$J" "$@"

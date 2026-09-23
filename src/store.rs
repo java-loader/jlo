@@ -69,6 +69,18 @@ impl PruneReport {
     }
 }
 
+/// What [`JdkStore::remove_superseded_by`] did for one name.
+#[derive(Debug, Default)]
+pub(crate) struct Replaced {
+    /// The versions deleted, newest first.
+    pub(crate) removed: Vec<String>,
+    /// One message per build that could not be deleted.
+    pub(crate) failures: Vec<String>,
+    /// Whether `$JAVA_HOME` pointed at a build this tried to delete -
+    /// whether or not the deletion completed.
+    pub(crate) removed_active: bool,
+}
+
 /// What a `jlo remove` run did. The counterpart to [`PruneReport`] for the
 /// command that names its target instead of deriving it from a rule.
 #[derive(Debug, Default)]
@@ -393,9 +405,9 @@ impl JdkStore {
     /// How many installs `jlo remove --superseded` would remove: every managed JDK that is
     /// not the newest of its name.
     ///
-    /// The read-only counterpart to [`Self::prune`], so `jlo update` can point
-    /// at `jlo remove --superseded` after superseding a minor without deleting anything
-    /// itself.
+    /// The read-only counterpart to [`Self::prune`], so `jlo install` can
+    /// point at `jlo remove --superseded` after superseding a build it does
+    /// not delete itself - and `jlo update` at the leftovers it did not touch.
     pub(crate) fn superseded_count(&self) -> anyhow::Result<usize> {
         let mut newest: HashMap<Request, String> = HashMap::new();
         let mut superseded = 0;
@@ -427,9 +439,9 @@ impl JdkStore {
     /// target: deleting the JDK the calling shell is on leaves that shell
     /// pointing at a path that no longer exists - the hazard that killed `jlo
     /// update --clean`. The two selectors of one verb must not disagree about
-    /// it, and `jlo update` steers the user straight here, printing the `jlo
-    /// remove --superseded` hint into the same shell it just superseded a
-    /// build in.
+    /// it. `jlo update` may delete the live build only because it moves the
+    /// shell in the same step (see [`Self::remove_superseded_by`]); this verb
+    /// is not evaluated by the wrapper and cannot.
     ///
     /// A skip, not a refusal: the other superseded builds still go. It is
     /// passed in rather than read here for the same reason as in
@@ -525,6 +537,55 @@ impl JdkStore {
         }
 
         Ok(report)
+    }
+
+    /// Delete every managed build of `request` older than `newest` - the
+    /// build `jlo update` has just installed - and say whether the one
+    /// `active_java_home` names was among them.
+    ///
+    /// Unlike [`Self::prune`], the live JDK is *not* skipped. That skip exists
+    /// because a shell left pointing at a deleted path has no way off it; here
+    /// the caller has one, since `update` rides the wrapper's eval branch and
+    /// prints the exports that move the shell to `newest`. Other shells still
+    /// pointing at it are the accepted cost: a running JVM keeps its open
+    /// inodes, and `jlo current` names the state and the way out.
+    ///
+    /// One name, never its sibling stream: `newest` is compared only against
+    /// builds of `request`, so a GA update never deletes a pre-release of the
+    /// same major, nor the other way round. Unmanaged builds are left alone,
+    /// as by every other deletion.
+    pub(crate) fn remove_superseded_by(
+        &self,
+        request: Request,
+        newest: &str,
+        active_java_home: Option<&Path>,
+    ) -> anyhow::Result<Replaced> {
+        let mut superseded: Vec<Candidate> = self
+            .scan_required()?
+            .into_iter()
+            .filter(|c| c.managed && c.request == Some(request))
+            .filter(|c| c.name.as_deref().is_some_and(|n| is_older_than(n, newest)))
+            .collect();
+        sort_by_semver_desc(&mut superseded);
+
+        let mut replaced = Replaced::default();
+        for old in superseded {
+            // Filtered on the name above, so it is present.
+            let Some(name) = old.name else { continue };
+            // Set before the attempt, not on success: a removal that fails
+            // half way has already taken the marker and possibly `bin/java`,
+            // so the shell has to move either way - and the new build it
+            // moves to is complete.
+            replaced.removed_active |=
+                active_java_home.is_some_and(|active| owns(&old.path, active));
+            match remove_install(&self.base, &name) {
+                Ok(()) => replaced.removed.push(name),
+                Err(e) => replaced
+                    .failures
+                    .push(format!("could not remove {:?}: {e}", old.path)),
+            }
+        }
+        Ok(replaced)
     }
 
     /// Delete the JDKs `targets` name: for each one, every installed build of
@@ -736,21 +797,82 @@ impl JdkStore {
     }
 }
 
+/// What an install run does with the builds it supersedes.
+///
+/// `install` keeps them: it is also what `env`, `home` and `exec` fall back to
+/// on demand, none of which may delete a JDK the calling shell - or another
+/// one - is standing on without a way to move that shell. `update` replaces
+/// them, because it is the one verb the wrapper evaluates *and* whose purpose
+/// is the newer build: `main` re-points the calling shell from the report.
+#[derive(Clone, Copy)]
+pub(crate) enum Superseded<'a> {
+    Keep,
+    /// `$JAVA_HOME` of the calling shell, if set - the build whose removal
+    /// the report has to announce as [`InstallRun::repointed`].
+    Replace(Option<&'a Path>),
+}
+
+/// What [`install_each`] did, handed back whole rather than as a `Result`:
+/// under [`Superseded::Replace`] a failure on the third name must not hide
+/// that the first one deleted the build the shell was on, or the caller would
+/// skip the exports that move the shell off it.
+#[derive(Debug, Default)]
+pub(crate) struct InstallRun {
+    /// `(name, removed version names)`, one entry per name whose superseded
+    /// builds were deleted, in processing order.
+    pub(crate) replaced: Vec<(Request, Vec<String>)>,
+    /// One message per superseded build that could not be deleted.
+    pub(crate) failures: Vec<String>,
+    /// The java home of the new build, when the build `$JAVA_HOME` pointed
+    /// at was among those deleted - the shell has to follow it there.
+    pub(crate) repointed: Option<PathBuf>,
+    /// The download or install that stopped the run; the names after it
+    /// were not attempted.
+    pub(crate) error: Option<anyhow::Error>,
+}
+
+impl InstallRun {
+    pub(crate) fn removed_count(&self) -> usize {
+        self.replaced.iter().map(|(_, v)| v.len()).sum()
+    }
+}
+
 /// The one download site behind both `install` and `update`: the two verbs
-/// differ only in how they arrive at this set of names.
+/// differ in how they arrive at this set of names, and in `superseded`.
 pub(crate) fn install_each(
     client: &AdoptiumClient,
     store: &JdkStore,
     requests: HashSet<Request>,
-) -> anyhow::Result<()> {
+    superseded: Superseded,
+) -> InstallRun {
     // Sorted for a stable processing order, rather than whatever order the
     // hash set happens to iterate in.
     let mut requests: Vec<Request> = requests.into_iter().collect();
     requests.sort_unstable();
 
+    let mut run = InstallRun::default();
     let mut installed_any = false;
     for &request in &requests {
-        installed_any |= update(client, store, request)?;
+        let installed = match update(client, store, request) {
+            Ok(installed) => installed,
+            Err(e) => {
+                // Stop, as a failed download always has - but keep what the
+                // names before it did, which may include a deletion.
+                run.error = Some(e);
+                break;
+            }
+        };
+        let Some((version, java_home)) = installed else {
+            continue;
+        };
+        installed_any = true;
+        if let Superseded::Replace(active) = superseded {
+            replace(store, request, &version, &java_home, active, &mut run);
+        }
+    }
+
+    if run.error.is_some() {
+        return run;
     }
 
     // Only when a pre-release name is in play, and then once for the whole
@@ -762,15 +884,40 @@ pub(crate) fn install_each(
         ui::announce_released_ea(&requests, &released);
     }
 
-    // A download leaves the superseded minor on disk on purpose - a command
-    // that downloads should not also delete, and the old JDK may still be
-    // wired into an open shell or an IDE. Point at `jlo remove --superseded`
-    // instead of doing it here.
+    // `install` leaves the superseded build on disk on purpose (see
+    // [`Superseded`]); `update` has deleted its own, so what is counted after
+    // it are leftovers from before this run, or builds a deletion failed on.
     if let Some(hint) = ui::superseded_hint(installed_any, count_superseded(store)) {
         ui::hint!("{hint}");
     }
 
-    Ok(())
+    run
+}
+
+/// Delete the builds of `request` that `version` - just installed - has
+/// superseded, and record the outcome in `run`.
+fn replace(
+    store: &JdkStore,
+    request: Request,
+    version: &str,
+    java_home: &Path,
+    active: Option<&Path>,
+    run: &mut InstallRun,
+) {
+    let replaced = store
+        .remove_superseded_by(request, version, active)
+        .unwrap_or_else(|e| Replaced {
+            failures: vec![format!("{e:#}")],
+            ..Replaced::default()
+        });
+    ui::replaced(request, &replaced.removed, &replaced.failures);
+    if replaced.removed_active {
+        run.repointed = Some(java_home.to_path_buf());
+    }
+    if !replaced.removed.is_empty() {
+        run.replaced.push((request, replaced.removed));
+    }
+    run.failures.extend(replaced.failures);
 }
 
 /// How many installs `jlo remove --superseded` would remove, or 0 if that
@@ -780,17 +927,22 @@ fn count_superseded(store: &JdkStore) -> usize {
     store.superseded_count().unwrap_or(0)
 }
 
-/// Returns whether a JDK was installed, so the caller can tell a real update
-/// from an already-current one.
-fn update(client: &AdoptiumClient, store: &JdkStore, request: Request) -> anyhow::Result<bool> {
+/// The version and java home of the build installed, or `None` when the name
+/// was already current - so the caller can tell a real update from a no-op.
+fn update(
+    client: &AdoptiumClient,
+    store: &JdkStore,
+    request: Request,
+) -> anyhow::Result<Option<(String, PathBuf)>> {
     let jdk_metadata = client.fetch_metadata(request)?;
 
     if store.find_exact(&jdk_metadata).is_some() {
         ui::up_to_date(&request.to_string(), &jdk_metadata.semver);
-        Ok(false)
+        Ok(None)
     } else {
-        install_jdk(client, store, &jdk_metadata).context("could not install JDK")?;
-        Ok(true)
+        let java_home =
+            install_jdk(client, store, &jdk_metadata).context("could not install JDK")?;
+        Ok(Some((jdk_metadata.semver, java_home)))
     }
 }
 
@@ -1851,6 +2003,36 @@ mod tests {
         assert!(dir.path().join("21.0.3+9").exists());
         assert!(!dir.path().join("21.0.1+12").exists());
         assert!(dir.path().join("17.0.2+8").exists());
+    }
+
+    // -- remove_superseded_by --
+
+    /// What `jlo update` deletes after installing `21.0.5+11`: every older
+    /// managed build of *that name*, the live one included - and nothing of
+    /// the sibling stream, nothing unmanaged, nothing newer.
+    #[test]
+    fn an_update_replaces_the_older_builds_of_its_name_only() {
+        let dir = tempdir().unwrap();
+        let base = dir.path();
+        create_jdk_dir(base, "21.0.1+12", true);
+        create_jdk_dir(base, "21.0.3+9", true);
+        create_jdk_dir(base, "21.0.2+13", false);
+        create_jdk_dir(base, "21.0.5+11", true);
+        create_jdk_dir(base, "21.0.0-beta+4.0.ea", true);
+
+        let active = base.join("21.0.3+9");
+        let replaced = JdkStore::at(base)
+            .remove_superseded_by(request("21"), "21.0.5+11", Some(&active))
+            .unwrap();
+
+        assert_eq!(replaced.removed, vec!["21.0.3+9", "21.0.1+12"]);
+        assert!(replaced.removed_active, "the live build was among them");
+        assert!(replaced.failures.is_empty(), "{:?}", replaced.failures);
+        assert!(!active.exists());
+        assert!(!sibling_marker(base, "21.0.3+9").exists());
+        for kept in ["21.0.2+13", "21.0.5+11", "21.0.0-beta+4.0.ea"] {
+            assert!(base.join(kept).exists(), "{kept} must survive");
+        }
     }
 
     /// The guard `jlo remove <version>` applies to a named target, applied by

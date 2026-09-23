@@ -30,7 +30,7 @@ Examples:
   jlo exec 21 -- ./gradlew build   Run a build on Java 21
   jlo install 25                   Download Java 25 without switching to it
   jlo install 28-ea                Download the early-access build of Java 28
-  jlo update --all                 Bring every installed released JDK up to date
+  jlo update --all                 Bring every installed JDK up to date
   jlo remove 11 17                 Remove every installed Java 11 and 17
   jlo remove --superseded          Remove every superseded minor release
 
@@ -282,18 +282,29 @@ is accepted, not an exact build: 21, not 21.0.5."
         versions: Vec<String>,
     },
 
-    /// Update installed JDKs to their latest minor release
-    ///
-    /// With no argument, updates the version resolved in four steps: the
-    /// nearest .jlorc at or above the current directory, then
-    /// ~/.jlo/default.jlorc, then the newest JDK already installed, then the
-    /// latest release. Pass --all to update every installed released name, or
-    /// list versions explicitly - a pre-release stream only moves when named.
+    // Attribute strings rather than a doc comment, for the reason given at
+    // the top of this enum: JAVA_HOME would print with backticks.
+    #[command(
+        about = "Update installed JDKs to their latest minor release",
+        long_about = "\
+Update installed JDKs to their latest minor release
+
+With no argument, updates the version resolved in four steps: the
+nearest .jlorc at or above the current directory, then
+~/.jlo/default.jlorc, then the newest JDK already installed, then the
+latest release. Pass --all to update every installed name, pre-release
+streams included, or list versions explicitly.
+
+The new build replaces the old one: J'Lo keeps one build per name, so
+each update deletes the builds it supersedes - including the one
+JAVA_HOME points at, in which case this shell moves to the new build.
+Other shells still on it need 'jlo env' again."
+    )]
     Update {
         /// Java version: a major (21) or a pre-release stream (28-ea). Default: .jlorc, the newest installed JDK, then the latest release
         versions: Vec<String>,
 
-        /// Update every installed released name; a pre-release stream only moves when named
+        /// Update every installed name, pre-release streams included
         #[arg(short, long, conflicts_with = "versions")]
         all: bool,
     },

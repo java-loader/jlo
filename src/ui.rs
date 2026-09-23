@@ -161,6 +161,63 @@ pub(crate) fn up_to_date(name: &str, version: &str) {
     );
 }
 
+/// What an update's new build replaced, printed under its install summary.
+///
+/// A pre-release says so. Its stream publishes weekly and `update --all`
+/// moves it, so these lines recur on every run - one that did not read as a
+/// preview being swapped for the next would pass for a patch release.
+pub(crate) fn replaced(request: crate::request::Request, removed: &[String], failures: &[String]) {
+    if !removed.is_empty() {
+        eprintln!(
+            "{}",
+            style(replaced_line(request, removed)).dim().for_stderr()
+        );
+    }
+    for failure in failures {
+        eprintln!("{} {}", style("!").red().for_stderr(), failure);
+    }
+}
+
+fn replaced_line(request: crate::request::Request, removed: &[String]) -> String {
+    format!(
+        "  replaced {}{}",
+        if request.is_ea() { "pre-release " } else { "" },
+        removed.join(", ")
+    )
+}
+
+/// The lines an update ends on when it deleted anything: how many, and
+/// whether the shell moved with it.
+///
+/// `captured` is stdout not being a terminal - the same proxy `jlo env` uses
+/// for "the wrapper is evaluating this". When it is a terminal the exports
+/// went nowhere, and this shell is now pointing at a directory that is gone,
+/// so that is said instead of the move.
+pub(crate) fn update_report(run: &crate::store::InstallRun, captured: bool) {
+    let count = run.removed_count();
+    if count > 0 {
+        eprintln!(
+            "{} Removed {} superseded JDK{}",
+            style("✓").green().for_stderr(),
+            count,
+            if count == 1 { "" } else { "s" }
+        );
+    }
+    if let Some(java_home) = &run.repointed {
+        if captured {
+            eprintln!(
+                "{}",
+                style(format!("  JAVA_HOME now points at {}", tilde(java_home)))
+                    .dim()
+                    .for_stderr()
+            );
+        } else {
+            warning!("JAVA_HOME still points at a JDK this update removed");
+            hint!("{NO_ACTIVE_JDK_HINT}");
+        }
+    }
+}
+
 /// Diagnostic prefixes.
 ///
 /// Message conventions, so diagnostics from different commands read as one
@@ -677,12 +734,13 @@ pub(crate) fn unsourced_env_hint(java_version: &str) -> String {
     )
 }
 
-/// The line `jlo install` and `jlo update` end on when this run left an older
-/// minor behind.
+/// The line `jlo install` and `jlo update` end on when a superseded build is
+/// still on disk after an install. After `install` that is the build it just
+/// superseded; after `update`, which deletes its own, only a leftover from
+/// before - a name this run did not move, or a deletion that failed.
 ///
-/// `None` when there is nothing to say: no install happened (the leftovers
-/// predate this run, and nagging on every no-op run trains the user to ignore
-/// the line), or nothing is superseded.
+/// `None` when there is nothing to say: no install happened (nagging on every
+/// no-op run trains the user to ignore the line), or nothing is superseded.
 pub(crate) fn superseded_hint(installed_any: bool, superseded: usize) -> Option<String> {
     if !installed_any || superseded == 0 {
         return None;
@@ -701,10 +759,15 @@ pub(crate) fn superseded_hint(installed_any: bool, superseded: usize) -> Option<
 /// running after a major goes GA - so the pin keeps delivering previews of the
 /// *next patch*. That is deliberately not changed under the user's feet; it is
 /// announced instead.
+///
+/// Also said on every `update --all` while such a stream is installed, since
+/// `--all` moves pre-release names too - so it names the way to stop that as
+/// well as the way to switch.
 pub(crate) fn ea_is_now_released(request: crate::request::Request) -> String {
     format!(
         "{request} still tracks pre-release builds; Java {major} has since been released. \
-         Pin '{major}' to follow the released builds instead.",
+         Pin '{major}' to follow the released builds instead, or 'jlo remove {request}' \
+         to stop updating the pre-release.",
         major = request.major
     )
 }
@@ -990,9 +1053,18 @@ fn render_status(status: Status) -> String {
 /// suggestions under every listing reads as nagging rather than as help.
 fn tip_line(rows: &[Row]) -> Option<String> {
     let outdated = rows.iter().filter(|r| r.status == Status::Update).count();
+    // A superseded build of a name with an update on offer is not advertised:
+    // `jlo update` deletes it along with the build it replaces, so offering
+    // `jlo remove --superseded` as well would be two commands for one job.
+    // Update rows are released builds only, so a pre-release never matches.
     let superseded = rows
         .iter()
         .filter(|r| r.status == Status::Superseded)
+        .filter(|r| {
+            r.ea || !rows
+                .iter()
+                .any(|u| u.status == Status::Update && u.major == r.major)
+        })
         .count();
 
     let mut offers = Vec::new();
@@ -1176,6 +1248,38 @@ mod tests {
         assert!(
             notice.contains("Pin '28'"),
             "names the plain major: {notice}"
+        );
+    }
+
+    // -- replaced_line --
+
+    /// A pre-release stream publishes weekly and `update --all` moves it, so
+    /// its replacement line has to read as a preview swapped for the next,
+    /// not as a patch release.
+    #[test]
+    fn a_replaced_pre_release_says_so() {
+        use crate::request::{Request, Stream};
+
+        let removed = vec!["28.0.0-beta+14.0.ea".to_string()];
+        assert_eq!(
+            replaced_line(
+                Request {
+                    major: 28,
+                    stream: Stream::Ea
+                },
+                &removed
+            ),
+            "  replaced pre-release 28.0.0-beta+14.0.ea"
+        );
+        assert_eq!(
+            replaced_line(
+                Request {
+                    major: 21,
+                    stream: Stream::Ga
+                },
+                &["21.0.8+9".to_string()]
+            ),
+            "  replaced 21.0.8+9"
         );
     }
 
@@ -1669,14 +1773,37 @@ mod tests {
         // advice reads as nagging, and this one prints on every `jlo list`.
         let rows = vec![
             row(21, "21.0.12+101.0.LTS", Status::Update),
-            row(21, "21.0.9+10.0.LTS", Status::Superseded),
             row(17, "17.0.20+101", Status::Update),
-            row(17, "17.0.11+10", Status::Superseded),
+            row(11, "11.0.25+9", Status::Installed),
+            row(11, "11.0.24+8", Status::Superseded),
         ];
         assert_eq!(
             tip_line(&rows).as_deref(),
             Some(
-                "TIP: `jlo update --all` (2 outdated) \u{b7} `jlo remove --superseded` (2 superseded)"
+                "TIP: `jlo update --all` (2 outdated) \u{b7} `jlo remove --superseded` (1 superseded)"
+            )
+        );
+    }
+
+    /// `jlo update` deletes the builds its install supersedes, so a
+    /// superseded row under an offered update is already covered by the
+    /// first offer - advertising the second would be two commands for one
+    /// job. A pre-release has no update row and keeps its offer.
+    #[test]
+    fn tip_line_leaves_to_update_what_update_removes() {
+        let mut ea = row(28, "28.0.0-beta+14.0.ea", Status::Superseded);
+        ea.ea = true;
+        let rows = vec![
+            row(28, "28.0.1+3", Status::Update),
+            ea,
+            row(21, "21.0.12+101.0.LTS", Status::Update),
+            row(21, "21.0.9+10.0.LTS", Status::Installed),
+            row(21, "21.0.8+9.0.LTS", Status::Superseded),
+        ];
+        assert_eq!(
+            tip_line(&rows).as_deref(),
+            Some(
+                "TIP: `jlo update --all` (2 outdated) \u{b7} `jlo remove --superseded` (1 superseded)"
             )
         );
     }

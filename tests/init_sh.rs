@@ -491,6 +491,48 @@ fn selfupdate_help_is_printed_not_evaluated() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// update: the exports that follow a deletion are evaluated even on failure
+// ---------------------------------------------------------------------------
+
+/// `update` deletes the build `JAVA_HOME` points at and prints the exports
+/// that move the shell onto its replacement. A later name failing does not
+/// bring the deleted build back, so the wrapper must evaluate those exports
+/// anyway - and still hand back the failure. `env`, whose failure deletes
+/// nothing, keeps not evaluating, and help output never is.
+#[test]
+fn update_evals_its_exports_even_when_it_fails() {
+    for sh in INTERPRETERS {
+        if skip_missing("update_evals_its_exports_even_when_it_fails", sh) {
+            continue;
+        }
+        let home = jlo_home_with_stub("echo 'JLO_TEST_MOVED=yes'\necho boom >&2\nexit 1");
+        // `-ah` is clap's help in a short-flag cluster: printed, never
+        // evaluated, like `--help`.
+        for (verb, moved) in [
+            ("update --all", "yes"),
+            ("env 21", "no"),
+            ("update -ah", "no"),
+            ("update -ha", "no"),
+        ] {
+            let out = run_in(
+                sh,
+                home.path(),
+                &format!("jlo {verb}\necho \"status=$?\"\necho \"moved=${{JLO_TEST_MOVED-no}}\""),
+            );
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            assert!(
+                stdout.contains("status=1"),
+                "{sh} {verb}: the failure never reached the caller: {stdout:?}"
+            );
+            assert!(
+                stdout.contains(&format!("moved={moved}")),
+                "{sh} {verb}: expected moved={moved}: {stdout:?}"
+            );
+        }
+    }
+}
+
 /// A profile may well run under `set -u`, and `jlo` with no arguments is the
 /// ordinary way to ask for help. `case "$1"` aborted the shell there on an
 /// unbound parameter before the binary was reached - the same failure
