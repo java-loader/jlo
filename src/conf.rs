@@ -580,7 +580,8 @@ mod tests {
     /// the user default says.
     #[test]
     fn logical_cwd_keeps_the_symlinked_path_the_shell_is_standing_in() {
-        let root = canon(tempdir().unwrap().path());
+        let tmp = tempdir().unwrap();
+        let root = canon(tmp.path());
         let real = root.join("elsewhere").join("app");
         fs::create_dir_all(&real).unwrap();
         fs::create_dir_all(root.join("work")).unwrap();
@@ -595,7 +596,8 @@ mod tests {
     /// and `getcwd` cannot be wrong about where the process is.
     #[test]
     fn logical_cwd_refuses_a_pwd_that_names_a_different_directory() {
-        let root = canon(tempdir().unwrap().path());
+        let tmp = tempdir().unwrap();
+        let root = canon(tmp.path());
         let here = root.join("here");
         let there = root.join("there");
         fs::create_dir_all(&here).unwrap();
@@ -608,7 +610,8 @@ mod tests {
     /// failing, because `getcwd` is always available and always correct.
     #[test]
     fn logical_cwd_falls_back_when_pwd_is_unusable() {
-        let here = canon(tempdir().unwrap().path());
+        let tmp = tempdir().unwrap();
+        let here = canon(tmp.path());
 
         assert_eq!(logical_cwd(None, here.clone()), here);
         assert_eq!(logical_cwd(Some(PathBuf::from("app")), here.clone()), here);
