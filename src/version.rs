@@ -83,6 +83,9 @@ mod tests {
             "version-21.0.5+11",
         ] {
             assert!(parse(name).is_err(), "{name}");
+            // Either side: `is_older_than` reads the error as "never older".
+            assert!(compare(name, "21.0.1+1").is_err(), "{name} vs semver");
+            assert!(compare("21.0.1+1", name).is_err(), "semver vs {name}");
         }
     }
 
