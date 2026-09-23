@@ -856,10 +856,10 @@ pub(crate) fn print_lines(lines: impl IntoIterator<Item = String>) {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Status {
     /// Adoptium offers it and it is not installed - either nothing of this
-    /// major is, or what is installed is newer than this build.
+    /// name is, or what is installed is newer than this build.
     Available,
     /// Adoptium offers it, it is not installed, and it is newer than every
-    /// build of this major that is.
+    /// build of this name that is.
     Update,
     /// Installed, and the newest build of its major that is installed.
     Installed,
@@ -878,9 +878,8 @@ pub(crate) struct Row {
     pub(crate) status: Status,
     /// `$JAVA_HOME` points at this install.
     pub(crate) active: bool,
-    /// A pre-release build. The catalogue is GA-only by decision (see
-    /// `supersedes_every_install`), so a remote row is never this - only a
-    /// local row backed by an `InstalledJdk` with `stream: Stream::Ea` is.
+    /// A pre-release build: an install of an EA name, or the newest build of
+    /// the pre-release stream of a major not yet released.
     pub(crate) ea: bool,
 }
 
@@ -902,9 +901,7 @@ fn build_rows(
                 None => Status::Available,
             },
             active: false,
-            // The catalogue is GA-only by decision, so every remote row is a
-            // released build.
-            ea: false,
+            ea: jdk.stream == crate::request::Stream::Ea,
         })
         .collect();
 
@@ -947,26 +944,26 @@ fn build_rows(
     rows
 }
 
-/// Whether an offered build is newer than every install of its major.
+/// Whether an offered build is newer than every install of its name.
 ///
 /// The catalogue can sit *behind* the store - an install that came from
 /// somewhere else, or a major Adoptium has since rolled back - and `update`
 /// there would be offering a downgrade.
 ///
-/// Only GA installs are compared: the catalogue is GA-only by decision, so a
-/// pre-release install is a different name from anything Adoptium offers, not
-/// something an offered build could supersede. A major with only an EA
-/// install therefore has no GA install to compare against and falls through
-/// to `Available`, same as a major with no install at all.
+/// Only installs of the same name are compared. A pre-release sorts above the
+/// release it previews, so across streams an offered beta would read as an
+/// update to an installed release - and following it would change streams,
+/// which `jlo update` never does. A name with nothing installed falls through
+/// to `Available`.
 fn supersedes_every_install(jdk: &RemoteJdk, installed: &[InstalledJdk]) -> bool {
-    let mut majors = installed
+    let mut same_name = installed
         .iter()
-        .filter(|i| i.major == jdk.major && i.stream == crate::request::Stream::Ga)
+        .filter(|i| i.request() == jdk.request())
         .peekable();
-    if majors.peek().is_none() {
+    if same_name.peek().is_none() {
         return false;
     }
-    majors.all(|i| {
+    same_name.all(|i| {
         crate::version::compare(&jdk.version, &i.version).is_ok_and(|ord| ord == Ordering::Greater)
     })
 }
@@ -1084,14 +1081,13 @@ fn tip_line(rows: &[Row]) -> Option<String> {
     // A superseded build of a name with an update on offer is not advertised:
     // `jlo update` deletes it along with the build it replaces, so offering
     // `jlo remove --superseded` as well would be two commands for one job.
-    // Update rows are released builds only, so a pre-release never matches.
     let superseded = rows
         .iter()
         .filter(|r| r.status == Status::Superseded)
         .filter(|r| {
-            r.ea || !rows
+            !rows
                 .iter()
-                .any(|u| u.status == Status::Update && u.major == r.major)
+                .any(|u| u.status == Status::Update && u.major == r.major && u.ea == r.ea)
         })
         .count();
 
@@ -1485,6 +1481,16 @@ mod tests {
         RemoteJdk {
             version: version.to_string(),
             major,
+            stream: crate::request::Stream::Ga,
+            lts: false,
+        }
+    }
+
+    fn remote_ea(version: &str, major: i64) -> RemoteJdk {
+        RemoteJdk {
+            version: version.to_string(),
+            major,
+            stream: crate::request::Stream::Ea,
             lts: false,
         }
     }
@@ -1680,6 +1686,7 @@ mod tests {
         RemoteJdk {
             version: version.to_string(),
             major,
+            stream: crate::request::Stream::Ga,
             lts: true,
         }
     }
@@ -1725,8 +1732,8 @@ mod tests {
         assert_eq!(beta.status, Status::Installed);
     }
 
-    /// The catalogue offers GA only, so an offered release must not be called
-    /// an update to a pre-release install: following it would change streams.
+    /// An offered release must not be called an update to a pre-release
+    /// install: following it would change streams.
     #[test]
     fn a_ga_release_is_not_an_update_to_an_installed_pre_release() {
         let rows = build_rows(
@@ -1740,6 +1747,55 @@ mod tests {
             .find(|r| r.version == "28.0.1+9")
             .expect("the offered build has a row");
         assert_eq!(offered.status, Status::Available);
+    }
+
+    /// The mirror image, and the one a real listing meets: a pre-release
+    /// sorts above the release it previews, so without the per-name rule the
+    /// offered beta would read as an update to the installed release.
+    #[test]
+    fn an_offered_pre_release_is_not_an_update_to_an_installed_release() {
+        let rows = build_rows(
+            &[remote_ea("26.0.2-beta+101.0.ea", 26)],
+            &[local("26.0.1+9", 26)],
+            None,
+        );
+
+        let offered = rows
+            .iter()
+            .find(|r| r.ea)
+            .expect("the offered pre-release has a row");
+        assert_eq!(offered.status, Status::Available);
+    }
+
+    #[test]
+    fn an_offered_pre_release_that_is_installed_is_one_marked_row() {
+        let rows = build_rows(
+            &[remote_ea("28.0.0-beta+16.0.ea", 28)],
+            &[local_ea("28.0.0-beta+16.0.ea", 28)],
+            None,
+        );
+
+        let mut expected = row(28, "28.0.0-beta+16.0.ea", Status::Installed);
+        expected.ea = true;
+        assert_eq!(rows, vec![expected]);
+    }
+
+    /// The weekly case: an older build of the stream is installed, and the
+    /// listing is where `jlo update` gets offered for it.
+    #[test]
+    fn an_older_installed_pre_release_shows_the_offered_one_as_an_update() {
+        let rows = build_rows(
+            &[remote_ea("28.0.0-beta+16.0.ea", 28)],
+            &[local_ea("28.0.0-beta+14.0.ea", 28)],
+            None,
+        );
+
+        let offered = rows
+            .iter()
+            .find(|r| r.version == "28.0.0-beta+16.0.ea")
+            .expect("the offered build has a row");
+        assert_eq!(offered.status, Status::Update);
+        assert!(offered.ea, "the offered build is marked a pre-release");
     }
 
     #[test]
@@ -1812,23 +1868,29 @@ mod tests {
     }
 
     /// `jlo update` deletes the builds its install supersedes, so a
-    /// superseded row under an offered update is already covered by the
-    /// first offer - advertising the second would be two commands for one
-    /// job. A pre-release has no update row and keeps its offer.
+    /// superseded row under an offered update of the same *name* is already
+    /// covered by the first offer - advertising the second would be two
+    /// commands for one job. An update of the other stream of that major
+    /// deletes nothing of this one, so the pre-release at 28 keeps its offer
+    /// and the one at 29 does not.
     #[test]
     fn tip_line_leaves_to_update_what_update_removes() {
-        let mut ea = row(28, "28.0.0-beta+14.0.ea", Status::Superseded);
-        ea.ea = true;
+        let ea = |major, version, status| Row {
+            ea: true,
+            ..row(major, version, status)
+        };
         let rows = vec![
+            ea(29, "29.0.0-beta+3.0.ea", Status::Update),
+            ea(29, "29.0.0-beta+1.0.ea", Status::Superseded),
             row(28, "28.0.1+3", Status::Update),
-            ea,
+            ea(28, "28.0.0-beta+14.0.ea", Status::Superseded),
             row(21, "21.0.12+101.0.LTS", Status::Update),
             row(21, "21.0.9+10.0.LTS", Status::Installed),
             row(21, "21.0.8+9.0.LTS", Status::Superseded),
         ];
         assert_eq!(
             tip_line(&rows).as_deref(),
-            Some("TIP: `jlo update` (2 outdated) \u{b7} `jlo remove --superseded` (1 superseded)")
+            Some("TIP: `jlo update` (3 outdated) \u{b7} `jlo remove --superseded` (1 superseded)")
         );
     }
 

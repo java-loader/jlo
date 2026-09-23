@@ -119,10 +119,35 @@ impl TryFrom<Release> for JdkMetadata {
 
 /// The shape of `/v3/info/available_releases`.
 #[derive(serde::Deserialize)]
-struct AvailableReleases {
+struct ReleaseInfo {
     available_releases: Vec<i64>,
     #[serde(default)]
     available_lts_releases: Vec<i64>,
+    // Optional because only the listing reads these two, and a response
+    // without them still answers every other question this document is
+    // fetched for.
+    /// The newest major with a GA build.
+    #[serde(default)]
+    most_recent_feature_release: Option<i64>,
+    /// The newest major with any build at all.
+    #[serde(default)]
+    tip_version: Option<i64>,
+}
+
+impl ReleaseInfo {
+    /// The majors that exist only as a pre-release stream: above the newest
+    /// release, up to the tip.
+    ///
+    /// Not every major's EA stream: after a GA, Adoptium keeps the stream
+    /// running as a preview of the next *patch*, which is not a new name worth
+    /// offering in a listing, and asking for all of them would be one paged
+    /// request per major.
+    fn unreleased_majors(&self) -> impl Iterator<Item = i64> {
+        self.most_recent_feature_release
+            .zip(self.tip_version)
+            .into_iter()
+            .flat_map(|(released, tip)| released + 1..=tip)
+    }
 }
 
 /// The catalogue as one answer: the builds on offer for this machine, and the
@@ -137,12 +162,25 @@ pub(crate) struct Catalogue {
     pub released_majors: Vec<i64>,
 }
 
-/// A JDK release Adoptium offers for *this* OS and architecture.
+/// A JDK build Adoptium offers for *this* OS and architecture: the newest of
+/// one name.
 #[derive(Debug)]
 pub(crate) struct RemoteJdk {
     pub version: String,
     pub major: i64,
+    pub stream: Stream,
     pub lts: bool,
+}
+
+impl RemoteJdk {
+    /// The name this build is the newest of - what the listing compares
+    /// installs against.
+    pub(crate) fn request(&self) -> Request {
+        Request {
+            major: self.major,
+            stream: self.stream,
+        }
+    }
 }
 
 /// The single point of contact with Adoptium: discovering available releases,
@@ -274,46 +312,62 @@ impl AdoptiumClient {
         Ok(assets.into_iter().next())
     }
 
-    /// Every JDK Adoptium can install on this machine, newest first.
+    /// Every JDK Adoptium can install on this machine, newest first: the
+    /// newest build of every released major, and of the pre-release stream of
+    /// every major not yet released.
     ///
-    /// Costs one request for the major-version list plus one per major. Done
-    /// serially that is ~4s, so the per-major lookups are fanned out across
+    /// Costs one request for the major-version list plus one per name. Done
+    /// serially that is ~4s, so the per-name lookups are fanned out across
     /// threads sharing the pooled client.
     pub(crate) fn available_jdks(&self) -> anyhow::Result<Catalogue> {
         let releases = self.fetch_available_releases()?;
         let lts: std::collections::HashSet<i64> =
-            releases.available_lts_releases.into_iter().collect();
+            releases.available_lts_releases.iter().copied().collect();
 
-        let looked_up: Vec<(i64, anyhow::Result<Option<String>>)> = std::thread::scope(|scope| {
-            let handles: Vec<_> = releases
-                .available_releases
-                .iter()
-                .map(|&major| (major, scope.spawn(move || self.latest_version(major))))
-                .collect();
+        let names: Vec<Request> = releases
+            .available_releases
+            .iter()
+            .map(|&major| Request {
+                major,
+                stream: Stream::Ga,
+            })
+            .chain(releases.unreleased_majors().map(|major| Request {
+                major,
+                stream: Stream::Ea,
+            }))
+            .collect();
 
-            handles
-                .into_iter()
-                .map(|(major, handle)| {
-                    let result = handle
-                        .join()
-                        .unwrap_or_else(|_| bail!("lookup thread panicked"));
-                    (major, result)
-                })
-                .collect()
-        });
+        let looked_up: Vec<(Request, anyhow::Result<Option<String>>)> =
+            std::thread::scope(|scope| {
+                let handles: Vec<_> = names
+                    .iter()
+                    .map(|&name| (name, scope.spawn(move || self.latest_version(name))))
+                    .collect();
+
+                handles
+                    .into_iter()
+                    .map(|(name, handle)| {
+                        let result = handle
+                            .join()
+                            .unwrap_or_else(|_| bail!("lookup thread panicked"));
+                        (name, result)
+                    })
+                    .collect()
+            });
 
         let mut jdks = Vec::new();
-        for (major, result) in looked_up {
+        for (name, result) in looked_up {
             match result {
                 Ok(Some(version)) => jdks.push(RemoteJdk {
                     version,
-                    major,
-                    lts: lts.contains(&major),
+                    major: name.major,
+                    stream: name.stream,
+                    lts: lts.contains(&name.major),
                 }),
                 // No build for this OS/architecture - nothing to offer.
                 Ok(None) => {}
-                // One major failing should not cost the user the whole listing.
-                Err(e) => crate::ui::warning!("could not look up JDK {major}: {e:#}"),
+                // One name failing should not cost the user the whole listing.
+                Err(e) => crate::ui::warning!("could not look up JDK {name}: {e:#}"),
             }
         }
 
@@ -324,14 +378,22 @@ impl AdoptiumClient {
         })
     }
 
-    fn latest_version(&self, major: i64) -> anyhow::Result<Option<String>> {
-        let api_url = self.latest_asset_url(&major.to_string())?;
-        Ok(self
-            .fetch_latest_asset(&api_url)?
-            .map(|asset| asset.version.semver))
+    fn latest_version(&self, name: Request) -> anyhow::Result<Option<String>> {
+        Ok(match name.stream {
+            Stream::Ga => {
+                let api_url = self.latest_asset_url(&name.major.to_string())?;
+                self.fetch_latest_asset(&api_url)?
+                    .map(|asset| asset.version.semver)
+            }
+            Stream::Ea => {
+                let api_url = self.ea_release_url(name.major)?;
+                self.fetch_first_release(&api_url)?
+                    .map(|release| release.version_data.semver)
+            }
+        })
     }
 
-    fn fetch_available_releases(&self) -> anyhow::Result<AvailableReleases> {
+    fn fetch_available_releases(&self) -> anyhow::Result<ReleaseInfo> {
         let mut response = self
             .agent
             .get(format!("{}/v3/info/available_releases", self.base_url))
@@ -823,6 +885,97 @@ mod client_tests {
 
         assert_eq!(jdks.len(), 1);
         assert!(!jdks[0].lts);
+    }
+
+    const EA_FIXTURE: &str = include_str!("../tests/fixtures/feature_releases_28_ea.json");
+
+    fn ea_body(semver: &str) -> String {
+        let mut json: serde_json::Value = serde_json::from_str(EA_FIXTURE).unwrap();
+        json[0]["version_data"]["semver"] = serde_json::Value::String(semver.to_string());
+        json.to_string()
+    }
+
+    fn ea_mock(
+        server: &mut mockito::ServerGuard,
+        major: i64,
+        status: usize,
+        body: &str,
+    ) -> mockito::Mock {
+        server
+            .mock(
+                "GET",
+                mockito::Matcher::Regex(format!(r"^/v3/assets/feature_releases/{major}/ea")),
+            )
+            .match_query(mockito::Matcher::Any)
+            .with_status(status)
+            .with_body(body)
+            .create()
+    }
+
+    fn releases_with_tip(majors: &[i64], lts: &[i64], released: i64, tip: i64) -> String {
+        serde_json::json!({
+            "available_releases": majors,
+            "available_lts_releases": lts,
+            "most_recent_feature_release": released,
+            "tip_version": tip,
+        })
+        .to_string()
+    }
+
+    /// Only majors above the newest release are offered as a pre-release
+    /// stream. 26's stream is live too, but it previews the next patch of a
+    /// released major, so it is not a name the listing offers.
+    #[test]
+    fn available_jdks_offers_the_pre_release_stream_of_every_unreleased_major() {
+        let mut server = mockito::Server::new();
+        let _r = server
+            .mock("GET", "/v3/info/available_releases")
+            .with_body(releases_with_tip(&[25, 26], &[25], 26, 28))
+            .create();
+        let _a25 = major_mock(&mut server, 25, 200, &asset_body("25.0.4+101.0.LTS"));
+        let _a26 = major_mock(&mut server, 26, 200, &asset_body("26.0.1+9"));
+        let ea26 = ea_mock(&mut server, 26, 200, &ea_body("26.0.2-beta+101.0.ea")).expect(0);
+        let _ea27 = ea_mock(&mut server, 27, 200, &ea_body("27.0.0-beta+30.0.ea"));
+        let _ea28 = ea_mock(&mut server, 28, 200, EA_FIXTURE);
+
+        let client = AdoptiumClient::new(server.url());
+        let jdks = client.available_jdks().unwrap().jdks;
+
+        let rows: Vec<_> = jdks
+            .iter()
+            .map(|j| (j.version.as_str(), j.request().to_string(), j.lts))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("28.0.0-beta+16.0.ea", "28-ea".to_string(), false),
+                ("27.0.0-beta+30.0.ea", "27-ea".to_string(), false),
+                ("26.0.1+9", "26".to_string(), false),
+                ("25.0.4+101.0.LTS", "25".to_string(), true),
+            ]
+        );
+        ea26.assert();
+    }
+
+    /// The same two outcomes a released major has: no build for this platform
+    /// is no row, and a failed lookup is a warning and no row - neither costs
+    /// the rest of the listing.
+    #[test]
+    fn available_jdks_drops_only_the_pre_release_stream_it_cannot_list() {
+        let mut server = mockito::Server::new();
+        let _r = server
+            .mock("GET", "/v3/info/available_releases")
+            .with_body(releases_with_tip(&[26], &[], 26, 28))
+            .create();
+        let _a26 = major_mock(&mut server, 26, 200, &asset_body("26.0.1+9"));
+        let _ea27 = ea_mock(&mut server, 27, 500, "boom");
+        let _ea28 = ea_mock(&mut server, 28, 200, "[]");
+
+        let client = AdoptiumClient::new(server.url());
+        let jdks = client.available_jdks().unwrap().jdks;
+
+        let versions: Vec<_> = jdks.iter().map(|j| j.version.as_str()).collect();
+        assert_eq!(versions, vec!["26.0.1+9"]);
     }
 
     // -- released_majors --
