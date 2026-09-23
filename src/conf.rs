@@ -152,20 +152,16 @@ fn find_in(
     default_path: &Path,
 ) -> anyhow::Result<Option<Resolved>> {
     if let Some(path) = find_project_config(cwd, home) {
-        let version = load(&path).map_err(|e| anyhow!("could not load configuration: {e}"))?;
+        let request = load(&path).map_err(|e| anyhow!("could not load configuration: {e}"))?;
         return Ok(Some(Resolved {
-            // `load` has already run the contents through the same grammar,
-            // so this cannot fail in practice - but it is a parse, and a parse
-            // that reports its own failure beats one that panics on a rule
-            // change here.
-            request: Request::parse(&version)?,
+            request,
             source: Source::ProjectConfig(shorten_against(&path, cwd)),
         }));
     }
 
     match load(default_path) {
-        Ok(version) => Ok(Some(Resolved {
-            request: Request::parse(&version)?,
+        Ok(request) => Ok(Some(Resolved {
+            request,
             source: Source::DefaultConfig(default_path.to_path_buf()),
         })),
         // Neither file exists. Whether that is a problem is the caller's call.
@@ -220,7 +216,7 @@ fn default_jlorc_path() -> anyhow::Result<PathBuf> {
     jlo_home_dir().map(|p| p.join(JLO_DEFAULT_CONFIG_FILE))
 }
 
-fn load(path: &Path) -> Result<String, std::io::Error> {
+fn load(path: &Path) -> Result<Request, std::io::Error> {
     let content = match std::fs::read_to_string(path) {
         Ok(content) => content,
         Err(e) => {
@@ -246,30 +242,27 @@ fn load(path: &Path) -> Result<String, std::io::Error> {
                 std::io::ErrorKind::InvalidData,
                 format!("Could not find java version in file '{}'", path.display()),
             )
-        })?
-        .to_string();
+        })?;
 
-    if let Err(e) = Request::parse(&java_version) {
-        return Err(std::io::Error::new(
+    Request::parse(java_version).map_err(|e| {
+        std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             format!("{e} (in '{}')", path.display()),
-        ));
+        )
+    })
+}
+
+/// Write `request` to the project `.jlorc` in the current directory, or with
+/// `global` to `$JLO_HOME/default.jlorc`.
+pub(crate) fn init(request: Request, global: bool, force: bool) -> anyhow::Result<()> {
+    if global {
+        init_config(&default_jlorc_path()?, request, force)
+    } else {
+        init_config(Path::new(JLO_CONFIG_FILE), request, force)
     }
-
-    Ok(java_version)
 }
 
-pub(crate) fn init_project_config(java_version: &str, force: bool) -> anyhow::Result<()> {
-    let path = Path::new(JLO_CONFIG_FILE);
-    init_config(path, java_version, force)
-}
-
-pub(crate) fn init_default_config(java_version: &str, force: bool) -> anyhow::Result<()> {
-    let path = default_jlorc_path()?;
-    init_config(&path, java_version, force)
-}
-
-fn init_config(path: &Path, latest_release: &str, force: bool) -> anyhow::Result<()> {
+fn init_config(path: &Path, request: Request, force: bool) -> anyhow::Result<()> {
     // $JLO_HOME need not exist: jlo-bin can be run straight from a build,
     // without install.sh ever having created ~/.jlo.
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
@@ -301,7 +294,7 @@ fn init_config(path: &Path, latest_release: &str, force: bool) -> anyhow::Result
         file,
         "# Java version configured by J'Lo - https://github.com/java-loader/jlo"
     )?;
-    writeln!(file, "{latest_release}")?;
+    writeln!(file, "{request}")?;
 
     // stderr, like every other status message: this module's contract is that
     // stdout carries only shell code the caller may `eval`. Nothing sources
@@ -310,7 +303,7 @@ fn init_config(path: &Path, latest_release: &str, force: bool) -> anyhow::Result
         "{} config file '{}' with Java {}",
         if replaced { "Updated" } else { "Created" },
         path.display(),
-        latest_release
+        request
     );
     Ok(())
 }
@@ -326,7 +319,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let file = dir.path().join(".jlorc");
         fs::write(&file, "21\n").unwrap();
-        assert_eq!(load(&file).unwrap(), "21");
+        assert_eq!(load(&file).unwrap().to_string(), "21");
     }
 
     #[test]
@@ -334,7 +327,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let file = dir.path().join(".jlorc");
         fs::write(&file, "# comment\n\n  # another comment\n  17  \n").unwrap();
-        assert_eq!(load(&file).unwrap(), "17");
+        assert_eq!(load(&file).unwrap().to_string(), "17");
     }
 
     #[test]
@@ -382,7 +375,7 @@ mod tests {
     fn init_config_creates_file() {
         let dir = tempdir().unwrap();
         let file = dir.path().join(".jlorc");
-        init_config(&file, "21", false).unwrap();
+        init_config(&file, Request::parse("21").unwrap(), false).unwrap();
 
         let content = fs::read_to_string(&file).unwrap();
         let lines: Vec<_> = content.lines().collect();
@@ -399,7 +392,7 @@ mod tests {
         // jlo-bin is run without the installer having created ~/.jlo.
         let dir = tempdir().unwrap();
         let file = dir.path().join(".jlo").join("default.jlorc");
-        init_config(&file, "21", false).unwrap();
+        init_config(&file, Request::parse("21").unwrap(), false).unwrap();
 
         assert_eq!(
             fs::read_to_string(&file).unwrap().lines().nth(1),
@@ -413,7 +406,7 @@ mod tests {
         let file = dir.path().join(".jlorc");
         fs::write(&file, "17\n").unwrap();
 
-        let err = init_config(&file, "21", false).unwrap_err();
+        let err = init_config(&file, Request::parse("21").unwrap(), false).unwrap_err();
         assert!(err.to_string().contains("already exists"));
     }
 
@@ -423,7 +416,7 @@ mod tests {
         let file = dir.path().join(".jlorc");
         fs::write(&file, "17\nleftover\n").unwrap();
 
-        init_config(&file, "21", true).unwrap();
+        init_config(&file, Request::parse("21").unwrap(), true).unwrap();
 
         let content = fs::read_to_string(&file).unwrap();
         assert_eq!(content.lines().nth(1), Some("21"));

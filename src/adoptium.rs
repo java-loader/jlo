@@ -229,19 +229,9 @@ pub(crate) struct Catalogue {
 #[derive(Debug)]
 pub(crate) struct RemoteJdk {
     pub version: String,
-    pub major: i64,
-    pub stream: Stream,
-}
-
-impl RemoteJdk {
     /// The name this build is the newest of - what the listing compares
     /// installs against.
-    pub(crate) fn request(&self) -> Request {
-        Request {
-            major: self.major,
-            stream: self.stream,
-        }
-    }
+    pub request: Request,
 }
 
 /// The single point of contact with Adoptium: discovering available releases,
@@ -357,8 +347,7 @@ impl AdoptiumClient {
             match result {
                 Ok(Some(version)) => jdks.push(RemoteJdk {
                     version,
-                    major: name.major,
-                    stream: name.stream,
+                    request: name,
                 }),
                 // No build for this OS/architecture - nothing to offer.
                 Ok(None) => {}
@@ -420,7 +409,12 @@ impl AdoptiumClient {
         Ok(self.fetch_available_releases()?.available_releases)
     }
 
-    pub(crate) fn latest_major(&self) -> anyhow::Result<String> {
+    /// The newest major Adoptium has shipped, as the name `jlo init` writes
+    /// and the cascade's last stage downloads. `available_releases` holds
+    /// majors that have shipped, so this is a GA name by construction; it is
+    /// parsed rather than assumed so the one grammar, floor included, stays in
+    /// one place.
+    pub(crate) fn latest_major(&self) -> anyhow::Result<Request> {
         let releases = self.fetch_available_releases()?;
 
         let latest = releases
@@ -429,7 +423,7 @@ impl AdoptiumClient {
             .max()
             .context("no available releases found")?;
 
-        Ok(latest.to_string())
+        Request::parse(&latest.to_string())
     }
 
     pub(crate) fn download(
@@ -778,7 +772,10 @@ mod client_tests {
         let client = AdoptiumClient::new(server.url());
         let jdks = client.available_jdks().unwrap().jdks;
 
-        let rows: Vec<_> = jdks.iter().map(|j| (j.version.as_str(), j.major)).collect();
+        let rows: Vec<_> = jdks
+            .iter()
+            .map(|j| (j.version.as_str(), j.request.major))
+            .collect();
         assert_eq!(
             rows,
             vec![
@@ -895,7 +892,7 @@ mod client_tests {
 
         let rows: Vec<_> = jdks
             .iter()
-            .map(|j| (j.version.as_str(), j.request().to_string()))
+            .map(|j| (j.version.as_str(), j.request.to_string()))
             .collect();
         assert_eq!(
             rows,
@@ -958,7 +955,7 @@ mod client_tests {
             .create();
 
         let client = AdoptiumClient::new(server.url());
-        assert_eq!(client.latest_major().unwrap(), "26");
+        assert_eq!(client.latest_major().unwrap().to_string(), "26");
     }
 
     #[test]

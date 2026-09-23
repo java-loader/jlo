@@ -175,24 +175,13 @@ impl std::fmt::Display for RemoveError {
 /// A JDK found in the install directory, identified by its semver directory name.
 pub(crate) struct InstalledJdk {
     pub version: String,
-    pub major: i64,
-    /// Which of the major's two streams this build belongs to, read off its
-    /// name: a pre-release is early access, anything else is released.
-    pub stream: Stream,
+    /// The name this install answers to - what every "one build per ..."
+    /// rule groups by. Its stream is read off the version: a pre-release is
+    /// early access, anything else is released.
+    pub request: Request,
     /// Whether the JDK carries the `.jlo-managed` marker, i.e. whether
     /// `jlo remove` is allowed to delete it, by either of its selectors.
     pub managed: bool,
-}
-
-impl InstalledJdk {
-    /// The name this install answers to - what every "one build per ..." rule
-    /// groups by.
-    pub(crate) fn request(&self) -> Request {
-        Request {
-            major: self.major,
-            stream: self.stream,
-        }
-    }
 }
 
 /// Whether `offered` is newer than every one of `builds` - the installs of
@@ -230,7 +219,7 @@ pub(crate) fn supersedes_every_install(offered: &str, builds: &[&InstalledJdk]) 
 pub(crate) fn newest_ga(installed: &[InstalledJdk]) -> Option<&InstalledJdk> {
     installed
         .iter()
-        .find(|jdk| jdk.stream == Stream::Ga && jdk.major >= OLDEST_MAJOR)
+        .find(|jdk| jdk.request.stream == Stream::Ga && jdk.request.major >= OLDEST_MAJOR)
 }
 
 /// One directory found in the store, with everything a single walk can say
@@ -291,11 +280,9 @@ impl JdkStore {
         let mut installed: Vec<InstalledJdk> = candidates
             .into_iter()
             .filter_map(|candidate| {
-                let request = candidate.request?;
                 Some(InstalledJdk {
                     version: candidate.name?,
-                    major: request.major,
-                    stream: request.stream,
+                    request: candidate.request?,
                     managed: candidate.managed,
                 })
             })
@@ -336,7 +323,7 @@ impl JdkStore {
         self.list()
             .ok()?
             .into_iter()
-            .find(|jdk| jdk.request() == request)
+            .find(|jdk| jdk.request == request)
             .map(|jdk| java_home_in(&self.base.join(jdk.version)))
     }
 
@@ -384,7 +371,7 @@ impl JdkStore {
     /// [`Self::find_matching`]: both answer "is there one here", and neither
     /// is the place to fail over a directory that cannot be read.
     pub(crate) fn newest_ga_request(&self) -> Option<Request> {
-        newest_ga(&self.list().ok()?).map(InstalledJdk::request)
+        newest_ga(&self.list().ok()?).map(|jdk| jdk.request)
     }
 
     /// The version names present in the store, ascending. A major with a
@@ -427,7 +414,7 @@ impl JdkStore {
         let mut superseded = Vec::new();
         // `list` is newest first, so the first managed JDK of a name is its head.
         for jdk in self.list()?.into_iter().filter(|jdk| jdk.managed) {
-            match newest.entry(jdk.request()) {
+            match newest.entry(jdk.request) {
                 Entry::Vacant(slot) => {
                     slot.insert(jdk.version);
                 }
@@ -495,10 +482,10 @@ impl JdkStore {
         // stable sort keeps each name's builds newest first. The derived
         // `Ord` also orders the two streams of one major stably.
         let mut superseded = self.superseded()?;
-        superseded.sort_by_key(|jdk| std::cmp::Reverse(jdk.request()));
+        superseded.sort_by_key(|jdk| std::cmp::Reverse(jdk.request));
 
         for jdk in superseded {
-            let request = jdk.request();
+            let request = jdk.request;
             // Both spellings of the entry are compared, as in
             // `Self::remove`: `owns` is deliberately not `java_home_in`,
             // so a bundle whose `Contents/Home` has gone unreadable is
@@ -677,19 +664,10 @@ impl JdkStore {
                     .file_name()
                     .and_then(|name| name.to_str())
                     .map(ToString::to_string);
-                let parsed = name
+                let request = name
                     .as_deref()
-                    .and_then(|name| crate::version::parse(name).ok());
-                // A major that does not fit an `i64` is not a JDK; the rest
-                // of the crate counts majors in `i64` because that is what
-                // the Adoptium API hands back.
-                let major = parsed
-                    .as_ref()
-                    .and_then(|semver| i64::try_from(semver.major).ok());
-                let request = parsed.as_ref().zip(major).map(|(semver, major)| Request {
-                    major,
-                    stream: crate::request::stream_of(semver),
-                });
+                    .and_then(|name| crate::version::parse(name).ok())
+                    .and_then(|semver| Request::of_build(&semver));
                 // `is_file`, not `exists`: a *directory* named
                 // `21.0.3+9.jlo-managed` is itself a store entry with a
                 // semver-shaped name, and letting it confer ownership on its
@@ -809,7 +787,7 @@ pub(crate) fn install_each(
         let superseded = store.superseded().map(|all| {
             let mut builds: Vec<InstalledJdk> = all
                 .into_iter()
-                .filter(|old| old.request() == *request)
+                .filter(|old| old.request == *request)
                 .collect();
             let live = builds.iter().position(|old| {
                 active.is_some_and(|active| owns(&store.base.join(&old.version), active))
@@ -952,7 +930,7 @@ fn install_latest(
     // measured against `21-ea` an offer for `21` would never be newer.
     let builds: Vec<&InstalledJdk> = installed
         .iter()
-        .filter(|jdk| jdk.request() == request)
+        .filter(|jdk| jdk.request == request)
         .collect();
 
     match builds.first() {
@@ -1140,7 +1118,7 @@ impl<'a> Selector<'a> {
 
     fn matches(&self, jdk: &InstalledJdk) -> bool {
         match self {
-            Self::Name(request) => jdk.request() == *request,
+            Self::Name(request) => jdk.request == *request,
             Self::Exact(version) => jdk.version == *version,
         }
     }
@@ -1380,7 +1358,7 @@ mod tests {
 
         let verdict = store
             .legacy_layout(&dir.path().join("21.0.3+9"))
-            .map(|jdk| (jdk.version.clone(), jdk.request()));
+            .map(|jdk| (jdk.version.clone(), jdk.request));
 
         if cfg!(target_os = "macos") {
             assert_eq!(verdict, Some(("21.0.3+9".to_string(), request("21"))));
@@ -1858,10 +1836,10 @@ mod tests {
 
         let jdks = JdkStore::at(dir.path()).list().unwrap();
         assert_eq!(jdks[0].version, "21.0.12+7");
-        assert_eq!(jdks[0].major, 21);
+        assert_eq!(jdks[0].request.major, 21);
         assert!(jdks[0].managed);
         assert_eq!(jdks[1].version, "17.0.13+11");
-        assert_eq!(jdks[1].major, 17);
+        assert_eq!(jdks[1].request.major, 17);
         assert!(!jdks[1].managed);
     }
 
@@ -2680,14 +2658,18 @@ mod tests {
     fn selector_selects_by_name_not_by_major() {
         let ga = InstalledJdk {
             version: "26.0.1+9".to_string(),
-            major: 26,
-            stream: Stream::Ga,
+            request: Request {
+                major: 26,
+                stream: Stream::Ga,
+            },
             managed: true,
         };
         let ea = InstalledJdk {
             version: "26.0.2-beta+101.0.ea".to_string(),
-            major: 26,
-            stream: Stream::Ea,
+            request: Request {
+                major: 26,
+                stream: Stream::Ea,
+            },
             managed: true,
         };
 
@@ -2703,8 +2685,10 @@ mod tests {
     fn selector_reads_a_bare_integer_as_a_major() {
         let jdk = InstalledJdk {
             version: "17.0.2+8".to_string(),
-            major: 17,
-            stream: Stream::Ga,
+            request: Request {
+                major: 17,
+                stream: Stream::Ga,
+            },
             managed: true,
         };
 

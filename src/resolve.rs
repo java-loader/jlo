@@ -152,7 +152,7 @@ fn cascade(
     configured: Option<conf::Resolved>,
     newest_installed: Option<conf::Resolved>,
     offline: bool,
-    latest_release: impl FnOnce() -> anyhow::Result<String>,
+    latest_release: impl FnOnce() -> anyhow::Result<Request>,
 ) -> anyhow::Result<conf::Resolved> {
     if let Some(resolved) = on_disk(configured, newest_installed) {
         return Ok(resolved);
@@ -167,10 +167,7 @@ fn cascade(
     }
 
     Ok(conf::Resolved {
-        // Adoptium's `available_releases` holds majors that have shipped, so
-        // this is a GA name by construction; parsing it rather than assuming
-        // so keeps the one grammar in one place.
-        request: Request::parse(&latest_release()?)?,
+        request: latest_release()?,
         source: conf::Source::LatestRelease,
     })
 }
@@ -237,7 +234,7 @@ fn offline_java_home(
 /// costs a download, so it is the user's to make.
 fn warn_legacy_layout(store: &JdkStore, java_home: &Path) {
     if let Some(jdk) = store.legacy_layout(java_home) {
-        ui::legacy_layout(&jdk.version, jdk.request());
+        ui::legacy_layout(&jdk.version, jdk.request);
     }
 }
 
@@ -373,7 +370,7 @@ pub(crate) fn provenance(
     // below the version floor never was.
     let newest = store::newest_ga(&installed);
     let stage_3 = newest.map(|jdk| conf::Resolved {
-        request: jdk.request(),
+        request: jdk.request,
         source: conf::Source::NewestInstalled,
     });
 
@@ -381,7 +378,7 @@ pub(crate) fn provenance(
         request: installed
             .iter()
             .find(|jdk| jdk.version == version)
-            .map(store::InstalledJdk::request),
+            .map(|jdk| jdk.request),
         path: java_home,
         version: Some(version),
         source: None,
@@ -572,7 +569,7 @@ mod tests {
 
     /// A stage 4 that fails if it is ever called, so "no network access" is an
     /// assertion rather than a comment.
-    fn refuse_network() -> anyhow::Result<String> {
+    fn refuse_network() -> anyhow::Result<Request> {
         Err(anyhow!("the network was consulted"))
     }
 
@@ -621,8 +618,8 @@ mod tests {
     /// installed.
     #[test]
     fn cascade_downloads_the_latest_release_when_nothing_is_installed() {
-        let resolved = cascade(None, None, false, || Ok("26".to_string()))
-            .expect("the latest release answers");
+        let resolved =
+            cascade(None, None, false, || Ok(request("26"))).expect("the latest release answers");
 
         assert_eq!(resolved.request, request("26"));
         assert_eq!(resolved.source, conf::Source::LatestRelease);
@@ -677,10 +674,8 @@ mod tests {
         let dir = tempdir().unwrap();
         let store = store_with(dir.path(), "28.0.0-beta+16.0.ea");
 
-        let resolved = cascade(None, newest_installed(&store), false, || {
-            Ok("27".to_string())
-        })
-        .expect("stage 4 answers when stage 3 declines");
+        let resolved = cascade(None, newest_installed(&store), false, || Ok(request("27")))
+            .expect("stage 4 answers when stage 3 declines");
 
         assert_eq!(
             resolved.request,

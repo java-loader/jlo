@@ -70,6 +70,24 @@ impl Request {
         }
     }
 
+    /// The name a parsed build version answers to, or `None` when its major
+    /// does not fit an `i64` - the rest of the crate counts majors in `i64`
+    /// because that is what the Adoptium API hands back.
+    ///
+    /// The prerelease field is the whole stream test: Adoptium spells every
+    /// early-access build with one (`-beta`), and no released build carries
+    /// one. No version floor, unlike [`Self::parse`]: a pre-8 JDK in the store
+    /// is still an install, and `jlo list` and `jlo remove` must see it.
+    pub(crate) fn of_build(version: &semver::Version) -> Option<Self> {
+        let major = i64::try_from(version.major).ok()?;
+        let stream = if version.pre.is_empty() {
+            Stream::Ga
+        } else {
+            Stream::Ea
+        };
+        Some(Self { major, stream })
+    }
+
     pub(crate) fn is_ea(self) -> bool {
         self.stream == Stream::Ea
     }
@@ -84,18 +102,6 @@ impl Request {
             "unsupported version '{text}': expected a major version (8, 11, 21) \
              or a pre-release stream ('28-ea')"
         )
-    }
-}
-
-/// Which stream a parsed build version belongs to.
-///
-/// The prerelease field is the whole test: Adoptium spells every early-access
-/// build with one (`-beta`), and no released build carries one.
-pub(crate) fn stream_of(version: &semver::Version) -> Stream {
-    if version.pre.is_empty() {
-        Stream::Ga
-    } else {
-        Stream::Ea
     }
 }
 

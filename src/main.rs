@@ -12,10 +12,10 @@ mod ui;
 mod version;
 
 use crate::adoptium::AdoptiumClient;
-use crate::request::{Request, Stream};
+use crate::request::Request;
 use crate::resolve::{Verb, requested_versions};
 use crate::shellenv::{parse_exec_args, restore_leading_separator, shell_quote, update_path};
-use crate::store::{InstalledJdk, JdkStore, RemoveError};
+use crate::store::{JdkStore, RemoveError};
 use anyhow::{Context, anyhow};
 use clap::Parser;
 use std::collections::HashSet;
@@ -300,8 +300,8 @@ fn cmd_list(client: &AdoptiumClient, offline: bool) -> Result<(), CommandError> 
         // least able to notice. No extra request either way.
         let ea_names: Vec<Request> = installed
             .iter()
-            .filter(|jdk| jdk.stream == Stream::Ea)
-            .map(InstalledJdk::request)
+            .map(|jdk| jdk.request)
+            .filter(|request| request.is_ea())
             .collect();
         ui::announce_released_ea(&ea_names, &catalogue.released_majors);
     }
@@ -423,26 +423,17 @@ fn cmd_init(
     global: bool,
     force: bool,
 ) -> Result<(), CommandError> {
-    let java_version = match version {
-        Some(version) => version,
+    // Parsed rather than merely checked, so what lands in the file is the
+    // name jlo itself would print: `jlo init 28-ea` writes `28-ea`, and
+    // `jlo init 28-EA` fails before anything is written.
+    let request = match version {
+        Some(version) => Request::parse(&version)?,
         None => client
             .latest_major()
             .context("could not fetch latest JDK version")?,
     };
 
-    // Parsed rather than merely checked, so what lands in the file is the
-    // name jlo itself would print: `jlo init 28-ea` writes `28-ea`, and
-    // `jlo init 28-EA` fails before anything is written.
-    let request = Request::parse(&java_version)?;
-    let java_version = request.to_string();
-
-    let result = if global {
-        conf::init_default_config(&java_version, force)
-    } else {
-        conf::init_project_config(&java_version, force)
-    };
-
-    result.map_err(|e| {
+    conf::init(request, global, force).map_err(|e| {
         // `--force` answers exactly one of the failures below, so the hint is
         // keyed off the message `conf` produced. Read it before the context is
         // attached: `to_string` renders only the outermost message.

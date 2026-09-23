@@ -924,8 +924,8 @@ fn build_rows(
 ) -> Vec<Row> {
     let mut majors: Vec<i64> = available
         .iter()
-        .map(|jdk| jdk.major)
-        .chain(installed.iter().map(|jdk| jdk.major))
+        .map(|jdk| jdk.request.major)
+        .chain(installed.iter().map(|jdk| jdk.request.major))
         .collect();
     majors.sort_unstable_by(|a, b| b.cmp(a));
     majors.dedup();
@@ -968,11 +968,9 @@ fn name_row(
     installed: &[InstalledJdk],
     active_version: Option<&str>,
 ) -> Option<NameRow> {
-    let offered = available.iter().find(|jdk| jdk.request() == name);
-    let mut builds: Vec<&InstalledJdk> = installed
-        .iter()
-        .filter(|jdk| jdk.request() == name)
-        .collect();
+    let offered = available.iter().find(|jdk| jdk.request == name);
+    let mut builds: Vec<&InstalledJdk> =
+        installed.iter().filter(|jdk| jdk.request == name).collect();
     if offered.is_none() && builds.is_empty() {
         return None;
     }
@@ -1606,24 +1604,30 @@ mod tests {
     fn remote(version: &str, major: i64) -> RemoteJdk {
         RemoteJdk {
             version: version.to_string(),
-            major,
-            stream: Stream::Ga,
+            request: Request {
+                major,
+                stream: Stream::Ga,
+            },
         }
     }
 
     fn remote_ea(version: &str, major: i64) -> RemoteJdk {
         RemoteJdk {
             version: version.to_string(),
-            major,
-            stream: Stream::Ea,
+            request: Request {
+                major,
+                stream: Stream::Ea,
+            },
         }
     }
 
     fn local(version: &str, major: i64) -> InstalledJdk {
         InstalledJdk {
             version: version.to_string(),
-            major,
-            stream: Stream::Ga,
+            request: Request {
+                major,
+                stream: Stream::Ga,
+            },
             managed: true,
         }
     }
@@ -1631,8 +1635,10 @@ mod tests {
     fn local_ea(version: &str, major: i64) -> InstalledJdk {
         InstalledJdk {
             version: version.to_string(),
-            major,
-            stream: Stream::Ea,
+            request: Request {
+                major,
+                stream: Stream::Ea,
+            },
             managed: true,
         }
     }
@@ -1640,8 +1646,10 @@ mod tests {
     fn unmanaged(version: &str, major: i64) -> InstalledJdk {
         InstalledJdk {
             version: version.to_string(),
-            major,
-            stream: Stream::Ga,
+            request: Request {
+                major,
+                stream: Stream::Ga,
+            },
             managed: false,
         }
     }
