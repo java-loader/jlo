@@ -1503,6 +1503,21 @@ mod tests {
         );
     }
 
+    /// The same order from the other side: a marker that cannot be removed
+    /// stops the removal before the directory goes, or the marker outlives
+    /// it after all. Staged by making the marker a directory, which
+    /// `remove_file` refuses with an error other than `NotFound`.
+    #[test]
+    fn a_marker_that_cannot_be_removed_keeps_the_install() {
+        let dir = tempdir().unwrap();
+        create_jdk_dir(dir.path(), "21.0.3+9", false);
+        fs::create_dir(sibling_marker(dir.path(), "21.0.3+9")).unwrap();
+
+        remove_install(dir.path(), "21.0.3+9").expect_err("the marker cannot be removed");
+
+        assert!(dir.path().join("21.0.3+9/bin/java").exists());
+    }
+
     // -- the two shapes a store entry can have --
     //
     // One store holds both: a bundle jlo installed, a flat directory an older
@@ -1643,6 +1658,24 @@ mod tests {
 
         assert!(matches!(err, RemoveError::InUse(v) if v == "21.0.3+9"));
         assert!(entry.exists());
+    }
+
+    /// `$JAVA_HOME` reached through a symlink - on macOS every path under
+    /// `/var` is one, `/private/var` being the real spelling. Comparing the
+    /// strings alone says "not in use" and deletes the JDK the shell runs.
+    #[test]
+    fn remove_refuses_a_jdk_in_use_under_another_spelling() {
+        let dir = tempdir().unwrap();
+        create_jdk_dir(dir.path(), "21.0.3+9", true);
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(dir.path().join("21.0.3+9"), &link).unwrap();
+
+        let err = JdkStore::at(dir.path())
+            .remove(&["21".to_string()], Some(&link))
+            .expect_err("JAVA_HOME points at it through a symlink");
+
+        assert!(matches!(err, RemoveError::InUse(v) if v == "21.0.3+9"));
+        assert!(dir.path().join("21.0.3+9").exists());
     }
 
     // -- find_matching --
@@ -1809,6 +1842,20 @@ mod tests {
         let dir = tempdir().unwrap();
         let missing = dir.path().join("nothing-installed-here");
         assert!(JdkStore::at(&missing).list().unwrap().is_empty());
+    }
+
+    /// Only a *missing* store is empty. One that exists but cannot be read
+    /// must not pass for "nothing installed" - every command would then act
+    /// on a store it has not seen.
+    #[test]
+    fn list_unreadable_base_dir_is_an_error() {
+        let dir = tempdir().unwrap();
+        let not_a_dir = dir.path().join("store");
+        fs::write(&not_a_dir, "").unwrap();
+        assert!(
+            JdkStore::at(&not_a_dir).list().is_err(),
+            "the store is a file"
+        );
     }
 
     // -- superseded_count --
