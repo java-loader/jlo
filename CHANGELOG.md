@@ -1,5 +1,62 @@
 # Changelog
 
+## [0.5.0](https://github.com/java-loader/jlo/compare/jlo-bin-v0.4.0...jlo-bin-v0.5.0) (2026-09-24)
+
+
+### ⚠ BREAKING CHANGES
+
+* **list:** installed and available sections with a glyph gutter
+* **list:** the `jlo list` row format changes.
+* the wrapper evaluates only a marked payload; live build replaced only when wrapped
+* `jlo update --all` is removed; a bare `jlo update` does what it did. `jlo update` without a version no longer resolves through .jlorc / default.jlorc / the newest install. `jlo install` now deletes the builds it supersedes and its stdout is evaluated by the shell wrapper.
+
+### Features
+
+* **adoptium:** fetch early-access metadata from the feature-releases endpoint ([7a2b925](https://github.com/java-loader/jlo/commit/7a2b9259b7801526a934317f88724eec87ad9d3c))
+* **cli:** add 'jlo install', a deliberate install that leaves the shell alone ([6da0c9d](https://github.com/java-loader/jlo/commit/6da0c9ded5b9ae0a91eb9e50e6c04a91f890f113))
+* **conf:** resolve an omitted version through a four-stage cascade ([f9e09e4](https://github.com/java-loader/jlo/commit/f9e09e49c3150bda12eac30068e1f119226c5aa7))
+* **help:** short -h, full --help, styled sections ([81fb61c](https://github.com/java-loader/jlo/commit/81fb61c7ef92641c5fe6aa4cbe0eb5ffdfc02ab9))
+* install and update share one operation; bare update means every installed name ([7e83d9c](https://github.com/java-loader/jlo/commit/7e83d9c556705402c8979c4d4f677c7febc5ae55))
+* **list:** installed and available sections with a glyph gutter ([a75d1bb](https://github.com/java-loader/jlo/commit/a75d1bb7f14d0c1f0fd4d07e35478ebad1aead4f))
+* **list:** mark installed pre-release builds ([e380a73](https://github.com/java-loader/jlo/commit/e380a73d0128635a3aad767161ec44775d9aef80))
+* **list:** offer the pre-release stream of every unreleased major ([62627fc](https://github.com/java-loader/jlo/commit/62627fc1e9c007458d79c4b2998672d3942301d4))
+* **list:** one row per major, named as the user types it ([4b98cc5](https://github.com/java-loader/jlo/commit/4b98cc5e071db3ad2fbd472f1b5587c4074c7bca))
+* **request:** accept '&lt;major&gt;-ea' as a version name ([47e7320](https://github.com/java-loader/jlo/commit/47e7320f67b478307a315567c70d02d0a7570f9c))
+* **resolve:** a pre-release is only ever handed out when it was named ([e288e51](https://github.com/java-loader/jlo/commit/e288e51bf606dd782f6b954fb7e0753db7ec4ace))
+* **store:** group installs by name rather than by major ([63b1b64](https://github.com/java-loader/jlo/commit/63b1b64903b489d1cb6dcf9322bfefe8dd70386c))
+* the wrapper evaluates only a marked payload; live build replaced only when wrapped ([7de0f80](https://github.com/java-loader/jlo/commit/7de0f807636928ce9e550eb3332ce3fe6b3e266c))
+* **ui:** one vocabulary for colour, one paste for the installer ([1f2105d](https://github.com/java-loader/jlo/commit/1f2105d8bb7b514f8908003dd2b8e20326fd0b87))
+* **update:** replace the superseded build instead of accumulating it ([2acd145](https://github.com/java-loader/jlo/commit/2acd145ff72089a754f21189521dde1447feccda))
+* **update:** say when a -ea name's major has been released ([b32d4dd](https://github.com/java-loader/jlo/commit/b32d4dd8f52f577cc19b85a7c9c4967198ae2fae))
+
+
+### Bug Fixes
+
+* **install:** print the repair hint once when several optional files fail ([5662910](https://github.com/java-loader/jlo/commit/56629100fa858ee5af792ef25b579116c8b2c2ec))
+* **install:** publish the binary under the lock, not before it ([9c3696a](https://github.com/java-loader/jlo/commit/9c3696a21c43e79663cee81eacf92631e6129786))
+* **install:** say J'Lo was not changed when publishing the binary fails ([b5ce855](https://github.com/java-loader/jlo/commit/b5ce855c3b88b0a3e9097351724c359a590fc8b8))
+* **install:** skip a name Adoptium does not offer instead of stopping ([f63b6f9](https://github.com/java-loader/jlo/commit/f63b6f99e3348302b78fb009f06200be80211878))
+* **list:** show an offered build that differs from the install ([a6cec1b](https://github.com/java-loader/jlo/commit/a6cec1bb91d97b4dabc074e4ffbd320e385490e1))
+* **macos:** keep the JDK bundle so java_home can see the install ([4934512](https://github.com/java-loader/jlo/commit/4934512dc020f74ae2f8da8eab6adbd5475951ed))
+* **prune:** stop deleting a JDK by directory order ([aa385eb](https://github.com/java-loader/jlo/commit/aa385eb1130d6ed7aa7d9279339ec71f1eef7f6c))
+* **selfupdate:** sweep staging directories an earlier run abandoned ([12280bd](https://github.com/java-loader/jlo/commit/12280bd44ac1a67e1e31a2c1cb408514838a52b7))
+* **shell:** clear every ShellCheck finding in the shipped scripts ([e50505d](https://github.com/java-loader/jlo/commit/e50505d98ad1ae4016bdc927cff1d2e98e640269))
+* **shell:** cut the end marker off before evaluating the payload ([e142494](https://github.com/java-loader/jlo/commit/e1424948608e3c7077876f30834f1d5ab10a9a86))
+* **shell:** stubs return the status of what they load ([5f9f485](https://github.com/java-loader/jlo/commit/5f9f485d73afa49e05055cbd966321f4ac8850b2))
+* **store:** find the extracted JDK by looking, not by name ([16d7e63](https://github.com/java-loader/jlo/commit/16d7e632c46906f3360ecf357ff83e0fa60d1512))
+* **store:** move the managed marker out of the JDK bundle ([a881862](https://github.com/java-loader/jlo/commit/a881862df711fd55060421b59e4798256a136d9f))
+* **store:** replace only builds older than the one this run installed ([8500497](https://github.com/java-loader/jlo/commit/8500497bd37b6dc252b52df59854abc9d6c30761))
+* the defects a two-model quality review turned up ([b1e5baa](https://github.com/java-loader/jlo/commit/b1e5baa02644b4b12519ebc2f13f33348f5cfa07))
+* the fourth review round, against the EA branch ([7cf773a](https://github.com/java-loader/jlo/commit/7cf773ae360d108f49bb0e073b6a75d7b589c13c))
+* the third review round, mostly against the second ([d4431b9](https://github.com/java-loader/jlo/commit/d4431b97285f8069401464573852d6fc03b3edfc))
+* **update:** never move a name back to an older offered build ([a3389b6](https://github.com/java-loader/jlo/commit/a3389b60ff7cd164093b658fbea0177d2a915d6f))
+* what the second review round found ([375a114](https://github.com/java-loader/jlo/commit/375a1147378392cc9c436c28d05ca44e7589e58f))
+
+
+### Reverts
+
+* **shell:** one complete file per dialect again ([08d98aa](https://github.com/java-loader/jlo/commit/08d98aa3af79235b9c7193a202742d01f89ee810))
+
 ## [0.4.0](https://github.com/java-loader/jlo/compare/jlo-bin-v0.3.0...jlo-bin-v0.4.0) (2026-09-21)
 
 
