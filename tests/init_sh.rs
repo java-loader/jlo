@@ -1,9 +1,9 @@
-//! Tests for the shell wrapper in `shell/jlo-init-common.sh`.
+//! Tests for the shell wrapper in `shell/jlo-init.{bash,zsh}`.
 //!
-//! The wrapper ships as one file per dialect: the binary writes the one source
-//! into `$JLO_HOME/bin/` under both dialect names and the generated `jlo.sh`
-//! picks one at source time. Each test therefore sources the file belonging to
-//! the interpreter it runs, which is exactly what a real shell does.
+//! The wrapper ships as one file per dialect: the binary writes both into
+//! `$JLO_HOME/bin/` and the generated `jlo.sh` picks one at source time. Each
+//! test therefore sources the file belonging to the interpreter it runs, which
+//! is exactly what a real shell does.
 //!
 //! The script is sourced by the user's interactive shell and its eval branch
 //! evaluates the binary's stdout - but only a payload ending in the marker
@@ -64,22 +64,22 @@ fn init_sh_home() -> tempfile::TempDir {
     let bin = home.path().join("bin");
     std::fs::create_dir_all(&bin).unwrap();
     for name in WRAPPERS {
-        std::fs::copy(shell_source(), bin.join(name)).unwrap();
+        std::fs::copy(shell_source(name), bin.join(name)).unwrap();
     }
     home
 }
 
-/// The two wrapper dialects, named as they are under `$JLO_HOME/bin/`.
+/// The two wrapper dialects, named as they are both in the repo and under
+/// `$JLO_HOME/bin/`.
 const WRAPPERS: &[&str] = &["jlo-init.bash", "jlo-init.zsh"];
 
 /// A stub line printing the marker a payload has to end in to be evaluated.
 const MARK: &str = "echo \"# jlo'end\"";
 
-/// The one source both dialect files are written from.
-fn shell_source() -> PathBuf {
+fn shell_source(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("shell")
-        .join("jlo-init-common.sh")
+        .join(name)
 }
 
 /// Source the wrapper dialect belonging to `sh` from `home`, then run `body`.
@@ -217,10 +217,10 @@ fn real_binary_offline_miss_fails_through_the_wrapper() {
 // Parseability: the shipped files are sourced from profiles we do not control
 // ---------------------------------------------------------------------------
 
-/// The one source is written out under both dialect names, so it has to
-/// parse under both shells - but never under a POSIX sh. The Rust compiler
-/// never looks at these bytes, so this is the cheapest half of the net that
-/// catches a typo in them.
+/// The whole point of splitting the wrapper per dialect: each file only has to
+/// parse under the shell it is named for. The Rust compiler never looks at
+/// these bytes, so this is the cheapest half of the net that catches a typo in
+/// one of them.
 #[test]
 fn each_wrapper_dialect_parses_under_its_own_shell() {
     for sh in shells(
@@ -229,12 +229,13 @@ fn each_wrapper_dialect_parses_under_its_own_shell() {
     ) {
         let out = Command::new(sh)
             .arg("-n")
-            .arg(shell_source())
+            .arg(shell_source(&format!("jlo-init.{}", dialect(sh))))
             .output()
             .unwrap();
         assert!(
             out.status.success(),
-            "the wrapper does not parse under {sh}: {}",
+            "jlo-init.{} does not parse under {sh}: {}",
+            dialect(sh),
             String::from_utf8_lossy(&out.stderr)
         );
     }

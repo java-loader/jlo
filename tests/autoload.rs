@@ -1,5 +1,4 @@
-//! Tests for the shell integration in `shell/jlo-autoload.{bash,zsh}` and the
-//! `shell/jlo-autoload-common.sh` the binary appends to each.
+//! Tests for the shell integration in `shell/jlo-autoload.{bash,zsh}`.
 //!
 //! The two dialects are separate files: the binary writes both into
 //! `$JLO_HOME/bin/` and the generated `autoload.sh` picks one at source time,
