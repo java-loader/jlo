@@ -33,10 +33,9 @@ use tempfile::tempdir;
 /// Separates the `declare -p` line from the element dump.
 const MARKER: &str = "--8<--";
 
-/// The dialect exactly as `__install` writes it - its own registration, then
-/// the common rest - produced by running the verb once per test run into a
-/// throwaway `$JLO_HOME`, so what is sourced here is the shipped file rather
-/// than a copy of how it is assembled.
+/// The dialect exactly as `__install` writes it, produced by running the verb
+/// once per test run into a throwaway `$JLO_HOME`, so what is sourced here is
+/// the shipped file.
 fn autoload_script(dialect: &str) -> String {
     static HOME: OnceLock<PathBuf> = OnceLock::new();
     let home = HOME.get_or_init(|| {

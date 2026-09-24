@@ -742,6 +742,8 @@ fn autoload_stub(layout: &Layout, note: &str) -> String {
         "{GENERATED_HEADER}{note}\
 {DIALECT_DISPATCH}\
 _jlo_rc=0
+# typeset runs only once _jlo_d names bash or zsh.
+# shellcheck disable=SC3044
 if [ -n \"$_jlo_d\" ] && typeset -f jlo >/dev/null 2>&1; then
   _jlo_f={prefix}\"$_jlo_d\"
 {load}

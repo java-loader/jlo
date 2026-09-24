@@ -91,6 +91,8 @@ if [ -z "$_jlo_registered" ]; then
   else
     # Scalar, unset, or single-element array: a plain assignment adds the
     # hook while preserving the variable's type and export flag.
+    # At most one element here, as checked above.
+    # shellcheck disable=SC2128,SC2178
     PROMPT_COMMAND="jlo_after_cd${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
   fi
 fi

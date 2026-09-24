@@ -13,7 +13,9 @@ jlo() {
     env|use|selfupdate|install|update)
       # install/update may delete the build this shell is on, so the shell
       # must be able to follow.
-      if ! ( JAVA_HOME= PATH= ) 2>/dev/null; then
+      # Assigned only to probe for readonly.
+      # shellcheck disable=SC2034,SC2123
+      if ! ( JAVA_HOME='' PATH='' ) 2>/dev/null; then
         echo "jlo: JAVA_HOME or PATH is read-only" >&2
         return 1
       fi
