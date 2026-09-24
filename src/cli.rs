@@ -304,8 +304,18 @@ some other version lives, see jlo home."
     )]
     Current,
 
-    /// Show available and installed JDKs
-    #[command(visible_alias = "ls")]
+    #[command(
+        visible_alias = "ls",
+        about = "Show available and installed JDKs",
+        long_about = "\
+Show available and installed JDKs
+
+One row per name (25, 28-ea). Other builds of a name sit on indented
+lines below it, with the exact version to pass to jlo remove and a
+status word: superseded, an older build jlo installed; unmanaged, a JDK
+jlo did not install - moved into the directory by hand under its version
+(21.0.11+9) - which jlo never deletes or updates."
+    )]
     List {
         /// List only what is installed; never touch the network
         #[arg(long)]
