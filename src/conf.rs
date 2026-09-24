@@ -131,12 +131,12 @@ fn logical_cwd(pwd: Option<PathBuf>, physical: PathBuf) -> PathBuf {
 /// The error reported when the whole cascade runs dry.
 ///
 /// Reachable only with `--offline` now: without it the cascade ends in a
-/// download rather than a failure. The wording is unchanged from when this was
-/// the ordinary outcome of a missing config, because the remedy is the same
-/// one - write a config, and every stage before this becomes irrelevant.
+/// download rather than a failure. So nothing is installed either - stage 3
+/// would have answered - and writing a config would only move the failure one
+/// stage up, to a pinned JDK that is not there. The remedy is an install.
 pub(crate) fn nothing_configured() -> anyhow::Error {
     anyhow!(
-        "No '{JLO_CONFIG_FILE}' found in the current directory or its parents, and no default config file. Please run 'jlo init' to create a configuration file."
+        "No JDK is installed, and no '{JLO_CONFIG_FILE}' in the current directory or its parents, nor a default config file, names one. Run 'jlo install <VERSION>' to install one."
     )
 }
 

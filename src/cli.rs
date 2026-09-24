@@ -14,8 +14,9 @@ fn after_help() -> String {
         "\
 {examples}
 
-VERSION is a Java major (25) or a pre-release stream (28-ea). Left out, it
-comes from .jlorc - '--help' has the full lookup.",
+VERSION is a Java major (25) or a pre-release stream (28-ea). Left out,
+env, home, exec and install take it from .jlorc - '--help' has the full
+lookup.",
         examples = examples(EXAMPLES.iter().filter(|e| e.2)),
     )
 }
@@ -30,14 +31,13 @@ pre-release stream (28-ea):
   jlo env [VERSION]          jlo install [VERSION...]
   jlo home [VERSION]         jlo update [VERSION...]
   jlo exec [VERSION] -- <COMMAND> [ARGS]...
-  jlo init [VERSION]
+  jlo init <VERSION>
 
 When VERSION is omitted, env, home, exec and install resolve it in four
 steps: the nearest .jlorc at or above the current directory, then
 ~/.jlo/default.jlorc, then the newest JDK already installed, then the latest
 release, which is downloaded. --offline stops after the third step rather
-than downloading. update instead takes every installed name, and init pins
-the latest release.
+than downloading. update instead takes every installed name.
 
 {examples}
 
@@ -419,16 +419,19 @@ an install J'Lo did not make alone without calling it an error."
 
     /// Write .jlorc pinning this project's Java version
     ///
-    /// With no argument, pins the latest version Adoptium offers. A major
-    /// version (21) or a pre-release stream (28-ea) is accepted, not an
-    /// exact build: 21, not 21.0.5.
+    /// A major version (21) or a pre-release stream (28-ea), not an exact
+    /// build: 21, not 21.0.5.
     ///
     /// --global writes ~/.jlo/default.jlorc instead: the version jlo env
     /// falls back to when no .jlorc is found, ahead of the newest JDK
     /// already installed.
     Init {
-        /// Java version: a major (21) or a pre-release stream (28-ea). Default: latest release
-        version: Option<String>,
+        // Required, with no "latest release" default: a .jlorc is committed
+        // and read by everyone on the project, so what it pins has to be a
+        // choice, not whatever was newest when someone ran init. A default
+        // can still be added after 1.0; taking one back would break users.
+        /// Java version: a major (21) or a pre-release stream (28-ea)
+        version: String,
 
         /// Write ~/.jlo/default.jlorc instead of ./.jlorc
         #[arg(short, long)]

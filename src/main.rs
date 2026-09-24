@@ -158,7 +158,7 @@ fn run() -> Result<(), CommandError> {
             version,
             global,
             force,
-        } => cmd_init(&client, version, global, force),
+        } => cmd_init(&version, global, force),
         cli::Command::Selfupdate => selfupdate::cmd_selfupdate(wrapped),
         cli::Command::Completions { shell } => {
             cmd_completions(shell);
@@ -413,21 +413,11 @@ fn active_java_home() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-fn cmd_init(
-    client: &AdoptiumClient,
-    version: Option<String>,
-    global: bool,
-    force: bool,
-) -> Result<(), CommandError> {
+fn cmd_init(version: &str, global: bool, force: bool) -> Result<(), CommandError> {
     // Parsed rather than merely checked, so what lands in the file is the
     // name jlo itself would print: `jlo init 28-ea` writes `28-ea`, and
     // `jlo init 28-EA` fails before anything is written.
-    let request = match version {
-        Some(version) => Request::parse(&version)?,
-        None => client
-            .latest_major()
-            .context("could not fetch latest JDK version")?,
-    };
+    let request = Request::parse(version)?;
 
     conf::init(request, global, force).map_err(|e| {
         // `--force` answers exactly one of the failures below.

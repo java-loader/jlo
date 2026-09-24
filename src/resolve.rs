@@ -594,7 +594,7 @@ mod tests {
             cascade(None, None, true, refuse_network).expect_err("offline has nowhere left to go");
 
         assert!(err.to_string().contains(".jlorc"), "{err}");
-        assert!(err.to_string().contains("jlo init"), "{err}");
+        assert!(err.to_string().contains("jlo install"), "{err}");
     }
 
     /// `--offline` stops *after* stage 3, not before it: an installed JDK is

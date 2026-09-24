@@ -409,8 +409,8 @@ impl AdoptiumClient {
         Ok(self.fetch_available_releases()?.available_releases)
     }
 
-    /// The newest major Adoptium has shipped, as the name `jlo init` writes
-    /// and the cascade's last stage downloads. `available_releases` holds
+    /// The newest major Adoptium has shipped, as the name the cascade's last
+    /// stage downloads. `available_releases` holds
     /// majors that have shipped, so this is a GA name by construction; it is
     /// parsed rather than assumed so the one grammar, floor included, stays in
     /// one place.

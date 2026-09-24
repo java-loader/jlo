@@ -1049,57 +1049,6 @@ fn a_failed_lookup_stops_the_run_before_anything_changes() {
     );
 }
 
-#[test]
-fn init_uses_latest_version_from_api() {
-    let mut server = mockito::Server::new();
-    let _m = server
-        .mock("GET", "/v3/info/available_releases")
-        .with_body(include_str!("fixtures/available_releases.json"))
-        .create();
-
-    let temp_dir = tempfile::tempdir().unwrap();
-    Command::cargo_bin("jlo-bin")
-        .unwrap()
-        .arg("init")
-        .current_dir(temp_dir.path())
-        .env("JLO_ADOPTIUM_API_URL", server.url())
-        .assert()
-        .success()
-        // Status goes to stderr; stdout stays reserved for eval-able shell
-        // output, so `jlo init` contributes nothing to it.
-        .stderr(predicate::str::contains("Created config file '.jlorc'"))
-        .stdout("");
-
-    let content = std::fs::read_to_string(temp_dir.path().join(".jlorc")).unwrap();
-    let lines: Vec<_> = content.lines().collect();
-    assert_eq!(
-        lines[0],
-        "# Java version configured by J'Lo - https://github.com/java-loader/jlo"
-    );
-    assert_eq!(lines[1], "26");
-}
-
-#[test]
-fn init_reports_api_http_error() {
-    let mut server = mockito::Server::new();
-    // valid body — the status alone must fail the command
-    let _m = server
-        .mock("GET", "/v3/info/available_releases")
-        .with_status(500)
-        .with_body(include_str!("fixtures/available_releases.json"))
-        .create();
-
-    let temp_dir = tempfile::tempdir().unwrap();
-    Command::cargo_bin("jlo-bin")
-        .unwrap()
-        .arg("init")
-        .current_dir(temp_dir.path())
-        .env("JLO_ADOPTIUM_API_URL", server.url())
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("HTTP 500"));
-}
-
 /// Pull the value out of an `export NAME='...'` line of `jlo env` output,
 /// undoing the single-quoting the binary applies.
 ///
