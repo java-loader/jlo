@@ -8,18 +8,15 @@
 use crate::ui;
 use clap::{Parser, Subcommand};
 
-/// `jlo -h` and a bare `jlo`: enough to get going, and a pointer to the rest.
+/// `jlo -h` and a bare `jlo`: enough to get going.
 fn after_help() -> String {
     format!(
         "\
 {examples}
 
 VERSION is a Java major (25) or a pre-release stream (28-ea). Left out, it
-comes from .jlorc - '--help' has the full lookup.
-
-{docs}",
+comes from .jlorc - '--help' has the full lookup.",
         examples = examples(EXAMPLES.iter().filter(|e| e.2)),
-        docs = ui::help_footnote(DOCS),
     )
 }
 
@@ -49,16 +46,11 @@ the latest release.
              the generated completions and default.jlorc. This is NOT
              where JDKs are installed - those go to the IntelliJ IDEA
              directory (~/Library/Java/JavaVirtualMachines on macOS,
-             ~/.jdks elsewhere), which is not configurable.
-
-{docs}",
+             ~/.jdks elsewhere), which is not configurable.",
         examples = examples(EXAMPLES.iter()),
         environment = ui::help_heading("Environment:"),
-        docs = ui::help_footnote(DOCS),
     )
 }
-
-const DOCS: &str = "Docs: https://github.com/java-loader/jlo";
 
 /// `jlo exec`'s usage line, shared by `-h` and the argument error's hint.
 pub(crate) const EXEC_USAGE: &str = "jlo exec [VERSION] -- <COMMAND> [ARGS]...";

@@ -466,12 +466,6 @@ pub(crate) fn help_mark(version: &str) -> String {
     format!("{style}J'Lo {version}{style:#}")
 }
 
-/// A footnote in help text: dim, like every other footnote.
-pub(crate) fn help_footnote(text: &str) -> String {
-    let style = Style::new().dimmed();
-    format!("{style}{text}{style:#}")
-}
-
 /// A closing note under a block of commands: dim, because it is secondary to
 /// the commands it follows.
 pub(crate) fn footnote(text: &str) -> String {
