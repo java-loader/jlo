@@ -38,6 +38,14 @@ in one go, plus a `. ~/.jlo/jlo.sh` that makes J'Lo work in the shell you are al
 edits your profile itself; you do. Custom [`JLO_HOME`](#jlo_home) paths are substituted for you. The lines never change: an upgrade
 regenerates the files they point at, so you only add them once.
 
+The installer also links a real `jlo` binary at `~/.local/bin/jlo` for shells that never source `jlo.sh` (CI, scripts,
+AI agents — see [CI / scripting / AI agents](#ci--scripting--ai-agents)). That directory is on `PATH` on most Linux
+setups but not on macOS; if it is missing, the installer prints the line to add:
+
+```shell
+export PATH="$HOME/.local/bin:$PATH"
+```
+
 ## Quick Start
 
 Setup environment for Java 25 (installing it first, if necessary):
