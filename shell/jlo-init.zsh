@@ -5,7 +5,19 @@
 # a single parser - this file never has to also be valid sh or bash.
 jlo() {
   local J out rc=0
-  J="${JLO_HOME-}/bin/jlo-bin"
+  # jlo.sh exports JLO_HOME before defining this function, but a host can
+  # replay the function without the environment it was defined under -
+  # Claude Code's shell snapshot keeps functions and PATH, nothing else. Fall
+  # back to the default install, where jlo-bin itself looks; with no HOME
+  # either, fail rather than run /bin/jlo-bin. Empty counts as unset.
+  if [ -n "${JLO_HOME-}" ]; then
+    J="$JLO_HOME/bin/jlo-bin"
+  elif [ -n "${HOME-}" ]; then
+    J="$HOME/.jlo/bin/jlo-bin"
+  else
+    echo "jlo: neither JLO_HOME nor HOME is set, so jlo-bin cannot be found" >&2
+    return 1
+  fi
   # "${1-}", not "$1": a bare `jlo` must not abort a `set -u` shell.
   case "${1-}" in
     # The verbs whose stdout is shell code; the others print data there or

@@ -757,3 +757,137 @@ fn a_bare_jlo_survives_set_u() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// A wrapper replayed without the environment it was defined under
+// ---------------------------------------------------------------------------
+
+/// Stands in for `jlo-bin` under `$HOME/.jlo`: the eval verb gets a marked
+/// export, every other verb echoes the argv it received.
+const ARGV_STUB: &str = r##"case "$1" in
+  __wrapped) echo 'export JLO_PROBE=reached'; echo "# jlo'end" ;;
+  *) printf 'argv:'; printf ' [%s]' "$@"; echo ;;
+esac"##;
+
+/// A temp `HOME` whose `.jlo/bin` holds both dialects and `ARGV_STUB` as
+/// `jlo-bin` - the default install a replayed wrapper has to fall back to.
+fn home_with_default_install() -> tempfile::TempDir {
+    let home = tempfile::tempdir().unwrap();
+    let bin = home.path().join(".jlo").join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    for name in WRAPPERS {
+        std::fs::copy(shell_source(name), bin.join(name)).unwrap();
+    }
+    let stub = bin.join("jlo-bin");
+    std::fs::write(&stub, format!("#!/bin/sh\n{ARGV_STUB}\n")).unwrap();
+    chmod(&stub, 0o755);
+    home
+}
+
+/// What a snapshotting host keeps of the wrapper: the function body as the
+/// defining shell dumps it, without the `JLO_HOME` that shell had.
+fn dump_wrapper(sh: &str, home: &Path) -> PathBuf {
+    let dump = home.join("jlo.fn");
+    let out = run_in(
+        sh,
+        &home.join(".jlo"),
+        &format!("typeset -f jlo > '{}'", dump.display()),
+    );
+    assert!(
+        out.status.success(),
+        "{sh}: could not dump the wrapper: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    dump
+}
+
+/// Load only `dump` into a fresh `sh` and run `body` there. The environment
+/// is cleared down to `PATH` before `env` is applied, so no dialect file is
+/// sourced and no `JLO_HOME` exists unless `env` sets one.
+fn replay_wrapper(sh: &str, dump: &Path, env: &[(&str, &str)], body: &str) -> Output {
+    Command::new(sh)
+        .arg("-c")
+        .arg(format!(". '{}'\n{body}", dump.display()))
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .envs(env.iter().copied())
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run {sh}: {e}"))
+}
+
+/// A host can replay the wrapper into a shell that never ran `jlo.sh` -
+/// Claude Code's shell snapshot keeps functions and `PATH`, not `JLO_HOME`.
+/// The wrapper must then use the default install under `$HOME/.jlo`, for a
+/// pass-through verb and for the eval branch alike, whether `JLO_HOME` is
+/// unset or exported empty.
+#[test]
+fn a_replayed_wrapper_without_jlo_home_uses_the_default_install() {
+    for sh in shells(
+        "a_replayed_wrapper_without_jlo_home_uses_the_default_install",
+        INTERPRETERS,
+    ) {
+        let home = home_with_default_install();
+        let dump = dump_wrapper(sh, home.path());
+        let home_str = home.path().to_str().unwrap();
+        for env in [
+            vec![("HOME", home_str)],
+            vec![("HOME", home_str), ("JLO_HOME", "")],
+        ] {
+            let out = replay_wrapper(
+                sh,
+                &dump,
+                &env,
+                "jlo exec -- a 'b c'\njlo env\necho \"probe=[${JLO_PROBE-}]\"",
+            );
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert!(
+                stdout.contains("argv: [exec] [--] [a] [b c]"),
+                "{sh} {env:?}: exec did not reach the default install unchanged: \
+                 stdout={stdout:?} stderr={stderr:?}"
+            );
+            assert!(
+                stdout.contains("probe=[reached]"),
+                "{sh} {env:?}: env's export never reached the calling shell: \
+                 stdout={stdout:?} stderr={stderr:?}"
+            );
+        }
+    }
+}
+
+/// With neither `JLO_HOME` nor `HOME` there is nothing to fall back to. The
+/// wrapper must say so and fail with 1 - not abort a `set -u` shell, and not
+/// run whatever `/.jlo/bin/jlo-bin` or `/bin/jlo-bin` might be. `unset HOME`
+/// is in the script because zsh fills `HOME` in from the user database when
+/// the environment lacks it.
+#[test]
+fn a_replayed_wrapper_without_home_fails_without_aborting_a_nounset_shell() {
+    for sh in shells(
+        "a_replayed_wrapper_without_home_fails_without_aborting_a_nounset_shell",
+        INTERPRETERS,
+    ) {
+        let home = home_with_default_install();
+        let dump = dump_wrapper(sh, home.path());
+        let out = replay_wrapper(
+            sh,
+            &dump,
+            &[],
+            "unset HOME JLO_HOME\nset -u\njlo exec -- a\necho \"survived rc=$?\"",
+        );
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stdout.contains("survived rc=1"),
+            "{sh}: the wrapper aborted the shell or did not fail with 1: \
+             stdout={stdout:?} stderr={stderr:?}"
+        );
+        assert!(
+            stderr.contains("JLO_HOME"),
+            "{sh}: the failure does not name what is missing: stderr={stderr:?}"
+        );
+        assert!(
+            !stdout.contains("argv:"),
+            "{sh}: a binary ran anyway: stdout={stdout:?}"
+        );
+    }
+}
