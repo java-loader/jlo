@@ -55,7 +55,16 @@ impl Install {
         let bin = home.path().join("bin");
         fs::create_dir_all(&bin).unwrap();
         let target = bin.join("jlo-bin");
-        fs::copy(assert_cmd::cargo::cargo_bin("jlo-bin"), &target).unwrap();
+        // Copied by a child `cp`, not `fs::copy`: a write fd on `target` held
+        // by this process leaks into any child another test thread forks at
+        // that moment, and exec'ing `target` then fails with ETXTBSY until
+        // that child has exec'd in turn.
+        let copied = Command::new("cp")
+            .arg(assert_cmd::cargo::cargo_bin("jlo-bin"))
+            .arg(&target)
+            .status()
+            .unwrap();
+        assert!(copied.success(), "cp of the binary under test failed");
         fs::set_permissions(&target, fs::Permissions::from_mode(0o755)).unwrap();
 
         let install = Self { home };
