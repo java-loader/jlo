@@ -444,6 +444,7 @@ fn list_remote_shows_available_versions() {
         .arg("list")
         .env("HOME", home.path())
         .env("JLO_ADOPTIUM_API_URL", server.url())
+        .env_remove("JAVA_HOME")
         .assert()
         .success()
         // Nothing is installed, so 21 is only named in the available line -
