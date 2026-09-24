@@ -390,13 +390,16 @@ fn the_printed_snippet_is_one_heredoc_and_one_source_line() {
     );
     let body: Vec<&String> = block[2..block.len() - 1].iter().collect();
     assert_eq!(body.len(), 3, "expected three profile lines: {block:#?}");
+    // The PATH hint is a second heredoc when it fires; the activation block
+    // itself must still be printed exactly once.
     assert_eq!(
         printed
             .lines()
-            .filter(|l| l.trim_start().starts_with("cat >>"))
+            .map(visible)
+            .filter(|l| l.starts_with("cat >>") && !l.contains(".zshenv"))
             .count(),
         1,
-        "expected exactly one heredoc:\n{printed}"
+        "expected exactly one activation heredoc:\n{printed}"
     );
     // The second half of the manual step, and the only other command: the
     // installer runs in a subshell and cannot load jlo into the parent itself.
@@ -499,6 +502,76 @@ fn heredoc_block(printed: &str) -> Option<Vec<String>> {
     let delimiter = quoted.strip_suffix('\'')?.to_string();
     let end = start + 1 + lines[start + 1..].iter().position(|l| *l == delimiter)?;
     Some(lines[start..=end].to_vec())
+}
+
+/// The heredoc that puts `~/.local/bin` on PATH, as the user would select it.
+/// Told apart from the activation block by its body, not by position.
+fn path_block(printed: &str) -> Option<Vec<String>> {
+    let lines: Vec<String> = printed.lines().map(visible).collect();
+    lines
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| l.starts_with("cat >>"))
+        .find_map(|(start, opener)| {
+            let delimiter = opener.rsplit_once("<<'")?.1.strip_suffix('\'')?.to_string();
+            let end = start + 1 + lines[start + 1..].iter().position(|l| *l == delimiter)?;
+            let block = lines[start..=end].to_vec();
+            block
+                .iter()
+                .any(|l| l.contains("$HOME/.local/bin"))
+                .then_some(block)
+        })
+}
+
+/// The PATH hint exists for shells that never read the interactive profile.
+/// Its block, run as pasted - twice, as nested shells would - has to put `jlo`
+/// on PATH for a clean `zsh -c`, exactly once.
+#[test]
+fn the_printed_path_block_reaches_a_non_interactive_zsh() {
+    let (dir, out) = install(None);
+    let home = dir.path().join("home");
+    let block = path_block(&printed(&out)).expect("installer printed no PATH heredoc");
+
+    for _ in 0..2 {
+        let ran = Command::new("/bin/sh")
+            .arg("-c")
+            .arg(block.join("\n"))
+            .env("HOME", &home)
+            .output()
+            .unwrap();
+        assert!(
+            ran.status.success(),
+            "the printed PATH block did not run: {}",
+            String::from_utf8_lossy(&ran.stderr)
+        );
+    }
+
+    let probe = Command::new("zsh")
+        .args(["-c", r#"command -v jlo; print -r -- "PATH=$PATH""#])
+        .env_clear()
+        .env("HOME", &home)
+        .env("PATH", "/usr/bin:/bin")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&probe.stdout);
+    let local_bin = home.join(".local").join("bin");
+    assert!(
+        stdout
+            .lines()
+            .any(|l| l == local_bin.join("jlo").display().to_string()),
+        "a clean zsh -c does not find jlo: {stdout}"
+    );
+    let path = stdout
+        .lines()
+        .find_map(|l| l.strip_prefix("PATH="))
+        .expect("probe printed no PATH");
+    assert_eq!(
+        std::env::split_paths(path)
+            .filter(|p| *p == local_bin)
+            .count(),
+        1,
+        "~/.local/bin is not on PATH exactly once: {path}"
+    );
 }
 
 /// The half of the output that makes the difference between "installed" and

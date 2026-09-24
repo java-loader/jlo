@@ -1080,7 +1080,7 @@ fn report(layout: &Layout, had_receipt: bool, symlink: Option<&Path>) {
         .is_some_and(|(found_in, _)| profile.as_deref() == Some(found_in.as_path()));
 
     if loaded_by_the_login_shell || (had_receipt && activated) {
-        path_nudge(symlink);
+        path_nudge(symlink, home_dir.as_deref(), None);
         return;
     }
 
@@ -1129,14 +1129,18 @@ fn report(layout: &Layout, had_receipt: bool, symlink: Option<&Path>) {
         "\n{}",
         ui::footnote("These lines never change: upgrades regenerate the files they point at.")
     );
-    path_nudge(symlink);
+    path_nudge(symlink, home_dir.as_deref(), Some(profile.as_path()));
 }
 
 /// Only nudge about PATH when the symlink was actually created and
 /// `~/.local/bin` is not already on PATH - usually the case on macOS, rarely
-/// on Linux.
-fn path_nudge(symlink: Option<&Path>) {
-    let Some(link) = symlink else { return };
+/// on Linux. The hint is a block to paste, naming the file, because the
+/// natural place to put a bare `export` - beside the activation lines in
+/// `~/.zshrc` - is the one file the shells it is for never read.
+fn path_nudge(symlink: Option<&Path>, home: Option<&Path>, about_to_exist: Option<&Path>) {
+    let (Some(link), Some(home)) = (symlink, home) else {
+        return;
+    };
     let Some(dir) = link.parent() else { return };
     let on_path = std::env::var_os("PATH")
         .is_some_and(|path| std::env::split_paths(&path).any(|entry| entry == dir));
@@ -1151,11 +1155,27 @@ fn path_nudge(symlink: Option<&Path>) {
         ui::footnote(&format!(
             "'jlo' also wants {} on PATH - for non-interactive shells\n\
              (CI, scripts, AI agents) and for 'jlo home'.",
-            tilde(dir, std::env::home_dir().as_deref())
+            tilde(dir, Some(home))
         ))
     );
     eprintln!("{}\n", ui::heading("Add it to your PATH:"));
-    eprintln!("{}", ui::command("export PATH=\"$HOME/.local/bin:$PATH\""));
+    let file = path_profile(&login_shell_name(), home, about_to_exist);
+    for line in append_block(
+        &profile_target(&file, Some(home)),
+        vec![PATH_LINE.to_string()],
+    ) {
+        eprintln!("{}", ui::command(&line));
+    }
+}
+
+/// The basename of `$SHELL`: the user's login shell, the one their profiles
+/// are written for.
+fn login_shell_name() -> String {
+    let shell = std::env::var("SHELL").unwrap_or_default();
+    Path::new(&shell)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
 /// The profile the *login* shell reads.
@@ -1169,11 +1189,7 @@ fn path_nudge(symlink: Option<&Path>) {
 /// printed command, so correcting it is a one-word edit rather than a line
 /// silently appended to the wrong file.
 fn login_shell_profile(home: &Path) -> PathBuf {
-    let shell = std::env::var("SHELL").unwrap_or_default();
-    let name = Path::new(&shell)
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
+    let name = login_shell_name();
     match name.as_str() {
         "zsh" => home.join(".zshrc"),
         "bash" if cfg!(target_os = "macos") => home.join(".bash_profile"),
@@ -1182,6 +1198,40 @@ fn login_shell_profile(home: &Path) -> PathBuf {
         // reads.
         _ => home.join(".profile"),
     }
+}
+
+/// The line the PATH hint appends. It runs in every nested shell, so it adds
+/// `~/.local/bin` only once, leaves no stray colon on an empty PATH and reads
+/// PATH nounset-safely. It *appends*: J'Lo only needs `jlo` to be found, and
+/// prepending would change which of the user's other tools in that directory
+/// win.
+const PATH_LINE: &str = r#"case ":${PATH-}:" in *":$HOME/.local/bin:"*) ;; *) export PATH="${PATH:+$PATH:}$HOME/.local/bin" ;; esac"#;
+
+/// The startup file a shell reads *without* the interactive profile - where
+/// `~/.local/bin` has to be put on PATH for scripts and agents to find `jlo`.
+///
+/// zsh reads `~/.zshenv` for `-c` and `-lc` alike. `ZDOTDIR` is ignored, as in
+/// [`login_shell_profile`]: it is usually set inside `~/.zshenv` itself, where
+/// an exported value would name a file a fresh zsh never reads, and the
+/// printed path is one word to correct.
+///
+/// bash has no such file: `bash -c` reads nothing, `bash -l` only the first
+/// existing of `.bash_profile`, `.bash_login` and `.profile`. The activation
+/// block printed in the same run is about to create `about_to_exist`, so it
+/// counts. With none of them, `.profile`, which every POSIX login shell reads.
+fn path_profile(shell: &str, home: &Path, about_to_exist: Option<&Path>) -> PathBuf {
+    if shell == "zsh" {
+        return home.join(".zshenv");
+    }
+    if shell == "bash"
+        && let Some(found) = [".bash_profile", ".bash_login", ".profile"]
+            .map(|name| home.join(name))
+            .into_iter()
+            .find(|file| file.is_file() || Some(file.as_path()) == about_to_exist)
+    {
+        return found;
+    }
+    home.join(".profile")
 }
 
 /// Fail open: an unreadable or missing profile counts as "not activated", so
@@ -1336,7 +1386,16 @@ fn source_line(path: &str) -> String {
     format!("[ -s {path} ] && . {path}")
 }
 
-/// The one command that puts J'Lo in the user's profile, as a heredoc.
+/// The one command that puts J'Lo in the user's profile.
+fn heredoc(layout: &Layout, home: Option<&Path>, target: &str) -> Vec<String> {
+    let body = ["jlo.sh", "autoload.sh", "completions.sh"]
+        .into_iter()
+        .map(|name| source_line(&snippet(layout, home, name)))
+        .collect();
+    append_block(target, body)
+}
+
+/// The one command that appends `body` to `target`, as a heredoc.
 ///
 /// Three `printf '%s\n' '...' >> ~/.zshrc` lines came before this, and the
 /// quoting was most of what the reader saw. A heredoc shows the *content*
@@ -1361,13 +1420,8 @@ fn source_line(path: &str) -> String {
 /// cannot help: inside a heredoc body the quotes are data. The user would be
 /// left with half a statement appended to their profile and the rest handed to
 /// the shell as input.
-fn heredoc(layout: &Layout, home: Option<&Path>, target: &str) -> Vec<String> {
-    let body: Vec<String> = ["jlo.sh", "autoload.sh", "completions.sh"]
-        .into_iter()
-        .map(|name| source_line(&snippet(layout, home, name)))
-        .collect();
+fn append_block(target: &str, body: Vec<String>) -> Vec<String> {
     let delimiter = terminator(&body);
-
     let mut lines = vec![format!("cat >> {target} <<'{delimiter}'"), String::new()];
     lines.extend(body);
     lines.push(delimiter);
@@ -1660,6 +1714,37 @@ mod tests {
             profile_target(Path::new("/etc/zshrc"), Some(home)),
             "'/etc/zshrc'"
         );
+    }
+
+    /// bash reads no startup file for `bash -c` and only the *first* existing
+    /// login file for `bash -l`, so the PATH line has to go into that one.
+    /// Naming a later file would be ignored; creating an earlier one would
+    /// switch off the file the user relies on.
+    #[test]
+    fn path_profile_follows_bash_login_precedence() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+
+        assert_eq!(path_profile("bash", home, None), home.join(".profile"));
+        // The activation block printed in the same run is about to create its
+        // target, so a login file among them counts as existing ...
+        let bash_profile = home.join(".bash_profile");
+        assert_eq!(
+            path_profile("bash", home, Some(&bash_profile)),
+            bash_profile
+        );
+        // ... and `.bashrc`, which bash -l never reads, does not.
+        assert_eq!(
+            path_profile("bash", home, Some(&home.join(".bashrc"))),
+            home.join(".profile")
+        );
+
+        fs::write(home.join(".profile"), "").unwrap();
+        assert_eq!(path_profile("bash", home, None), home.join(".profile"));
+        fs::write(home.join(".bash_login"), "").unwrap();
+        assert_eq!(path_profile("bash", home, None), home.join(".bash_login"));
+        fs::write(&bash_profile, "").unwrap();
+        assert_eq!(path_profile("bash", home, None), bash_profile);
     }
 
     #[test]
