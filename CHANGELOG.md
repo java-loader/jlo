@@ -62,7 +62,7 @@
 
 ### ⚠ BREAKING CHANGES
 
-* **selfupdate:** `jlo selfupdate` no longer runs install.sh. Upgrading from 0.3.x still works through the old wrapper's curl path; restart the shell once afterwards, as README's new Upgrading section describes.
+* **selfupdate:** `jlo selfupdate` no longer runs install.sh. Upgrading from 0.3.x still works through the old wrapper's curl path; restart the shell once afterwards (or run `. ~/.jlo/jlo.sh`). A pre-0.4.0 profile block keeps working through compatibility shims, which are removed in 1.0.0: replace it with the lines the installer prints.
 * **shell:** the release tarball no longer contains jlo-init.sh or jlo-autoload.sh, and $JLO_HOME/bin/jlo-init.sh is replaced by jlo-init.{bash,zsh}. The three profile lines are unchanged.
 * **cli:** drop the 'version' transition shim
 

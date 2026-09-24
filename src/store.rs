@@ -340,8 +340,7 @@ impl JdkStore {
     /// `<entry>/Contents/Home`, whose parent is `Contents`, so only a flat
     /// install has the store itself as its parent. Unmanaged installs are
     /// excluded deliberately - jlo did not put them there and cannot offer
-    /// `jlo remove` as the fix, and README already says the bundle is the
-    /// better shape to drop in by hand.
+    /// `jlo remove` as the fix.
     ///
     /// Returns the install, whose name is what `jlo install` takes in the
     /// advice line - read off the install rather than reparsed from the
@@ -1211,8 +1210,7 @@ fn remove_install(base: &Path, version: &str) -> std::io::Result<()> {
 ///
 /// Probed rather than selected on `env::consts::OS`, because one store holds
 /// both shapes at once: installs made by jlo versions that unwrapped the
-/// bundle sit beside bundles, and a hand-placed JDK (README, "Using a JDK
-/// J'Lo Did Not Install") may arrive as either.
+/// bundle sit beside bundles, and a hand-placed JDK may arrive as either.
 ///
 /// The probe is `bin/java`, not the directory: a `Contents/Home` that cannot
 /// run Java is not a java home, whatever its name, and requiring the launcher
@@ -1386,8 +1384,7 @@ mod tests {
     }
 
     /// An install jlo did not make is not one jlo can offer to reinstall, so
-    /// it is left alone. README already says the bundle is the better shape
-    /// to drop in by hand.
+    /// it is left alone.
     #[test]
     fn an_unmanaged_flat_install_is_not_warned_about() {
         let dir = tempdir().unwrap();
