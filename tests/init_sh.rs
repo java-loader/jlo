@@ -877,7 +877,7 @@ fn a_replayed_wrapper_without_home_fails_without_aborting_a_nounset_shell() {
         let stdout = String::from_utf8_lossy(&out.stdout);
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(
-            stdout.contains("survived rc=1"),
+            stdout.lines().any(|l| l == "survived rc=1"),
             "{sh}: the wrapper aborted the shell or did not fail with 1: \
              stdout={stdout:?} stderr={stderr:?}"
         );
