@@ -65,3 +65,8 @@ clap_complete = "4"
 # `unsafe_code = "deny"`, and it is already in the tree via tempfile.
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1", default-features = false, features = ["std", "fs"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
