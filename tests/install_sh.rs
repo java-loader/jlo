@@ -166,6 +166,18 @@ fn run_installer(
     checksum: Checksum,
     shell: &str,
 ) -> (tempfile::TempDir, Output) {
+    run_installer_over(&[], jlo_home, checksum, shell)
+}
+
+/// [`run_installer`] over a home that already holds `dotfiles`, as a real
+/// user's does: which profile file the installer names depends on which ones
+/// exist when it runs.
+fn run_installer_over(
+    dotfiles: &[(&str, &str)],
+    jlo_home: Option<&str>,
+    checksum: Checksum,
+    shell: &str,
+) -> (tempfile::TempDir, Output) {
     let dir = tempfile::tempdir().unwrap();
     let tarball = release_tarball(dir.path());
     let stubbin = stub_curl(dir.path(), &tarball, checksum);
@@ -174,6 +186,9 @@ fn run_installer(
     stub_gnu_tar(&stubbin);
     let home = dir.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
+    for (name, body) in dotfiles {
+        std::fs::write(home.join(name), body).unwrap();
+    }
 
     let path = format!(
         "{}:{}",
@@ -617,13 +632,17 @@ fn paste_blocks(home: &Path, blocks: &[Vec<String>]) {
 
 /// What a login bash - `bash -lc`, the shape `bash -l` scripts and most
 /// terminal emulators start - sees with nothing but `HOME` and a minimal
-/// `PATH`: whether `jlo` is on PATH, and whether `marker_var` survived.
+/// `PATH`: whether `jlo` is on PATH, whether the activation lines ran, and
+/// whether `marker_var` survived.
 #[derive(Debug)]
 struct BashLoginProbe {
     /// Read with `type -P`, not `command -v`: the activation lines define a
     /// `jlo` shell function in this very shell, and `-P` is the one form
     /// that still searches PATH instead of answering with the function.
     jlo: Option<String>,
+    /// `type -t jlo`: `function` once the activation lines have run in this
+    /// shell, `file` when only PATH has it.
+    kind: Option<String>,
     marker: Option<String>,
 }
 
@@ -632,7 +651,7 @@ fn bash_login_probe(home: &Path, marker_var: &str) -> BashLoginProbe {
         .args([
             "-lc",
             &format!(
-                r#"printf 'jlo=[%s]\n' "$(type -P jlo)"; printf 'marker=[%s]\n' "${{{marker_var}-}}""#
+                r#"printf 'jlo=[%s]\n' "$(type -P jlo)"; printf 'kind=[%s]\n' "$(type -t jlo)"; printf 'marker=[%s]\n' "${{{marker_var}-}}""#
             ),
         ])
         .env_clear()
@@ -653,19 +672,25 @@ fn bash_login_probe(home: &Path, marker_var: &str) -> BashLoginProbe {
     };
     BashLoginProbe {
         jlo: field("jlo=["),
+        kind: field("kind=["),
         marker: field("marker=["),
     }
 }
 
 /// The only end-to-end coverage of the *bash* half of the two printed blocks.
 ///
-/// Concrete regression this catches: passing `None` instead of
-/// `Some(profile.as_path())` at the final `path_nudge` call in `report` would,
-/// on macOS, put the PATH line in `~/.profile` while the activation block
-/// creates `~/.bash_profile` - a file `bash -l` never falls back past - so
-/// `jlo` would silently stay off PATH for a login bash. Verified by mutating
-/// that call site locally and watching this test fail before writing it; the
-/// mutation was not committed.
+/// `bash -l` reads only the first existing of `~/.bash_profile`,
+/// `~/.bash_login` and `~/.profile`. On macOS, where Terminal.app starts
+/// login shells and the activation block therefore targets one of those
+/// files, a wrong choice fails silently: a file the login bash never reads,
+/// such as `~/.bashrc`, leaves it without the `jlo` function (both cases); a
+/// PATH line in `~/.profile` behind a new `~/.bash_profile` is never read
+/// (case 1); creating `~/.bash_profile` in front of an existing `~/.profile`
+/// switches the user's file off (case 2).
+///
+/// On Linux the activation block targets `~/.bashrc`, which is no login file,
+/// so it can shadow nothing - and a login bash does not read it, so only
+/// macOS is expected to have the `jlo` function after the login files ran.
 #[test]
 fn a_login_bash_finds_jlo_after_pasting_both_printed_blocks() {
     if skip_missing(
@@ -692,10 +717,22 @@ fn a_login_bash_finds_jlo_after_pasting_both_printed_blocks() {
         Some(local_bin_jlo.display().to_string().as_str()),
         "a login bash does not find jlo after pasting both printed blocks: {probe:?}"
     );
+    if cfg!(target_os = "macos") {
+        assert_eq!(
+            probe.kind.as_deref(),
+            Some("function"),
+            "a login bash did not load J'Lo from the printed activation block: {probe:?}"
+        );
+    }
 
-    // Case 2: an existing ~/.profile the user already relies on, exporting a
-    // marker only they put there.
-    let (dir2, out2) = run_installer(None, Checksum::Correct, "/bin/bash");
+    // Case 2: the user's login setup lives in ~/.profile, there before J'Lo
+    // is, exporting a marker only they put there.
+    let (dir2, out2) = run_installer_over(
+        &[(".profile", "export JLO_TEST_MARKER=1\n")],
+        None,
+        Checksum::Correct,
+        "/bin/bash",
+    );
     assert!(
         out2.status.success(),
         "install.sh failed: {}",
@@ -706,7 +743,6 @@ fn a_login_bash_finds_jlo_after_pasting_both_printed_blocks() {
     let activation2 =
         heredoc_block(&printed_out2).expect("installer printed no activation heredoc");
     let path_hint2 = path_block(&printed_out2).expect("installer printed no PATH heredoc");
-    std::fs::write(home2.join(".profile"), "export JLO_TEST_MARKER=1\n").unwrap();
     paste_blocks(&home2, &[activation2, path_hint2]);
 
     let local_bin_jlo2 = home2.join(".local").join("bin").join("jlo");
@@ -716,15 +752,16 @@ fn a_login_bash_finds_jlo_after_pasting_both_printed_blocks() {
         Some(local_bin_jlo2.display().to_string().as_str()),
         "a login bash with a pre-existing ~/.profile does not find jlo: {probe2:?}"
     );
-    // On macOS the activation block itself writes ~/.bash_profile, which
-    // `bash -l` reads instead of ~/.profile - switching the user's file off
-    // is existing behaviour this change does not touch, so the marker only
-    // has to survive where the activation target is not itself a login file.
-    if !cfg!(target_os = "macos") {
+    assert_eq!(
+        probe2.marker.as_deref(),
+        Some("1"),
+        "pasting the printed blocks switched off the user's existing ~/.profile: {probe2:?}"
+    );
+    if cfg!(target_os = "macos") {
         assert_eq!(
-            probe2.marker.as_deref(),
-            Some("1"),
-            "pasting the printed blocks lost the user's existing ~/.profile: {probe2:?}"
+            probe2.kind.as_deref(),
+            Some("function"),
+            "a login bash did not load J'Lo from the printed activation block: {probe2:?}"
         );
     }
 }

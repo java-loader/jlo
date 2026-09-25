@@ -1182,8 +1182,11 @@ fn login_shell_name() -> String {
 ///
 /// `$SHELL` is the right signal here - unlike in the dialect dispatch, where
 /// the *running* shell is what matters and `$SHELL` would be wrong. The trap
-/// is bash: macOS's Terminal.app starts login shells, which read
-/// `.bash_profile` and never `.bashrc`.
+/// is bash: macOS's Terminal.app starts login shells, which never read
+/// `.bashrc` and read only the first of their three files that exists. Naming
+/// `.bash_profile` to someone whose setup lives in `.profile` would have them
+/// create the file that switches theirs off, so the first existing one is
+/// named, and `.bash_profile` only when there is none.
 ///
 /// A wrong guess is harmless by construction: the path stays visible in the
 /// printed command, so correcting it is a one-word edit rather than a line
@@ -1192,7 +1195,9 @@ fn login_shell_profile(home: &Path) -> PathBuf {
     let name = login_shell_name();
     match name.as_str() {
         "zsh" => home.join(".zshrc"),
-        "bash" if cfg!(target_os = "macos") => home.join(".bash_profile"),
+        "bash" if cfg!(target_os = "macos") => {
+            bash_login_file(home, None).unwrap_or_else(|| home.join(".bash_profile"))
+        }
         "bash" => home.join(".bashrc"),
         // Neither, or no $SHELL at all: ~/.profile is what a POSIX login shell
         // reads.
@@ -1224,14 +1229,24 @@ fn path_profile(shell: &str, home: &Path, about_to_exist: Option<&Path>) -> Path
         return home.join(".zshenv");
     }
     if shell == "bash"
-        && let Some(found) = [".bash_profile", ".bash_login", ".profile"]
-            .map(|name| home.join(name))
-            .into_iter()
-            .find(|file| file.is_file() || Some(file.as_path()) == about_to_exist)
+        && let Some(found) = bash_login_file(home, about_to_exist)
     {
         return found;
     }
     home.join(".profile")
+}
+
+/// The login file `bash -l` stops at: the first of the three that exists.
+/// Only a missing one is skipped, a dangling symlink included; a directory or
+/// an unreadable file is an error to bash, not a reason to read on, so it is
+/// named rather than the file behind it that would never be read.
+/// `about_to_exist` counts as existing - a block printed in the same run is
+/// about to create it.
+fn bash_login_file(home: &Path, about_to_exist: Option<&Path>) -> Option<PathBuf> {
+    [".bash_profile", ".bash_login", ".profile"]
+        .map(|name| home.join(name))
+        .into_iter()
+        .find(|file| file.exists() || Some(file.as_path()) == about_to_exist)
 }
 
 /// Fail open: an unreadable or missing profile counts as "not activated", so
@@ -1745,6 +1760,14 @@ mod tests {
         assert_eq!(path_profile("bash", home, None), home.join(".bash_login"));
         fs::write(&bash_profile, "").unwrap();
         assert_eq!(path_profile("bash", home, None), bash_profile);
+
+        // bash stops at anything there, and a directory is an error, not a
+        // reason to read on - naming the file behind it would go unread.
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        fs::write(home.join(".profile"), "").unwrap();
+        fs::create_dir(home.join(".bash_profile")).unwrap();
+        assert_eq!(path_profile("bash", home, None), home.join(".bash_profile"));
     }
 
     #[test]
