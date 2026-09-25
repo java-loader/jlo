@@ -63,9 +63,19 @@ jlo exec 25 -- ./gradlew build          # one command on Java 25
 export JAVA_HOME="$(jlo home 25)"        # just the path
 ```
 
-The plain binary is only found where `~/.local/bin` is on `PATH` without your interactive profile — the installer
-prints the line and the file for your shell (`~/.zshenv` for zsh). A bare `bash -c` from something that never ran a
-login shell sees only the `PATH` it inherited; call `~/.local/bin/jlo` by its full path there.
+The plain binary is only found where `~/.local/bin` is on `PATH` without your interactive profile. For zsh, that is
+`~/.zshenv`:
+
+```shell
+cat >> ~/.zshenv <<'EOF'
+
+case ":${PATH-}:" in *":$HOME/.local/bin:"*) ;; *) export PATH="${PATH:+$PATH:}$HOME/.local/bin" ;; esac
+EOF
+```
+
+The installer prints this, with the right file for your shell, whenever `~/.local/bin` is missing from your `PATH`. A
+bare `bash -c` from something that never ran a login shell sees only the `PATH` it inherited; call `~/.local/bin/jlo`
+by its full path there.
 
 J'Lo puts no `java` of its own on your `PATH`. Outside a shell where `jlo env` ran — by hand or through autoload —
 `java` is whatever it was before.
