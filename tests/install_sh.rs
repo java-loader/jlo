@@ -2467,13 +2467,13 @@ fn a_jlo_home_containing_a_newline_still_generates_files_that_parse() {
     )
     .unwrap();
 
-    let out = Command::new(odd.join("bin").join("jlo-bin"))
-        .arg("__install")
-        .env("HOME", &home)
-        .env("JLO_HOME", &odd)
-        .env("SHELL", "/bin/zsh")
-        .output()
-        .unwrap();
+    let out = run_staged(
+        Command::new(odd.join("bin").join("jlo-bin"))
+            .arg("__install")
+            .env("HOME", &home)
+            .env("JLO_HOME", &odd)
+            .env("SHELL", "/bin/zsh"),
+    );
     assert!(
         out.status.success(),
         "the install verb failed: {}",
