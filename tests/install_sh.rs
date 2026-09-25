@@ -157,10 +157,15 @@ fn stub_curl(dir: &Path, tarball: &Path, checksum: Checksum) -> PathBuf {
 /// outcome. `jlo_home` overrides the install directory the way a user
 /// exporting `JLO_HOME` would.
 ///
-/// `SHELL` is pinned so the profile the installer names is deterministic - it
-/// reads the *login* shell from there, which is the right signal for a file
-/// the user will edit, and the wrong one for the dialect dispatch.
-fn run_installer(jlo_home: Option<&str>, checksum: Checksum) -> (tempfile::TempDir, Output) {
+/// `SHELL` is pinned to `shell` so the profile the installer names is
+/// deterministic - it reads the *login* shell from there, which is the right
+/// signal for a file the user will edit, and the wrong one for the dialect
+/// dispatch.
+fn run_installer(
+    jlo_home: Option<&str>,
+    checksum: Checksum,
+    shell: &str,
+) -> (tempfile::TempDir, Output) {
     let dir = tempfile::tempdir().unwrap();
     let tarball = release_tarball(dir.path());
     let stubbin = stub_curl(dir.path(), &tarball, checksum);
@@ -179,7 +184,7 @@ fn run_installer(jlo_home: Option<&str>, checksum: Checksum) -> (tempfile::TempD
     cmd.arg(manifest().join("install.sh"))
         .env("HOME", &home)
         .env("PATH", path)
-        .env("SHELL", "/bin/zsh")
+        .env("SHELL", shell)
         .env_remove("JLO_HOME");
     if let Some(h) = jlo_home {
         cmd.env("JLO_HOME", h.replace("$HOME", &home.display().to_string()));
@@ -189,7 +194,7 @@ fn run_installer(jlo_home: Option<&str>, checksum: Checksum) -> (tempfile::TempD
 }
 
 fn install(jlo_home: Option<&str>) -> (tempfile::TempDir, Output) {
-    let (dir, out) = run_installer(jlo_home, Checksum::Correct);
+    let (dir, out) = run_installer(jlo_home, Checksum::Correct, "/bin/zsh");
     assert!(
         out.status.success(),
         "install.sh failed: {}",
@@ -525,9 +530,18 @@ fn path_block(printed: &str) -> Option<Vec<String>> {
 
 /// The PATH hint exists for shells that never read the interactive profile.
 /// Its block, run as pasted - twice, as nested shells would - has to put `jlo`
-/// on PATH for a clean `zsh -c`, exactly once.
+/// on PATH for a clean `zsh -c`, exactly once, and it must *append*: the old
+/// hint prepended, so a revert to that shape is plausible and has to fail
+/// this test - hence checking that `~/.local/bin` lands last, not merely that
+/// it is present.
 #[test]
 fn the_printed_path_block_reaches_a_non_interactive_zsh() {
+    if skip_missing(
+        "the_printed_path_block_reaches_a_non_interactive_zsh",
+        "zsh",
+    ) {
+        return;
+    }
     let (dir, out) = install(None);
     let home = dir.path().join("home");
     let block = path_block(&printed(&out)).expect("installer printed no PATH heredoc");
@@ -565,13 +579,154 @@ fn the_printed_path_block_reaches_a_non_interactive_zsh() {
         .lines()
         .find_map(|l| l.strip_prefix("PATH="))
         .expect("probe printed no PATH");
+    let entries: Vec<PathBuf> = std::env::split_paths(path).collect();
     assert_eq!(
-        std::env::split_paths(path)
-            .filter(|p| *p == local_bin)
-            .count(),
+        entries.iter().filter(|p| **p == local_bin).count(),
         1,
         "~/.local/bin is not on PATH exactly once: {path}"
     );
+    // Appended, not prepended: J'Lo only needs `jlo` to be found, so it must
+    // not change which of the user's other ~/.local/bin tools wins.
+    assert_eq!(
+        entries.last(),
+        Some(&local_bin),
+        "~/.local/bin was not appended to PATH: {path}"
+    );
+}
+
+/// Pastes each printed block, in order, as one script - exactly the shape a
+/// user copying them one after another produces.
+fn paste_blocks(home: &Path, blocks: &[Vec<String>]) {
+    let script = blocks
+        .iter()
+        .map(|block| block.join("\n"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let ran = Command::new("/bin/sh")
+        .arg("-c")
+        .arg(script)
+        .env("HOME", home)
+        .output()
+        .unwrap();
+    assert!(
+        ran.status.success(),
+        "pasting the printed blocks failed: {}",
+        String::from_utf8_lossy(&ran.stderr)
+    );
+}
+
+/// What a login bash - `bash -lc`, the shape `bash -l` scripts and most
+/// terminal emulators start - sees with nothing but `HOME` and a minimal
+/// `PATH`: whether `jlo` is on PATH, and whether `marker_var` survived.
+#[derive(Debug)]
+struct BashLoginProbe {
+    /// Read with `type -P`, not `command -v`: the activation lines define a
+    /// `jlo` shell function in this very shell, and `-P` is the one form
+    /// that still searches PATH instead of answering with the function.
+    jlo: Option<String>,
+    marker: Option<String>,
+}
+
+fn bash_login_probe(home: &Path, marker_var: &str) -> BashLoginProbe {
+    let out = Command::new("/bin/bash")
+        .args([
+            "-lc",
+            &format!(
+                r#"printf 'jlo=[%s]\n' "$(type -P jlo)"; printf 'marker=[%s]\n' "${{{marker_var}-}}""#
+            ),
+        ])
+        .env_clear()
+        .env("HOME", home)
+        .env("PATH", "/usr/bin:/bin")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let field = |prefix: &str| {
+        stdout
+            .lines()
+            .find_map(|l| {
+                l.strip_prefix(prefix)?
+                    .strip_suffix(']')
+                    .map(str::to_string)
+            })
+            .filter(|s| !s.is_empty())
+    };
+    BashLoginProbe {
+        jlo: field("jlo=["),
+        marker: field("marker=["),
+    }
+}
+
+/// The only end-to-end coverage of the *bash* half of the two printed blocks.
+///
+/// Concrete regression this catches: passing `None` instead of
+/// `Some(profile.as_path())` at the final `path_nudge` call in `report` would,
+/// on macOS, put the PATH line in `~/.profile` while the activation block
+/// creates `~/.bash_profile` - a file `bash -l` never falls back past - so
+/// `jlo` would silently stay off PATH for a login bash. Verified by mutating
+/// that call site locally and watching this test fail before writing it; the
+/// mutation was not committed.
+#[test]
+fn a_login_bash_finds_jlo_after_pasting_both_printed_blocks() {
+    if skip_missing(
+        "a_login_bash_finds_jlo_after_pasting_both_printed_blocks",
+        "/bin/bash",
+    ) {
+        return;
+    }
+
+    // Case 1: a completely fresh HOME, nothing but what the installer itself
+    // is about to write.
+    let (dir, out) = run_installer(None, Checksum::Correct, "/bin/bash");
+    assert!(out.status.success(), "install.sh failed: {}", printed(&out));
+    let home = dir.path().join("home");
+    let printed_out = printed(&out);
+    let activation = heredoc_block(&printed_out).expect("installer printed no activation heredoc");
+    let path_hint = path_block(&printed_out).expect("installer printed no PATH heredoc");
+    paste_blocks(&home, &[activation, path_hint]);
+
+    let local_bin_jlo = home.join(".local").join("bin").join("jlo");
+    let probe = bash_login_probe(&home, "JLO_TEST_MARKER");
+    assert_eq!(
+        probe.jlo.as_deref(),
+        Some(local_bin_jlo.display().to_string().as_str()),
+        "a login bash does not find jlo after pasting both printed blocks: {probe:?}"
+    );
+
+    // Case 2: an existing ~/.profile the user already relies on, exporting a
+    // marker only they put there.
+    let (dir2, out2) = run_installer(None, Checksum::Correct, "/bin/bash");
+    assert!(
+        out2.status.success(),
+        "install.sh failed: {}",
+        printed(&out2)
+    );
+    let home2 = dir2.path().join("home");
+    let printed_out2 = printed(&out2);
+    let activation2 =
+        heredoc_block(&printed_out2).expect("installer printed no activation heredoc");
+    let path_hint2 = path_block(&printed_out2).expect("installer printed no PATH heredoc");
+    std::fs::write(home2.join(".profile"), "export JLO_TEST_MARKER=1\n").unwrap();
+    paste_blocks(&home2, &[activation2, path_hint2]);
+
+    let local_bin_jlo2 = home2.join(".local").join("bin").join("jlo");
+    let probe2 = bash_login_probe(&home2, "JLO_TEST_MARKER");
+    assert_eq!(
+        probe2.jlo.as_deref(),
+        Some(local_bin_jlo2.display().to_string().as_str()),
+        "a login bash with a pre-existing ~/.profile does not find jlo: {probe2:?}"
+    );
+    // On macOS the activation block itself writes ~/.bash_profile, which
+    // `bash -l` reads instead of ~/.profile - switching the user's file off
+    // is existing behaviour this change does not touch, so the marker only
+    // has to survive where the activation target is not itself a login file.
+    if !cfg!(target_os = "macos") {
+        assert_eq!(
+            probe2.marker.as_deref(),
+            Some("1"),
+            "pasting the printed blocks lost the user's existing ~/.profile: {probe2:?}"
+        );
+    }
 }
 
 /// The half of the output that makes the difference between "installed" and
@@ -701,7 +856,7 @@ fn assert_no_indented_commands(printed: &str, expected: usize, what: &str) {
 /// the wrong file.
 #[test]
 fn the_profile_path_follows_the_login_shell() {
-    let (dir, out) = run_installer(None, Checksum::Correct);
+    let (dir, out) = run_installer(None, Checksum::Correct, "/bin/zsh");
     assert!(out.status.success());
     drop(dir);
     assert!(
@@ -1340,7 +1495,7 @@ fn the_dialect_dispatch_is_a_clean_no_op_under_a_non_bash_sh() {
 /// A checksum that is present and wrong is fatal, and nothing is installed.
 #[test]
 fn a_checksum_mismatch_aborts_the_install() {
-    let (dir, out) = run_installer(None, Checksum::Wrong);
+    let (dir, out) = run_installer(None, Checksum::Wrong, "/bin/zsh");
     let home = dir.path().join("home");
     assert!(
         !out.status.success(),
@@ -1363,7 +1518,7 @@ fn a_checksum_mismatch_aborts_the_install() {
 /// strand users on a download TLS already protected.
 #[test]
 fn a_missing_checksum_warns_but_installs() {
-    let (dir, out) = run_installer(None, Checksum::Missing);
+    let (dir, out) = run_installer(None, Checksum::Missing, "/bin/zsh");
     assert!(
         out.status.success(),
         "a release without a published checksum could not be installed: {}",
