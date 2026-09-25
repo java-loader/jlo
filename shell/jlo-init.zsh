@@ -7,7 +7,7 @@ jlo() {
   local J out rc=0
   # jlo.sh exports JLO_HOME before defining this function, but a host can
   # replay the function without the environment it was defined under -
-  # Claude Code's shell snapshot keeps functions and PATH but not JLO_HOME.
+  # a shell rebuilt from a snapshot of functions and PATH, without JLO_HOME.
   # Fall back to the default install, where jlo-bin itself looks; with no
   # HOME either, fail rather than run /bin/jlo-bin. Empty counts as unset.
   if [ -n "${JLO_HOME-}" ]; then

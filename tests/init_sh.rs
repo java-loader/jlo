@@ -816,7 +816,7 @@ fn replay_wrapper(sh: &str, dump: &Path, env: &[(&str, &str)], body: &str) -> Ou
 }
 
 /// A host can replay the wrapper into a shell that never ran `jlo.sh` -
-/// Claude Code's shell snapshot keeps functions and `PATH`, not `JLO_HOME`.
+/// a shell rebuilt from a snapshot of functions and `PATH`, without `JLO_HOME`.
 /// The wrapper must then use the default install under `$HOME/.jlo`, for a
 /// pass-through verb and for the eval branch alike, whether `JLO_HOME` is
 /// unset or exported empty.
