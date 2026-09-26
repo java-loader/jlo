@@ -103,51 +103,49 @@ main() {
 
   # The checksum is published beside the tarball, so it shares an origin with
   # it: it catches a corrupt or truncated download, not a compromised release.
-  # That is also why a *missing* one is a warning rather than a refusal - it is
-  # absent only on releases that predate it, and failing closed there would
-  # strand users on a download TLS already protected. A checksum that is
-  # present and does not match is a different thing entirely, and fatal.
-  if curl -fsSL "$JLO_URL.sha256" -o "$FQ_JLO_SUM" 2>/dev/null; then
-    # The first line only. Without it a multi-line file yields a multi-line
-    # JLO_EXPECTED, and the checks below both slip: the glob counts a newline
-    # as one of its 64 characters, and the command substitution strips the
-    # newline tr leaves behind, so "32 hex chars, newline, 31 hex chars" reads
-    # as a well-formed digest.
-    JLO_EXPECTED="$(head -n 1 "$FQ_JLO_SUM" | cut -d ' ' -f 1)"
-    rm -f "$FQ_JLO_SUM"
-    # An empty or malformed expectation must never pass for a match, and it
-    # must not reach the "no tool here" branch either - that branch is for a
-    # missing shasum, not for a checksum file we could not read. Two tests,
-    # because neither alone is enough: the glob fixes the length (POSIX case
-    # patterns cannot count repetitions) and the tr fixes the alphabet.
-    JLO_NOT_HEX="$(printf '%s' "$JLO_EXPECTED" | tr -d '0-9a-fA-F')"
-    case "$JLO_EXPECTED" in
-      ????????????????????????????????????????????????????????????????)
-        JLO_WELL_FORMED=1 ;;
-      *)
-        JLO_WELL_FORMED=0 ;;
-    esac
-    if [ "$JLO_WELL_FORMED" = 0 ] || [ -n "$JLO_NOT_HEX" ]; then
-      echo "Checksum file for $JLO_PACKAGE is not a SHA256; refusing to install." >&2
-      exit 1
-    fi
-    if JLO_ACTUAL="$(jlo_sha256 "$FQ_JLO_BUNDLE")"; then
-      # Case-insensitive: the tool that wrote the file and the tool reading it
-      # need not agree on the case of the hex.
-      JLO_EXPECTED="$(printf '%s' "$JLO_EXPECTED" | tr 'A-F' 'a-f')"
-      JLO_ACTUAL="$(printf '%s' "$JLO_ACTUAL" | tr 'A-F' 'a-f')"
-      if [ "$JLO_ACTUAL" != "$JLO_EXPECTED" ]; then
-        echo "Checksum mismatch for $JLO_PACKAGE" >&2
-        echo "  expected $JLO_EXPECTED" >&2
-        echo "  got      $JLO_ACTUAL" >&2
-        exit 1
-      fi
-    else
-      echo "Warning: neither shasum nor sha256sum is available; skipping checksum verification." >&2
-    fi
-  else
-    rm -f "$FQ_JLO_SUM"
-    echo "Warning: no published checksum for $JLO_PACKAGE; skipping verification." >&2
+  # It is also the only verification a new J'Lo gets - 'jlo selfupdate' runs
+  # this script too - so a missing checksum, or no tool to check it with, stops
+  # the install like a mismatch does. Every release this script can fetch
+  # publishes one: it is served from a release and fetches that release or a
+  # later one, so a missing checksum means a broken release, not an old one.
+  if ! curl -fsSL "$JLO_URL.sha256" -o "$FQ_JLO_SUM" 2>/dev/null; then
+    echo "No published checksum for $JLO_PACKAGE at $JLO_URL.sha256; refusing to install." >&2
+    exit 1
+  fi
+  # The first line only. Without it a multi-line file yields a multi-line
+  # JLO_EXPECTED, and the checks below both slip: the glob counts a newline
+  # as one of its 64 characters, and the command substitution strips the
+  # newline tr leaves behind, so "32 hex chars, newline, 31 hex chars" reads
+  # as a well-formed digest.
+  JLO_EXPECTED="$(head -n 1 "$FQ_JLO_SUM" | cut -d ' ' -f 1)"
+  rm -f "$FQ_JLO_SUM"
+  # An empty or malformed expectation must never pass for a match. Two tests,
+  # because neither alone is enough: the glob fixes the length (POSIX case
+  # patterns cannot count repetitions) and the tr fixes the alphabet.
+  JLO_NOT_HEX="$(printf '%s' "$JLO_EXPECTED" | tr -d '0-9a-fA-F')"
+  case "$JLO_EXPECTED" in
+    ????????????????????????????????????????????????????????????????)
+      JLO_WELL_FORMED=1 ;;
+    *)
+      JLO_WELL_FORMED=0 ;;
+  esac
+  if [ "$JLO_WELL_FORMED" = 0 ] || [ -n "$JLO_NOT_HEX" ]; then
+    echo "Checksum file for $JLO_PACKAGE is not a SHA256; refusing to install." >&2
+    exit 1
+  fi
+  if ! JLO_ACTUAL="$(jlo_sha256 "$FQ_JLO_BUNDLE")"; then
+    echo "Neither shasum nor sha256sum is available, so $JLO_PACKAGE cannot be verified; refusing to install." >&2
+    exit 1
+  fi
+  # Case-insensitive: the tool that wrote the file and the tool reading it
+  # need not agree on the case of the hex.
+  JLO_EXPECTED="$(printf '%s' "$JLO_EXPECTED" | tr 'A-F' 'a-f')"
+  JLO_ACTUAL="$(printf '%s' "$JLO_ACTUAL" | tr 'A-F' 'a-f')"
+  if [ "$JLO_ACTUAL" != "$JLO_EXPECTED" ]; then
+    echo "Checksum mismatch for $JLO_PACKAGE" >&2
+    echo "  expected $JLO_EXPECTED" >&2
+    echo "  got      $JLO_ACTUAL" >&2
+    exit 1
   fi
 
   # The tarball carries exactly one file, 'jlo-bin'. The shell code used to

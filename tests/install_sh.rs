@@ -101,8 +101,12 @@ enum Checksum {
     /// Computed at run time by the same tool `install.sh` uses, so the happy
     /// path cannot pass by both sides being wrong in the same way.
     Correct,
+    /// Computed here, in Rust: for a test that takes both hashing tools off
+    /// `PATH`, where `Correct` would serve an empty sum and exercise the
+    /// malformed-checksum refusal instead.
+    Precomputed,
     Wrong,
-    /// A release that predates published checksums: `curl -f` fails.
+    /// No `.sha256` beside the tarball: `curl -f` fails.
     Missing,
 }
 
@@ -119,6 +123,11 @@ fn stub_curl(dir: &Path, tarball: &Path, checksum: Checksum) -> PathBuf {
             "{{ shasum -a 256 '{t}' 2>/dev/null || sha256sum '{t}'; }} | cut -d ' ' -f 1 > \"$out\"",
             t = tarball.display()
         ),
+        Checksum::Precomputed => {
+            use sha2::Digest as _;
+            let sum = hex::encode(sha2::Sha256::digest(std::fs::read(tarball).unwrap()));
+            format!("echo '{sum}' > \"$out\"")
+        }
         Checksum::Wrong => format!("echo '{}' > \"$out\"", "0".repeat(64)),
         Checksum::Missing => "exit 22".to_string(),
     };
@@ -1395,29 +1404,121 @@ fn a_checksum_mismatch_aborts_the_install() {
     );
 }
 
-/// A *missing* checksum is a release that predates them, not an attack: it
-/// shares an origin with the tarball either way, so failing closed here would
-/// strand users on a download TLS already protected.
+/// What a refused reinstall must leave: the binary that was there (same
+/// inode), the layout that was there, and no staging directory. `bin/` itself
+/// may have been created.
+fn assert_existing_install_untouched(home: &Path, binary_ino: u64, jlo_sh: &str) {
+    let jlo = home.join(".jlo");
+    assert_eq!(
+        std::fs::metadata(jlo.join("bin").join("jlo-bin"))
+            .unwrap()
+            .ino(),
+        binary_ino,
+        "the refused install replaced the binary"
+    );
+    assert_eq!(
+        std::fs::read_to_string(jlo.join("jlo.sh")).unwrap(),
+        jlo_sh,
+        "the refused install rewrote the layout"
+    );
+    let leftovers: Vec<_> = std::fs::read_dir(jlo.join("bin"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with(".jlo-install"))
+        .collect();
+    assert!(leftovers.is_empty(), "staging left behind: {leftovers:?}");
+}
+
+/// `install.sh` is the only verification a new J'Lo gets - `jlo selfupdate`
+/// runs it too - and every release it can fetch publishes a checksum. A
+/// missing one is a broken release, and refused like a mismatch.
 #[test]
-fn a_missing_checksum_warns_but_installs() {
-    let (dir, out) = run_installer(None, Checksum::Missing, "/bin/zsh");
+fn a_missing_checksum_refuses_and_keeps_the_existing_install() {
+    let (dir, _) = install(None);
+    let home = dir.path().join("home");
+    let jlo = home.join(".jlo");
+    let binary_ino = std::fs::metadata(jlo.join("bin").join("jlo-bin"))
+        .unwrap()
+        .ino();
+    let jlo_sh = std::fs::read_to_string(jlo.join("jlo.sh")).unwrap();
+
+    // Same stub directory as the first run, now serving no checksum.
+    stub_curl(
+        dir.path(),
+        &dir.path().join("jlo.tar.gz"),
+        Checksum::Missing,
+    );
+    let out = reinstall_with_installer(dir.path(), &home);
+
     assert!(
-        out.status.success(),
-        "a release without a published checksum could not be installed: {}",
+        !out.status.success(),
+        "installed without a checksum: {}",
         printed(&out)
     );
     assert!(
-        printed(&out).contains("no published checksum"),
-        "the installer skipped verification silently: {}",
+        printed(&out).contains("No published checksum"),
+        "the installer did not say why it stopped: {}",
+        printed(&out)
+    );
+    assert_existing_install_untouched(&home, binary_ino, &jlo_sh);
+}
+
+/// Neither `shasum` nor `sha256sum`: nothing can check the download, so
+/// nothing is installed.
+#[test]
+fn a_missing_hashing_tool_refuses_and_keeps_the_existing_install() {
+    let (dir, _) = install(None);
+    let home = dir.path().join("home");
+    let jlo = home.join(".jlo");
+    let binary_ino = std::fs::metadata(jlo.join("bin").join("jlo-bin"))
+        .unwrap()
+        .ino();
+    let jlo_sh = std::fs::read_to_string(jlo.join("jlo.sh")).unwrap();
+
+    // Every tool install.sh and the stubs need, and neither hashing tool.
+    let tools = dir.path().join("tools");
+    std::fs::create_dir_all(&tools).unwrap();
+    for tool in [
+        "sh", "uname", "tr", "mkdir", "rm", "head", "cut", "cp", "cat", "gzip",
+    ] {
+        let found = ["/usr/bin", "/bin"]
+            .iter()
+            .map(|d| Path::new(d).join(tool))
+            .find(|p| p.exists())
+            .unwrap_or_else(|| panic!("{tool} not found in /usr/bin or /bin"));
+        std::os::unix::fs::symlink(found, tools.join(tool)).unwrap();
+    }
+    stub_curl(
+        dir.path(),
+        &dir.path().join("jlo.tar.gz"),
+        Checksum::Precomputed,
+    );
+    // `stub_gnu_tar` already sits in stubbin and calls /usr/bin/tar by path.
+    let out = hermetic("/bin/sh", &home)
+        .arg(manifest().join("install.sh"))
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                dir.path().join("stubbin").display(),
+                tools.display()
+            ),
+        )
+        .env("SHELL", "/bin/zsh")
+        .output()
+        .unwrap();
+
+    assert!(
+        !out.status.success(),
+        "installed unverified: {}",
         printed(&out)
     );
     assert!(
-        dir.path()
-            .join("home")
-            .join(".jlo")
-            .join("jlo.sh")
-            .is_file()
+        printed(&out).contains("Neither shasum nor sha256sum"),
+        "the installer did not say why it stopped: {}",
+        printed(&out)
     );
+    assert_existing_install_untouched(&home, binary_ino, &jlo_sh);
 }
 
 // ---------------------------------------------------------------------------
@@ -1559,7 +1660,7 @@ fn a_malformed_checksum_file_aborts_the_install() {
     // Two shapes, and the second is the one the obvious validation misses: 64
     // characters counting the newline, and hex either side of it, so a
     // length-plus-alphabet check that never looks at line structure waves it
-    // through - and with no shasum on the box it would install unverified.
+    // through - and it would install against a digest nobody published.
     for malformed in [
         "z".repeat(64),
         format!("{}\n{}", "a".repeat(32), "a".repeat(31)),
