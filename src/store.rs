@@ -655,13 +655,32 @@ impl JdkStore {
         // No directory to create first: `source_dir` is staged inside the
         // store, so the store exists, and `semver` is a single path
         // component, so the store is `dest_dir`'s parent.
-        std::fs::rename(extracted_jdk_path, &dest_dir)
+        std::fs::rename(&extracted_jdk_path, &dest_dir)
             .context("could not move JDK to destination")?;
 
         // touch a file to indicate that this directory is managed by jlo -
         // beside it, never inside it. See [`sibling_marker`].
-        std::fs::File::create(sibling_marker(&self.base, &metadata.semver))
-            .context("could not create marker file")?;
+        //
+        // Directory first, marker second, because the other order is worse
+        // on failure: a marker written before the rename would, if the rename
+        // then failed or the process died, stand beside whatever else holds
+        // that name - or next appears there - and hand it to `jlo remove`.
+        // A failed marker write instead takes the directory back out to the
+        // staging directory it came from, which the caller already cleans
+        // up. Left in place it would be an unmarked build of this version:
+        // the next `install` would call the name up to date and never retry,
+        // and `remove` would refuse it as not jlo's - a permanent orphan jlo
+        // made itself.
+        if let Err(err) = std::fs::File::create(sibling_marker(&self.base, &metadata.semver)) {
+            let err = anyhow::Error::new(err).context("could not create marker file");
+            return Err(match std::fs::rename(&dest_dir, &extracted_jdk_path) {
+                Ok(()) => err,
+                Err(rollback) => err.context(format!(
+                    "could not move {dest_dir:?} back out of the store ({rollback}); \
+                     it is not marked as jlo's, so delete it by hand"
+                )),
+            });
+        }
 
         // The java home, not the entry: every caller uses this as JAVA_HOME,
         // and on macOS the two are no longer the same directory.
@@ -2672,6 +2691,65 @@ mod tests {
         assert!(sibling_marker(dest_parent.path(), "21.0.3+9").exists());
         assert!(!entry.join(LEGACY_MARKER_FILE).exists());
         assert!(java_home.join("bin").join("java").exists());
+    }
+
+    /// A directory at the marker path makes the marker write fail after the
+    /// JDK has already been moved into place. Left there, it would be an
+    /// unmarked build of the version: `install` would call the name up to
+    /// date and never retry, and `remove` would refuse it as not jlo's. So
+    /// the failed install takes its JDK back out.
+    #[test]
+    fn a_failed_marker_write_leaves_no_unmanaged_install_behind() {
+        let dest_parent = tempdir().unwrap();
+        let source_dir = tempdir().unwrap();
+        create_extracted_jdk(source_dir.path(), "jdk-21.0.3+9");
+        fs::create_dir(sibling_marker(dest_parent.path(), "21.0.3+9")).unwrap();
+
+        let result = JdkStore::at(dest_parent.path()).install(
+            &metadata("21.0.3+9"),
+            source_dir.path(),
+            &InstallUi::hidden("test"),
+        );
+
+        let message = format!("{:#}", result.expect_err("the marker could not be written"));
+        assert!(
+            message.contains("could not create marker file"),
+            "{message}"
+        );
+        assert!(
+            !dest_parent.path().join("21.0.3+9").exists(),
+            "an unmarked install was left in the store"
+        );
+    }
+
+    /// A directory already holding the version's name that jlo did not mark
+    /// may be `IntelliJ`'s or the user's. The install fails, and it must not
+    /// fail by claiming that directory: no marker appears beside it and its
+    /// contents stay as they were.
+    #[test]
+    fn an_install_onto_an_unmanaged_directory_does_not_claim_it() {
+        let dest_parent = tempdir().unwrap();
+        let source_dir = tempdir().unwrap();
+        create_extracted_jdk(source_dir.path(), "jdk-21.0.3+9");
+        create_jdk_dir(dest_parent.path(), "21.0.3+9", false);
+        let theirs = dest_parent.path().join("21.0.3+9");
+        fs::write(theirs.join("release"), "theirs").unwrap();
+
+        let result = JdkStore::at(dest_parent.path()).install(
+            &metadata("21.0.3+9"),
+            source_dir.path(),
+            &InstallUi::hidden("test"),
+        );
+
+        assert!(result.is_err(), "installed over someone else's directory");
+        assert!(
+            !sibling_marker(dest_parent.path(), "21.0.3+9").exists(),
+            "an unmanaged directory was marked as jlo's"
+        );
+        assert_eq!(
+            fs::read_to_string(theirs.join("release")).unwrap(),
+            "theirs"
+        );
     }
 
     /// The caller uses this as `JAVA_HOME`, so on macOS it is the bundle's
