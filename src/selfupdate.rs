@@ -178,16 +178,11 @@ pub(crate) fn cmd_selfupdate(wrapped: bool) -> Result<(), CommandError> {
     let tag = client.latest_tag()?;
     let latest = version_from_tag(&tag)?;
     if is_newer(latest, VERSION)? {
-        eprintln!(
-            "Updating {} {} {}",
-            ui::jlo_mark(VERSION),
-            ui::punctuation_arrow(),
-            ui::jlo_mark_bare(latest)
-        );
+        eprintln!("Updating J'Lo {VERSION} → {latest}");
         run_installer(&client, &layout, &tag)?;
     } else {
         install::refresh_layout(&layout)?;
-        ui::created!("{} is already the latest version.", ui::jlo_mark(VERSION));
+        ui::created!("J'Lo {VERSION} is already the latest version.");
     }
     Ok(install::print_reload(&layout, wrapped)?)
 }

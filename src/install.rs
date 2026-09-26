@@ -625,11 +625,7 @@ fn report(layout: &Layout, reinstall: bool, symlink: Option<&Path>) {
     let home_dir = std::env::home_dir();
     let home = home_dir.as_deref();
 
-    ui::created!(
-        "{} installed to {}.",
-        ui::jlo_mark(VERSION),
-        tilde(&layout.home, home)
-    );
+    ui::created!("J'Lo {VERSION} installed to {}.", tilde(&layout.home, home));
 
     // Column 0, not indented. These lines exist to be copied, and every
     // terminal's double-click and shift-select take a leading indent with
@@ -645,13 +641,13 @@ fn report(layout: &Layout, reinstall: bool, symlink: Option<&Path>) {
     if reinstall {
         eprintln!(
             "\n{}",
-            ui::footnote("Already in your profile? Nothing to do. Otherwise add:")
+            ui::dim("Already in your profile? Nothing to do. Otherwise add:")
         );
         eprintln!("{}", ui::command(&source_line(&main)));
     } else {
         eprintln!(
             "\n{}\n",
-            ui::heading("To activate, add these lines to ~/.zshrc or ~/.bashrc:")
+            ui::dim("To activate, add these lines to ~/.zshrc or ~/.bashrc:")
         );
         for name in ["jlo.sh", "autoload.sh", "completions.sh"] {
             eprintln!(
@@ -664,17 +660,17 @@ fn report(layout: &Layout, reinstall: bool, symlink: Option<&Path>) {
         // creating `.bash_profile` beside a `.profile` switches that off.
         eprintln!(
             "\n{}",
-            ui::footnote(&format!(
+            ui::dim(format!(
                 "The last two are optional: switch JDK on cd, and tab completion.\n\
                  A login bash (what macOS terminals start) skips ~/.bashrc: there, use the\n\
                  first of {BASH_LOGIN_FILES} that exists, else ~/.bash_profile."
             ))
         );
-        eprintln!("\n{}\n", ui::heading("Then load it into this shell:"));
+        eprintln!("\n{}\n", ui::dim("Then load it into this shell:"));
         eprintln!("{}", ui::command(&format!(". {main}")));
         eprintln!(
             "\n{}",
-            ui::footnote("These lines never change: upgrades regenerate the files they point at.")
+            ui::dim("These lines never change: upgrades regenerate the files they point at.")
         );
     }
     path_nudge(symlink, home);
@@ -703,7 +699,7 @@ fn path_nudge(symlink: Option<&Path>, home: Option<&Path>) {
     // heading reads as the point when it is not.
     eprintln!(
         "\n{}\n",
-        ui::footnote(&format!(
+        ui::dim(format!(
             "'jlo' also wants {} on PATH - for non-interactive shells\n\
              (CI, scripts, AI agents) and for 'jlo home'.",
             tilde(dir, home)
@@ -711,7 +707,7 @@ fn path_nudge(symlink: Option<&Path>, home: Option<&Path>) {
     );
     eprintln!(
         "{}\n",
-        ui::heading(&format!(
+        ui::dim(format!(
             "Add this line to ~/.zshenv, or for bash to the first of\n\
              {BASH_LOGIN_FILES} that exists, else ~/.bash_profile:"
         ))

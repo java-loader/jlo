@@ -31,56 +31,29 @@ fn sibling_marker(base: &Path, version: &str) -> PathBuf {
 /// drift: [`java_home_in`] hands this path out, [`owns`] refuses to delete it.
 const BUNDLE_HOME: [&str; 2] = ["Contents", "Home"];
 
-/// What a `jlo remove --superseded` run did, so the caller owns the presentation and
-/// [`JdkStore::prune`] owns only the filesystem work.
-#[derive(Debug, Default)]
-pub(crate) struct PruneReport {
-    /// `(name, removed version names)`, newest name first. Only versions
-    /// actually deleted appear here. Keyed on the name rather than the major
-    /// so a pre-release and the release it previews are reported apart, the
-    /// way they are deleted apart.
-    pub(crate) removed: Vec<(Request, Vec<String>)>,
-    /// One message per JDK that could not be deleted.
-    pub(crate) failures: Vec<String>,
-    /// Installs without a `.jlo-managed` marker. Counted rather than listed:
-    /// on a machine that also uses sdkman or Homebrew this is every other JDK,
-    /// and a line each would bury the removals.
-    pub(crate) skipped_unmanaged: usize,
-    /// The superseded build left alone because `$JAVA_HOME` points at it. At
-    /// most one, there being only one `$JAVA_HOME`. Named rather than counted
-    /// for the same reason as [`RemoveReport::skipped_in_use`]: it is the one
-    /// skip the user can act on, by switching shells and running the command
-    /// again.
-    pub(crate) skipped_in_use: Option<String>,
-}
-
-impl PruneReport {
-    pub(crate) fn removed_count(&self) -> usize {
-        removed_count(&self.removed)
-    }
-}
-
 /// How many builds a `(name, removed version names)` list deleted.
 fn removed_count(removed: &[(Request, Vec<String>)]) -> usize {
     removed.iter().map(|(_, v)| v.len()).sum()
 }
 
-/// What a `jlo remove` run did. The counterpart to [`PruneReport`] for the
-/// command that names its target instead of deriving it from a rule.
+/// What a `jlo remove` run did, by name ([`JdkStore::remove`]) or by the
+/// superseded rule ([`JdkStore::prune`]), so the caller owns the presentation
+/// and the store owns only the filesystem work.
 #[derive(Debug, Default)]
 pub(crate) struct RemoveReport {
-    /// The versions actually deleted, newest first.
+    /// The versions actually deleted: newest first for `remove`, in `jlo
+    /// list`'s name order (each name newest first) for `prune`.
     pub(crate) removed: Vec<String>,
     /// One message per JDK that could not be deleted.
     pub(crate) failures: Vec<String>,
     /// Versions matching a target that were left alone for want of a
-    /// `.jlo-managed` marker. Listed rather than counted, unlike
-    /// [`PruneReport::skipped_unmanaged`]: the user named these, so every
-    /// install they did *not* get is worth a line.
+    /// `.jlo-managed` marker. The user named these, so every install they did
+    /// *not* get is worth a line. Always empty for `prune`: nobody named the
+    /// unmanaged installs the rule passes over.
     pub(crate) skipped_unmanaged: Vec<String>,
     /// Targets that matched nothing installed. Not a failure - the JDK is
     /// already absent, which is what was asked for - but worth saying, since
-    /// it is usually a typo.
+    /// it is usually a typo. Always empty for `prune`, which has no targets.
     pub(crate) not_installed: Vec<String>,
     /// The version left alone because `$JAVA_HOME` points at it. At most one,
     /// there being only one `$JAVA_HOME`. Unlike the two above this is worth
@@ -283,7 +256,7 @@ impl JdkStore {
     /// Resolved here rather than in `ui` so the listing works on version
     /// names and never has to know where the store lives. Returns `None` when
     /// `$JAVA_HOME` is unset or points outside the store - a system JDK or
-    /// one another tool manages - which the caller reports rather than hides.
+    /// one another tool manages.
     pub(crate) fn active_version(
         &self,
         installed: &[InstalledJdk],
@@ -343,20 +316,8 @@ impl JdkStore {
         Ok(requests)
     }
 
-    /// How many installs `jlo remove --superseded` would remove: every managed JDK that is
-    /// not the newest of its name.
-    ///
-    /// The read-only counterpart to [`Self::prune`], so `jlo install` and
-    /// `jlo update` can point at `jlo remove --superseded` for the leftovers
-    /// they did not touch - names this run did not move, or deletions that
-    /// failed.
-    pub(crate) fn superseded_count(&self) -> anyhow::Result<usize> {
-        Ok(self.superseded()?.len())
-    }
-
     /// Every managed JDK strictly older than the newest managed JDK of its
-    /// name, newest first - the one rule behind [`Self::superseded_count`]
-    /// and [`Self::prune`], so the hint and the deletion cannot disagree.
+    /// name, newest first - the rule behind [`Self::prune`].
     ///
     /// Grouped by name, not by major: a pre-release sorts above the release
     /// it previews, so a major-keyed group would make the released build
@@ -417,43 +378,24 @@ impl JdkStore {
     /// passed in rather than read here for the same reason as in
     /// [`Self::remove`] - so the guard is testable without mutating the
     /// process environment.
-    pub(crate) fn prune(&self, active_java_home: Option<&Path>) -> anyhow::Result<PruneReport> {
-        let mut report = PruneReport::default();
+    pub(crate) fn prune(&self, active_java_home: Option<&Path>) -> anyhow::Result<RemoveReport> {
+        let mut report = RemoveReport::default();
 
         // A pass of its own for what `superseded` never sees: the warnings
-        // about directories jlo cannot name, the unmanaged count, and the
-        // refusal of a base directory that cannot be read - which `list`
-        // would report as an empty store.
+        // about directories jlo cannot name, and the refusal of a missing
+        // base directory - which `list` would report as an empty store.
         for candidate in self.scan_required()? {
-            let path = &candidate.path;
             if candidate.name.is_none() {
-                crate::ui::warning!("ignoring directory with invalid name {path:?}");
-                continue;
-            }
-            // The name is parsed before the marker is consulted, so
-            // `skipped_unmanaged` counts only directories `jlo list` would
-            // show. A vendor-named `IntelliJ` download (`temurin-21.0.1`) is not
-            // an install jlo declined to touch - it is not an install jlo can
-            // see at all, and counting it would report "left 1 install alone"
-            // about something the listing never mentioned.
-            //
-            // Passed over in silence, as `jlo list` does: the directory is
-            // shared with IntelliJ and Gradle, and a warning about their
-            // downloads - or about jlo's own staging directory - would put a
-            // line under every `jlo remove --superseded` for as long as they
-            // are there.
-            if candidate.request.is_some() && !candidate.managed {
-                report.skipped_unmanaged += 1;
+                crate::ui::warning!("ignoring directory with invalid name {:?}", candidate.path);
             }
         }
 
-        // Reported by name in `jlo list`'s order; the stable sort keeps each
+        // Reported in `jlo list`'s name order; the stable sort keeps each
         // name's builds newest first.
         let mut superseded = self.superseded()?;
         superseded.sort_by_key(|jdk| jdk.request.listing_order());
 
         for jdk in superseded {
-            let request = jdk.request;
             // Both spellings of the entry are compared, as in
             // `Self::remove`: `owns` is deliberately not `java_home_in`,
             // so a bundle whose `Contents/Home` has gone unreadable is
@@ -464,15 +406,12 @@ impl JdkStore {
             }
             // Record what was *actually* deleted. Announcing the removals up
             // front meant a failure turned the line above it into a false claim.
-            let mut removed = Vec::new();
-            remove_recorded(&self.base, jdk.version, &mut removed, &mut report.failures);
-            if removed.is_empty() {
-                continue;
-            }
-            match report.removed.last_mut() {
-                Some((last, names)) if *last == request => names.extend(removed),
-                _ => report.removed.push((request, removed)),
-            }
+            remove_recorded(
+                &self.base,
+                jdk.version,
+                &mut report.removed,
+                &mut report.failures,
+            );
         }
 
         Ok(report)
@@ -818,18 +757,6 @@ pub(crate) fn install_each(
         ui::announce_released_ea(&requests, &released);
     }
 
-    // Every name this run moved has had its superseded builds deleted, so
-    // what is counted here are leftovers from before this run, or builds a
-    // deletion failed on. A kept live build has a hint of its own. A hint is
-    // not worth failing an otherwise successful run, so an unreadable JDK
-    // directory just means no hint.
-    if run.kept_active.is_none()
-        && let Some(hint) =
-            ui::superseded_hint(!installed.is_empty(), store.superseded_count().unwrap_or(0))
-    {
-        ui::hint!("{hint}");
-    }
-
     run
 }
 
@@ -895,9 +822,6 @@ fn resolve_offered(
     for &request in &not_offered {
         ui::skipping_not_offered(request);
     }
-    if !not_offered.is_empty() {
-        ui::hint!("{}", ui::NOT_OFFERED_HINT);
-    }
     Ok(offered)
 }
 
@@ -926,12 +850,7 @@ fn install_latest(
     match builds.first() {
         // `list` is newest first.
         Some(newest) if !supersedes_every_install(&jdk_metadata.semver, &builds) => {
-            let older = is_older_than(&jdk_metadata.semver, &newest.version);
-            ui::up_to_date(
-                &request.to_string(),
-                &newest.version,
-                older.then_some(jdk_metadata.semver.as_str()),
-            );
+            ui::up_to_date(&request.to_string(), &newest.version);
             Ok(None)
         }
         _ => {
@@ -1079,8 +998,7 @@ fn base_dir_for(os: &str, home: &Path) -> PathBuf {
 }
 
 /// Whether `version` is strictly older than `newest`: the one definition of
-/// "superseded", so the hint that offers a deletion, the listing and the
-/// deletion itself can never disagree. Two spellings of one version compare
+/// "superseded", so the listing and the deletion can never disagree. Two spellings of one version compare
 /// equal, so neither is older; a name that does not parse is never older,
 /// and nothing is older than it.
 pub(crate) fn is_older_than(version: &str, newest: &str) -> bool {
@@ -1770,20 +1688,6 @@ mod tests {
         );
     }
 
-    // -- superseded_count --
-
-    #[test]
-    fn superseded_count_counts_all_but_newest_per_name() {
-        let dir = tempdir().unwrap();
-        create_jdk_dir(dir.path(), "21.0.1+12", true);
-        create_jdk_dir(dir.path(), "21.0.3+9", true);
-        create_jdk_dir(dir.path(), "21.0.12+7", true);
-        create_jdk_dir(dir.path(), "17.0.2+8", true);
-
-        // Exactly what `prune` would remove: two old 21s, no 17.
-        assert_eq!(JdkStore::at(dir.path()).superseded_count().unwrap(), 2);
-    }
-
     /// The staging directory has to be a sibling of the installs: the install
     /// ends in a `rename` into the store, and a `rename` out of `$TMPDIR`
     /// fails with EXDEV wherever `/tmp` is a separate filesystem - which is
@@ -1881,7 +1785,7 @@ mod tests {
 
     /// `jlo remove --superseded` can run while an install is mid-download in
     /// another shell: the staging directory is that install's, so pruning
-    /// must neither delete it nor count it as an unmanaged install.
+    /// must not delete it.
     #[test]
     fn prune_leaves_an_in_flight_staging_directory_alone() {
         let dir = tempdir().unwrap();
@@ -1896,8 +1800,7 @@ mod tests {
             staging.path().exists(),
             "prune deleted an in-flight install"
         );
-        assert_eq!(report.skipped_unmanaged, 0);
-        assert_eq!(report.removed_count(), 1);
+        assert_eq!(report.removed.len(), 1);
     }
 
     // -- superseded --
@@ -1927,11 +1830,10 @@ mod tests {
     }
 
     /// The guard `jlo remove <version>` applies to a named target, applied by
-    /// the other selector of the same verb. `jlo install` and `jlo update`
-    /// print the `jlo remove --superseded` hint into the shell they just ran
-    /// in, so this is the ordinary flow, not a corner: without it the next
-    /// command in that shell runs against a `$JAVA_HOME` that no longer
-    /// exists.
+    /// the other selector of the same verb. Running it in a shell still on a
+    /// superseded build is the ordinary flow, not a corner: without the guard
+    /// the next command in that shell runs against a `$JAVA_HOME` that no
+    /// longer exists.
     #[test]
     fn prune_leaves_the_jdk_java_home_points_at_alone() {
         let dir = tempdir().unwrap();
@@ -1943,7 +1845,7 @@ mod tests {
 
         assert!(active.exists(), "the live JDK must survive");
         assert_eq!(report.skipped_in_use.as_deref(), Some("21.0.1+12"));
-        assert_eq!(report.removed_count(), 0);
+        assert_eq!(report.removed.len(), 0);
     }
 
     /// `$JAVA_HOME` on a macOS bundle names `<version>/Contents/Home`, not the
@@ -1978,21 +1880,6 @@ mod tests {
         assert!(!dir.path().join("17.0.2+8").exists(), "17.0.2+8 still goes");
     }
 
-    /// A vendor-named `IntelliJ` download is not an install jlo declined to
-    /// touch - it is one jlo cannot see. Counting it would make
-    /// `jlo remove --superseded` report "left 1 install alone" about
-    /// something `jlo list` never mentioned.
-    #[test]
-    fn prune_does_not_count_a_vendor_named_directory_as_an_unmanaged_install() {
-        let dir = tempdir().unwrap();
-        create_jdk_dir(dir.path(), "21.0.3+9", true);
-        std::fs::create_dir_all(dir.path().join("temurin-17.0.9")).unwrap();
-
-        let report = JdkStore::at(dir.path()).prune(None).unwrap();
-
-        assert_eq!(report.skipped_unmanaged, 0);
-    }
-
     /// Two builds of one patch differ only in build metadata, which semver
     /// leaves out of precedence. `prune` used to sort them Equal and delete
     /// whichever `read_dir` happened to yield second - a coin toss over a JDK,
@@ -2010,10 +1897,7 @@ mod tests {
 
             let report = JdkStore::at(dir.path()).prune(None).unwrap();
 
-            assert_eq!(
-                report.removed,
-                vec![(request("21"), vec!["21.0.11+9.0.LTS".to_string()])]
-            );
+            assert_eq!(report.removed, vec!["21.0.11+9.0.LTS"]);
             assert!(dir.path().join("21.0.11+10.0.LTS").exists());
             assert!(!dir.path().join("21.0.11+9.0.LTS").exists());
         }
@@ -2031,7 +1915,7 @@ mod tests {
 
         let report = JdkStore::at(dir.path()).prune(None).unwrap();
 
-        assert_eq!(report.removed_count(), 0);
+        assert_eq!(report.removed.len(), 0);
         assert!(dir.path().join("21.0.11+9").exists());
         assert!(dir.path().join("v21.0.11+9").exists());
     }
@@ -2048,7 +1932,7 @@ mod tests {
 
         let report = JdkStore::at(dir.path()).prune(None).unwrap();
 
-        assert_eq!(report.removed_count(), 1);
+        assert_eq!(report.removed.len(), 1);
         assert!(dir.path().join("26.0.1+9").exists(), "the GA build stays");
         assert!(
             dir.path().join("26.0.3-beta+102.0.ea").exists(),
@@ -2057,11 +1941,11 @@ mod tests {
         assert!(!dir.path().join("26.0.2-beta+101.0.ea").exists());
     }
 
-    /// One line per name in `jlo list`'s order - newest major first, and of
-    /// one major the released name before the pre-release - even where the
-    /// two streams interleave by version.
+    /// In `jlo list`'s name order - newest major first, and of one major the
+    /// released name before the pre-release - even where the two streams
+    /// interleave by version; each name's builds newest first.
     #[test]
-    fn prune_reports_names_newest_first() {
+    fn prune_reports_builds_in_listing_order() {
         let dir = tempdir().unwrap();
         for version in [
             "17.0.0+1",
@@ -2079,23 +1963,21 @@ mod tests {
 
         let report = JdkStore::at(dir.path()).prune(None).unwrap();
 
-        let names: Vec<Request> = report.removed.iter().map(|(name, _)| *name).collect();
         assert_eq!(
-            names,
+            report.removed,
             vec![
-                request("26"),
-                request("26-ea"),
-                request("21"),
-                request("17")
+                "26.0.2+1",
+                "26.0.1-beta+1",
+                "21.0.1+12",
+                "17.0.1+1",
+                "17.0.0+1"
             ]
         );
-        assert_eq!(report.removed_count(), 5);
-        assert_eq!(report.removed[3].1, vec!["17.0.1+1", "17.0.0+1"]);
         assert!(report.failures.is_empty());
     }
 
     #[test]
-    fn prune_counts_unmanaged_without_removing_them() {
+    fn prune_leaves_unmanaged_installs_alone() {
         let dir = tempdir().unwrap();
         create_jdk_dir(dir.path(), "21.0.1+12", false);
         create_jdk_dir(dir.path(), "21.0.3+9", false);
@@ -2103,8 +1985,7 @@ mod tests {
 
         let report = JdkStore::at(dir.path()).prune(None).unwrap();
 
-        assert_eq!(report.skipped_unmanaged, 2);
-        assert_eq!(report.removed_count(), 0);
+        assert!(report.removed.is_empty());
         assert!(dir.path().join("21.0.1+12").exists());
     }
 

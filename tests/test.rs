@@ -211,9 +211,8 @@ fn remove_requires_at_least_one_version() {
 
 /// The rule-based half of `remove` had no command-level test at all while it
 /// was `jlo prune`: every one of its 12 tests called `JdkStore::prune`
-/// directly, so the wiring and the report were unproven. This covers all
-/// three things the report says in one run - what went, what stayed, and the
-/// unmanaged install it left alone.
+/// directly, so the wiring and the report were unproven. This covers what
+/// went, what stayed, and the unmanaged install left alone, in one run.
 #[test]
 fn remove_superseded_deletes_only_the_older_managed_builds() {
     let home = tempfile::tempdir().unwrap();
@@ -237,7 +236,6 @@ fn remove_superseded_deletes_only_the_older_managed_builds() {
         .stdout(predicate::str::is_empty())
         .stderr(predicate::str::contains("21.0.9+10"))
         .stderr(predicate::str::contains("Removed 1 JDK"))
-        .stderr(predicate::str::contains("left 1 install alone"))
         .stderr(predicate::str::contains("temurin").not());
 
     let store = jdk_store_in(home.path());
@@ -852,10 +850,6 @@ fn install_and_update_never_move_a_name_back() {
             stderr.contains("JDK 21 is up to date (21.0.12+7)"),
             "{args:?}: {stderr}"
         );
-        assert!(
-            stderr.contains("Adoptium currently offers an older build (21.0.11+9)"),
-            "{args:?}: {stderr}"
-        );
         assert!(!store.join("21.0.11+9").exists(), "{args:?}");
         // Up to date moves nothing, so it replaces nothing either.
         assert!(store.join("21.0.10+5").exists(), "{args:?}");
@@ -863,8 +857,8 @@ fn install_and_update_never_move_a_name_back() {
 }
 
 /// Two spellings of one version are one version: the hand-registered
-/// `v21.0.11+9` is what Adoptium offers, so there is nothing to fetch, and
-/// nothing older to mention. Unmanaged, because an install jlo did not make
+/// `v21.0.11+9` is what Adoptium offers, so there is nothing to fetch.
+/// Unmanaged, because an install jlo did not make
 /// is still the name being present.
 #[test]
 fn install_and_update_take_another_spelling_of_the_offer_as_current() {
@@ -884,7 +878,6 @@ fn install_and_update_take_another_spelling_of_the_offer_as_current() {
             stderr.contains("JDK 21 is up to date (v21.0.11+9)"),
             "{args:?}: {stderr}"
         );
-        assert!(!stderr.contains("older build"), "{args:?}: {stderr}");
         assert!(!store.join("21.0.11+9").exists(), "{args:?}");
     }
 }
@@ -941,7 +934,6 @@ fn a_name_adoptium_does_not_offer_is_skipped_not_a_stop() {
         .stderr(predicate::str::contains(
             "skipping '8': Adoptium offers no build",
         ))
-        .stderr(predicate::str::contains("Run 'jlo list'"))
         .stderr(predicate::str::contains("21.0.11+10.0.LTS"));
     asked_21.assert();
 }

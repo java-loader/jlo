@@ -196,18 +196,6 @@ impl ReleaseInfo {
     }
 }
 
-/// The catalogue as one answer: the builds on offer for this machine, and the
-/// majors Adoptium has released.
-///
-/// The two are not the same list. A major with no build for this OS, or one
-/// whose lookup failed, has no row here but is still released - so "has 26
-/// shipped?" has to be asked of `released_majors`, not of the rows.
-#[derive(Debug)]
-pub(crate) struct Catalogue {
-    pub jdks: Vec<RemoteJdk>,
-    pub released_majors: Vec<i64>,
-}
-
 /// A JDK build Adoptium offers for *this* OS and architecture: the newest of
 /// one name.
 #[derive(Debug)]
@@ -293,7 +281,7 @@ impl AdoptiumClient {
     /// Costs one request for the major-version list plus one per name. Done
     /// serially that is ~4s, so the per-name lookups are fanned out across
     /// threads sharing the pooled client.
-    pub(crate) fn available_jdks(&self) -> anyhow::Result<Catalogue> {
+    pub(crate) fn available_jdks(&self) -> anyhow::Result<Vec<RemoteJdk>> {
         let releases = self.fetch_available_releases()?;
         let names: Vec<Request> = releases
             .available_releases
@@ -341,10 +329,7 @@ impl AdoptiumClient {
         }
 
         jdks.sort_by(|a, b| cmp_desc(&a.version, &b.version));
-        Ok(Catalogue {
-            jdks,
-            released_majors: releases.available_releases,
-        })
+        Ok(jdks)
     }
 
     /// Only the version: a pre-release with no binary for this platform still
@@ -687,7 +672,7 @@ mod tests {
         let _a25 = major_mock(&mut server, 25, 200, &asset_body("25.0.4+101.0.LTS"));
 
         let client = AdoptiumClient::new(server.url());
-        let jdks = client.available_jdks().unwrap().jdks;
+        let jdks = client.available_jdks().unwrap();
 
         let rows: Vec<_> = jdks
             .iter()
@@ -716,7 +701,7 @@ mod tests {
         let _a21 = major_mock(&mut server, 21, 200, &asset_body("21.0.12+101.0.LTS"));
 
         let client = AdoptiumClient::new(server.url());
-        let jdks = client.available_jdks().unwrap().jdks;
+        let jdks = client.available_jdks().unwrap();
 
         assert_eq!(jdks.len(), 1);
         assert_eq!(jdks[0].version, "21.0.12+101.0.LTS");
@@ -733,7 +718,7 @@ mod tests {
         let _a21 = major_mock(&mut server, 21, 200, &asset_body("21.0.12+101.0.LTS"));
 
         let client = AdoptiumClient::new(server.url());
-        let jdks = client.available_jdks().unwrap().jdks;
+        let jdks = client.available_jdks().unwrap();
 
         assert_eq!(jdks.len(), 1);
         assert_eq!(jdks[0].version, "21.0.12+101.0.LTS");
@@ -790,7 +775,7 @@ mod tests {
         let _ea28 = ea_mock(&mut server, 28, 200, EA_FIXTURE);
 
         let client = AdoptiumClient::new(server.url());
-        let jdks = client.available_jdks().unwrap().jdks;
+        let jdks = client.available_jdks().unwrap();
 
         let rows: Vec<_> = jdks
             .iter()
@@ -823,7 +808,7 @@ mod tests {
         let _ea28 = ea_mock(&mut server, 28, 200, "[]");
 
         let client = AdoptiumClient::new(server.url());
-        let jdks = client.available_jdks().unwrap().jdks;
+        let jdks = client.available_jdks().unwrap();
 
         let versions: Vec<_> = jdks.iter().map(|j| j.version.as_str()).collect();
         assert_eq!(versions, vec!["26.0.1+9"]);

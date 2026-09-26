@@ -108,13 +108,13 @@ fn examples<'a>(rows: impl Iterator<Item = &'a (&'a str, &'a str, bool)> + Clone
     name = "jlo",
     bin_name = "jlo",
     version,
-    about = format!(
-        "{} - the Java Loader. Download, manage and switch JDKs.",
-        ui::help_mark(env!("CARGO_PKG_VERSION"))
+    about = concat!(
+        "J'Lo ",
+        env!("CARGO_PKG_VERSION"),
+        " - the Java Loader. Download, manage and switch JDKs."
     ),
     after_help = after_help(),
-    after_long_help = after_long_help(),
-    styles = ui::HELP_STYLES
+    after_long_help = after_long_help()
 )]
 pub(crate) struct Cli {
     // Deliberately optional. `arg_required_else_help` would print the help but

@@ -281,36 +281,18 @@ fn cmd_list(client: &AdoptiumClient, offline: bool) -> Result<(), CommandError> 
 
     // Resolved once, before either listing: the gutter marks a row by version
     // name, and the path-to-version step is the store's job, not the UI's.
-    let java_home = active_java_home();
-    let active = store.active_version(&installed, java_home.as_deref());
+    let active = store.active_version(&installed, active_java_home().as_deref());
 
     if offline {
         ui::offline_list(&installed, active.as_deref(), &store);
     } else {
-        let catalogue = client.available_jdks().map_err(|e| {
+        let available = client.available_jdks().map_err(|e| {
             CommandError::with_hint(
                 e,
                 "Use 'jlo list --offline' to list the JDKs already installed.",
             )
         })?;
-        ui::remote_list(&catalogue.jdks, &installed, active.as_deref());
-
-        // Read off the release list the catalogue already carries, not off the
-        // rows: a major with no build for this OS, or one whose lookup failed,
-        // has no row and would read as "not released" on exactly the machines
-        // least able to notice. No extra request either way.
-        let ea_names: Vec<Request> = installed
-            .iter()
-            .map(|jdk| jdk.request)
-            .filter(|request| request.is_ea())
-            .collect();
-        ui::announce_released_ea(&ea_names, &catalogue.released_majors);
-    }
-
-    // After the listing, so it reads as a footnote to the missing gutter mark
-    // rather than as a warning about the command.
-    if let (Some(path), None) = (&java_home, &active) {
-        ui::foreign_java_home(path);
+        ui::remote_list(&available, &installed, active.as_deref());
     }
 
     Ok(())
@@ -356,9 +338,9 @@ fn cmd_current() -> Result<(), CommandError> {
 /// Delete installed JDKs, selected either by name or by the superseded rule.
 ///
 /// One verb, two selectors: clap guarantees exactly one of them arrives, so
-/// the split here is the whole difference between them. They keep separate
-/// reports because they answer differently for an install jlo did not make -
-/// the rule skips it, a name refuses.
+/// the split here is the whole difference between them. One report shape
+/// covers both; they differ in what fills it - an install jlo did not make is
+/// passed over by the rule and refused by name.
 fn cmd_remove(versions: &[String], superseded: bool) -> Result<(), CommandError> {
     let store = JdkStore::discover()?;
     let active = active_java_home();
@@ -368,19 +350,16 @@ fn cmd_remove(versions: &[String], superseded: bool) -> Result<(), CommandError>
     // must not exit 0: the report has already named each failure, but a
     // script chaining `jlo remove ... && ...` reads the status, not the
     // lines, and would go on believing the store had been reduced.
-    let failures = if superseded {
-        let report = store
+    let report = if superseded {
+        store
             .prune(active.as_deref())
-            .context("could not remove superseded JDKs")?;
-        ui::prune_report(&report);
-        report.failures.len()
+            .context("could not remove superseded JDKs")?
     } else {
-        let report = store.remove(versions, active.as_deref())?;
-        ui::remove_report(&report);
-        report.failures.len()
+        store.remove(versions, active.as_deref())?
     };
+    ui::remove_report(&report);
 
-    removal_failed(failures, "JDK")
+    removal_failed(report.failures.len(), "JDK")
 }
 
 /// The error a run ends on when some deletions failed.
