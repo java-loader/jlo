@@ -1166,9 +1166,9 @@ impl<'a> Selector<'a> {
 /// Whether two paths name the same file or directory.
 ///
 /// Canonicalised when both resolve, so a trailing slash or a symlinked home
-/// does not let a live JDK slip past the `$JAVA_HOME` refusal, and a
-/// `$JLO_HOME` reached through a symlink still matches the spelling its
-/// receipt recorded. The literal comparison comes first and stands alone as
+/// does not let a live JDK slip past the `$JAVA_HOME` refusal, and
+/// `$JLO_HOME/bin/jlo-bin` reached through a symlink is still recognised as
+/// the running executable. The literal comparison comes first and stands alone as
 /// the fallback: a `$JAVA_HOME` pointing at a path that no longer exists
 /// cannot be canonicalised, and that must not silently turn the refusal off.
 pub(crate) fn same_path(a: &Path, b: &Path) -> bool {

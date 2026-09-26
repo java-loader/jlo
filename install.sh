@@ -12,8 +12,8 @@ set -eu
 #
 # This is a bootstrap, and nothing more. It detects the platform, downloads one
 # file, verifies it, unpacks it, and hands over to the binary. The layout under
-# $JLO_HOME - the entry files, the per-dialect wrappers, the completions, the
-# symlink and the receipt - belongs to 'jlo-bin' itself, which carries the shell
+# $JLO_HOME - the entry files, the per-dialect wrappers, the completions and the
+# symlink - belongs to 'jlo-bin' itself, which carries the shell
 # sources compiled in. Two copies of that knowledge is what this script used to
 # be, and what made an installer change go stale in every existing profile.
 
@@ -78,10 +78,10 @@ main() {
   # *sibling* of the file it will become: the binary is published by a rename,
   # which is atomic only within one filesystem, so $TMPDIR is not an option.
   #
-  # Nothing here writes $JLO_BIN_DIR/jlo-bin. That write belongs to the install
-  # verb, which takes the publication lock first - an installer that unpacked
-  # over the live binary would be a second publisher outside the lock, and on
-  # Linux would hit ETXTBSY against a jlo that is still running.
+  # Nothing here writes $JLO_BIN_DIR/jlo-bin. The install verb renames the new
+  # binary into place once it has started - an installer that unpacked over
+  # the live binary would, on Linux, hit ETXTBSY against a jlo that is still
+  # running.
   JLO_STAGE="$JLO_BIN_DIR/.jlo-install-$$"
   rm -rf "$JLO_STAGE"
   mkdir -p "$JLO_STAGE"
@@ -178,11 +178,10 @@ main() {
   # install and its exit status is the installer's, with no line of this script
   # left to run after it and get that wrong.
   #
-  # --publish-self is what moves the staged binary to $JLO_BIN_DIR/jlo-bin, and
-  # it happens under the lock the verb takes. It also owns the staging
-  # directory from here on: no line of this script runs after the exec, so the
-  # binary is the only thing left that can remove it - which it does whether
-  # the publication succeeds or fails.
+  # --publish-self is what moves the staged binary to $JLO_BIN_DIR/jlo-bin. It
+  # also owns the staging directory from here on: no line of this script runs
+  # after the exec, so the binary is the only thing left that can remove it -
+  # which it does whether the publication succeeds or fails.
   exec "$JLO_TARGET" __install --publish-self
 }
 
