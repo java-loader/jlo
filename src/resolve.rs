@@ -3,8 +3,10 @@
 //!
 //! The cascade is jlo's one rule, and four commands ask it the same question,
 //! so it gets a name here rather than a copy in each of them. Everything in
-//! this module answers "which JDK", never "what do I print" or "how do I
-//! install it" - those are `ui` and `store`.
+//! this module answers "which JDK", never "what do I print" - that is `ui`.
+//! The one thing it does beyond answering: when the JDK it settled on is
+//! missing and the command is not `--offline`, [`java_home`] installs it on
+//! demand, through the same `store::install_jdk` the download verbs use.
 
 use crate::adoptium::AdoptiumClient;
 use crate::conf;
@@ -96,11 +98,16 @@ fn resolve_java_version_from(
 ) -> anyhow::Result<Request> {
     match explicit {
         Some(version) => Request::parse(&version),
-        None => cascade(conf::find()?, newest_installed(store), offline, || {
-            client
-                .latest_major()
-                .context("could not fetch latest JDK version")
-        }),
+        None => cascade(
+            conf::find()?,
+            || newest_installed(store),
+            offline,
+            || {
+                client
+                    .latest_major()
+                    .context("could not fetch latest JDK version")
+            },
+        ),
     }
 }
 
@@ -111,9 +118,9 @@ fn resolve_java_version_from(
 /// must.
 fn on_disk(
     configured: Option<conf::Resolved>,
-    newest_installed: Option<conf::Resolved>,
+    newest_installed: impl FnOnce() -> Option<conf::Resolved>,
 ) -> Option<conf::Resolved> {
-    configured.or(newest_installed)
+    configured.or_else(newest_installed)
 }
 
 /// The version-resolution cascade, once the explicit argument is out of the
@@ -136,9 +143,14 @@ fn on_disk(
 /// process environment - the same reason `conf::find_in` takes its cwd - so
 /// the decisions here, including the one that must *not* download, are
 /// testable without a store, a network or a temp directory.
+///
+/// Stage 3 is a closure like stage 4, called only when stages 1 and 2 answer
+/// nothing. It lists the store, and the autoload hook's `jlo env --offline`
+/// in a pinned directory lists it once anyway, to find the pinned JDK; an
+/// eager stage 3 would make that twice on every `cd`.
 fn cascade(
     configured: Option<conf::Resolved>,
-    newest_installed: Option<conf::Resolved>,
+    newest_installed: impl FnOnce() -> Option<conf::Resolved>,
     offline: bool,
     latest_release: impl FnOnce() -> anyhow::Result<Request>,
 ) -> anyhow::Result<Request> {
@@ -359,7 +371,7 @@ pub(crate) fn provenance(
     //
     // A config that fails to load is still a failure: it is a file the user
     // wrote and meant, and answering around it would hide the mistake.
-    match on_disk(configured()?, stage_3) {
+    match on_disk(configured()?, || stage_3) {
         // Stage 3, credited only to the exact build a bare `jlo env` would
         // hand back - not merely to the name, which `newest` alone would give
         // it. No mismatch counterpart: nobody asked for the newest installed
@@ -484,6 +496,28 @@ mod tests {
         Err(anyhow!("the network was consulted"))
     }
 
+    /// A stage 3 that fails if it is ever called: listing the store is what it
+    /// costs, and a pin makes that listing wasted work.
+    fn refuse_store_listing() -> Option<conf::Resolved> {
+        panic!("the store was listed for stage 3")
+    }
+
+    /// A pin answers before stage 3 is even asked. Offline, because that is
+    /// the autoload hook's case: `jlo env --offline` on every `cd` into a
+    /// pinned directory, which then lists the store once to find the JDK.
+    #[test]
+    fn cascade_does_not_list_the_store_when_a_config_answers() {
+        let resolved = cascade(
+            Some(configured("21")),
+            refuse_store_listing,
+            true,
+            refuse_network,
+        )
+        .expect("the config answers");
+
+        assert_eq!(resolved, request("21"));
+    }
+
     /// Stage 2 beats stage 3: `jlo init --global` is how a user asks for a
     /// stable answer on neutral ground, and a JDK installed for some other
     /// project must not quietly override it.
@@ -491,7 +525,7 @@ mod tests {
     fn cascade_prefers_a_config_over_the_newest_install() {
         let resolved = cascade(
             Some(configured("21")),
-            Some(installed("25")),
+            || Some(installed("25")),
             false,
             refuse_network,
         )
@@ -506,7 +540,7 @@ mod tests {
     /// one's.
     #[test]
     fn cascade_falls_back_to_the_newest_installed_jdk() {
-        let resolved = cascade(None, Some(installed("25")), false, refuse_network)
+        let resolved = cascade(None, || Some(installed("25")), false, refuse_network)
             .expect("the installed JDK answers");
 
         assert_eq!(resolved, request("25"));
@@ -516,8 +550,8 @@ mod tests {
     /// installed.
     #[test]
     fn cascade_downloads_the_latest_release_when_nothing_is_installed() {
-        let resolved =
-            cascade(None, None, false, || Ok(request("26"))).expect("the latest release answers");
+        let resolved = cascade(None, || None, false, || Ok(request("26")))
+            .expect("the latest release answers");
 
         assert_eq!(resolved, request("26"));
     }
@@ -527,8 +561,8 @@ mod tests {
     /// can never start one.
     #[test]
     fn cascade_refuses_to_download_when_offline() {
-        let err =
-            cascade(None, None, true, refuse_network).expect_err("offline has nowhere left to go");
+        let err = cascade(None, || None, true, refuse_network)
+            .expect_err("offline has nowhere left to go");
 
         assert!(err.to_string().contains(".jlorc"), "{err}");
         assert!(err.to_string().contains("jlo install"), "{err}");
@@ -538,7 +572,7 @@ mod tests {
     /// already on disk, so handing it back costs no network at all.
     #[test]
     fn cascade_still_uses_an_installed_jdk_when_offline() {
-        let resolved = cascade(None, Some(installed("21")), true, refuse_network)
+        let resolved = cascade(None, || Some(installed("21")), true, refuse_network)
             .expect("the installed JDK needs no network");
 
         assert_eq!(resolved, request("21"));
