@@ -243,6 +243,11 @@ fn remove_superseded_deletes_only_the_older_managed_builds() {
     // nobody named it.
     let unmanaged = jdk_store_in(home.path()).join("17.0.11+10");
     std::fs::create_dir_all(unmanaged.join("bin")).unwrap();
+    // IntelliJ's name for a JDK it downloaded into the shared directory. Not
+    // an install jlo can see, so neither counted nor warned about - a warning
+    // would repeat on every run for as long as IntelliJ keeps it.
+    let vendor = jdk_store_in(home.path()).join("temurin-21.0.1");
+    std::fs::create_dir_all(vendor.join("bin")).unwrap();
 
     Command::cargo_bin("jlo-bin")
         .unwrap()
@@ -256,12 +261,14 @@ fn remove_superseded_deletes_only_the_older_managed_builds() {
         .stdout(predicate::str::is_empty())
         .stderr(predicate::str::contains("21.0.9+10"))
         .stderr(predicate::str::contains("Removed 1 JDK"))
-        .stderr(predicate::str::contains("left 1 install alone"));
+        .stderr(predicate::str::contains("left 1 install alone"))
+        .stderr(predicate::str::contains("temurin").not());
 
     let store = jdk_store_in(home.path());
     assert!(store.join("21.0.11+10").exists(), "the newest minor stays");
     assert!(!store.join("21.0.9+10").exists(), "the older minor goes");
     assert!(unmanaged.exists(), "an unmanaged install is never deleted");
+    assert!(vendor.exists(), "a vendor-named JDK is never deleted");
 }
 
 /// The rule takes no version, and clap has to say so rather than silently

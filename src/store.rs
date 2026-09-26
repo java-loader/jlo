@@ -481,17 +481,13 @@ impl JdkStore {
             // an install jlo declined to touch - it is not an install jlo can
             // see at all, and counting it would report "left 1 install alone"
             // about something the listing never mentioned.
-            if candidate.request.is_none() {
-                // A staging directory is jlo's own and is expected to be
-                // here; warning about it would put a line under every
-                // `jlo remove --superseded` for the rest of the machine's
-                // life. It is swept in `staging_dir` instead.
-                if !is_staging_dir(candidate.name.as_deref()) {
-                    crate::ui::warning!("ignoring non-semver directory {path:?}");
-                }
-                continue;
-            }
-            if !candidate.managed {
+            //
+            // Passed over in silence, as `jlo list` does: the directory is
+            // shared with IntelliJ and Gradle, and a warning about their
+            // downloads - or about jlo's own staging directory - would put a
+            // line under every `jlo remove --superseded` for as long as they
+            // are there.
+            if candidate.request.is_some() && !candidate.managed {
                 report.skipped_unmanaged += 1;
             }
         }
@@ -1060,10 +1056,6 @@ fn staging_dir(store: &JdkStore) -> anyhow::Result<tempfile::TempDir> {
 /// leading dot is what keeps them out of the listing: `version::parse` refuses
 /// it, so `scan` drops them the way it drops any other non-version name.
 const STAGING_PREFIX: &str = ".tmp";
-
-fn is_staging_dir(name: Option<&str>) -> bool {
-    name.is_some_and(|name| name.starts_with(STAGING_PREFIX))
-}
 
 /// Delete the directories under `base` whose name starts with `prefix` that
 /// an earlier, interrupted install left behind. Shared with `selfupdate`,
