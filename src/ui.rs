@@ -1,15 +1,15 @@
 use crate::adoptium::{RemoteJdk, platform};
 use crate::conf::{Resolved, Source};
-use crate::request::{Request, Stream};
+use crate::request::Request;
 use crate::resolve::Active;
 use crate::store::{
-    InstallRun, InstalledJdk, JdkStore, PruneReport, RemoveReport, quoted_list,
+    InstallRun, InstalledJdk, JdkStore, PruneReport, RemoveReport, is_older_than, quoted_list,
     supersedes_every_install,
 };
 use clap::builder::styling::{AnsiColor, Style, Styles};
 use console::style;
 use indicatif::{ProgressBar, ProgressBarIter, ProgressStyle};
-use std::cmp::Ordering;
+use std::cmp::Reverse;
 use std::io::{IsTerminal, Read, stderr};
 use std::path::Path;
 use std::process::exit;
@@ -646,10 +646,10 @@ pub(crate) fn offline_list(
 /// The `jlo list` listing: what Adoptium offers for this machine, merged with
 /// what is installed locally.
 ///
-/// One row per major, led by the name `install`, `update` and `env` take.
-/// Since every verb keeps one build per name, a row per *build* was mostly
-/// the same name twice; the builds that do still sit beside the newest - a
-/// leftover, an unmanaged install - get an indented line of their own, so
+/// One row per name - what `install`, `update` and `env` take. Since every
+/// verb keeps one build per name, a row per *build* was mostly the same name
+/// twice; the builds that do still sit beside the newest - a leftover, an
+/// unmanaged install - get an indented line of their own, so
 /// `jlo remove <build>` still finds its argument here.
 pub(crate) fn remote_list(
     available: &[RemoteJdk],
@@ -670,7 +670,7 @@ pub(crate) fn remote_list(
 
 /// The installed section, the available one, then at most one line of
 /// advice.
-fn print_listing(rows: &[Row]) {
+fn print_listing(rows: &[NameRow]) {
     let listing = render_rows(rows);
 
     // The section headings and the tip go to stderr, so a pipe sees only the
@@ -894,58 +894,24 @@ struct NameRow {
     others: Vec<Build>,
 }
 
-/// One major of the listing.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Row {
-    head: NameRow,
-    /// The pre-release name of the major, when its released name heads the
-    /// row - typically a `27-ea` left over from before 27 shipped.
-    pre_release: Option<NameRow>,
-}
-
-impl Row {
-    fn names(&self) -> impl Iterator<Item = &NameRow> {
-        std::iter::once(&self.head).chain(self.pre_release.as_ref())
-    }
-}
-
-/// Merge the remote catalogue and the local installs into one row per major,
-/// newest first.
+/// Merge the remote catalogue and the local installs into one row per name.
 fn build_rows(
     available: &[RemoteJdk],
     installed: &[InstalledJdk],
     active_version: Option<&str>,
-) -> Vec<Row> {
-    let mut majors: Vec<i64> = available
+) -> Vec<NameRow> {
+    let mut names: Vec<Request> = available
         .iter()
-        .map(|jdk| jdk.request.major)
-        .chain(installed.iter().map(|jdk| jdk.request.major))
+        .map(|jdk| jdk.request)
+        .chain(installed.iter().map(|jdk| jdk.request))
         .collect();
-    majors.sort_unstable_by(|a, b| b.cmp(a));
-    majors.dedup();
+    // Newest major first, GA before EA: reversing `Request`'s `Ord` would lead with `27-ea`.
+    names.sort_unstable_by_key(|name| (Reverse(name.major), name.stream));
+    names.dedup();
 
-    majors
+    names
         .into_iter()
-        .filter_map(|major| {
-            let row = |stream| {
-                name_row(
-                    Request { major, stream },
-                    available,
-                    installed,
-                    active_version,
-                )
-            };
-            // The released name leads whenever the major has one: once a
-            // major ships, `27` is the name anyone reaches for, and a `27-ea`
-            // beside it is the exception worth an indented line.
-            match (row(Stream::Ga), row(Stream::Ea)) {
-                (Some(head), pre_release) => Some(Row { head, pre_release }),
-                (None, head) => head.map(|head| Row {
-                    head,
-                    pre_release: None,
-                }),
-            }
-        })
+        .filter_map(|name| name_row(name, available, installed, active_version))
         .collect()
 }
 
@@ -1021,10 +987,7 @@ fn other_status(jdk: &InstalledJdk, head: Option<&InstalledJdk>) -> Status {
     if !jdk.managed {
         return Status::Unmanaged;
     }
-    let older = head.is_some_and(|head| {
-        crate::version::compare(&head.version, &jdk.version)
-            .is_ok_and(|ord| ord == Ordering::Greater)
-    });
+    let older = head.is_some_and(|head| is_older_than(&jdk.version, &head.version));
     if older {
         Status::Superseded
     } else {
@@ -1127,11 +1090,9 @@ fn push_name<'a>(out: &mut Vec<Cells<'a>>, row: &'a NameRow) {
 ///
 /// Pre-release names get a line of their own like any other: the section,
 /// not an indent, now says whether a name is on disk.
-fn render_rows(rows: &[Row]) -> Listing {
-    let (on_disk, not_installed): (Vec<&NameRow>, Vec<&NameRow>) = rows
-        .iter()
-        .flat_map(Row::names)
-        .partition(|row| is_installed(row));
+fn render_rows(rows: &[NameRow]) -> Listing {
+    let (on_disk, not_installed): (Vec<&NameRow>, Vec<&NameRow>) =
+        rows.iter().partition(|row| is_installed(row));
 
     let mut cells = Vec::new();
     for row in on_disk {
@@ -1208,13 +1169,13 @@ fn render_status(status: Status) -> String {
 ///
 /// One line whatever applies: this prints on every `jlo list`, and a stack of
 /// suggestions under every listing reads as nagging rather than as help.
-fn tip_line(rows: &[Row]) -> Option<String> {
-    let names = || rows.iter().flat_map(Row::names);
-    let outdated = names().filter(|name| name.update).count();
+fn tip_line(rows: &[NameRow]) -> Option<String> {
+    let outdated = rows.iter().filter(|name| name.update).count();
     // A superseded build of a name with an update on offer is not advertised:
     // `jlo update` deletes it along with the build it replaces, so offering
     // `jlo remove --superseded` as well would be two commands for one job.
-    let superseded = names()
+    let superseded = rows
+        .iter()
         .filter(|name| !name.update)
         .flat_map(|name| &name.others)
         .filter(|build| build.status == Status::Superseded)
@@ -1333,7 +1294,7 @@ fn tilde(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::request::request;
+    use crate::request::{Stream, request};
     use std::path::PathBuf;
 
     // -- ea_is_now_released --
@@ -1505,14 +1466,6 @@ mod tests {
         );
     }
 
-    /// A version given on the command line is a provenance too.
-    #[test]
-    fn provenance_line_names_the_command_line_as_a_source() {
-        let mut a = active("21.0.5+11", 21);
-        a.source = Some(Source::Argument);
-        assert_eq!(provenance_line(&a), "21.0.5+11  (from the command line)");
-    }
-
     #[test]
     fn elapsed_under_a_minute_is_bare_seconds() {
         assert_eq!(format_elapsed(Duration::from_secs(18)), "18s");
@@ -1654,26 +1607,12 @@ mod tests {
         }
     }
 
-    fn row(head: NameRow) -> Row {
-        Row {
-            head,
-            pre_release: None,
-        }
-    }
-
-    fn row_with(head: NameRow, pre_release: NameRow) -> Row {
-        Row {
-            head,
-            pre_release: Some(pre_release),
-        }
-    }
-
     // -- build_rows --
 
     #[test]
     fn a_name_not_installed_shows_only_the_latest_build() {
         let rows = build_rows(&[remote("26.0.2+101", 26)], &[], None);
-        assert_eq!(rows, vec![row(name("26").latest("26.0.2+101"))]);
+        assert_eq!(rows, vec![name("26").latest("26.0.2+101")]);
     }
 
     /// Current means nothing to add: LATEST would only repeat INSTALLED.
@@ -1684,7 +1623,7 @@ mod tests {
             &[local("21.0.12+101.0.LTS", 21)],
             None,
         );
-        assert_eq!(rows, vec![row(name("21").installed("21.0.12+101.0.LTS"))]);
+        assert_eq!(rows, vec![name("21").installed("21.0.12+101.0.LTS")]);
     }
 
     /// The installed build and the offered one are one row now, not two: both
@@ -1698,10 +1637,12 @@ mod tests {
         );
         assert_eq!(
             rows,
-            vec![row(name("21")
-                .installed("21.0.11+10.0.LTS")
-                .latest("21.0.12+101.0.LTS")
-                .update())]
+            vec![
+                name("21")
+                    .installed("21.0.11+10.0.LTS")
+                    .latest("21.0.12+101.0.LTS")
+                    .update()
+            ]
         );
     }
 
@@ -1716,10 +1657,12 @@ mod tests {
         );
         assert_eq!(
             rows,
-            vec![row(name("28-ea")
-                .installed("28.0.0-beta+14.0.ea")
-                .latest("28.0.0-beta+16.0.ea")
-                .update())]
+            vec![
+                name("28-ea")
+                    .installed("28.0.0-beta+14.0.ea")
+                    .latest("28.0.0-beta+16.0.ea")
+                    .update()
+            ]
         );
     }
 
@@ -1730,16 +1673,13 @@ mod tests {
             &[local_ea("28.0.0-beta+16.0.ea", 28)],
             None,
         );
-        assert_eq!(
-            rows,
-            vec![row(name("28-ea").installed("28.0.0-beta+16.0.ea"))]
-        );
+        assert_eq!(rows, vec![name("28-ea").installed("28.0.0-beta+16.0.ea")]);
     }
 
-    /// A `27-ea` left over from before 27 shipped: one row for the major, led
-    /// by the name anyone reaches for now, the pre-release under it.
+    /// A `27-ea` left over from before 27 shipped: two rows, the name anyone
+    /// reaches for now first, the pre-release after it.
     #[test]
-    fn a_pre_release_left_beside_its_release_is_a_line_under_it() {
+    fn a_pre_release_left_beside_its_release_follows_it() {
         let rows = build_rows(
             &[remote("27.0.0+35", 27)],
             &[local_ea("27.0.0-beta+30.0.ea", 27), local("27.0.0+35", 27)],
@@ -1747,10 +1687,10 @@ mod tests {
         );
         assert_eq!(
             rows,
-            vec![row_with(
+            vec![
                 name("27").installed("27.0.0+35"),
                 name("27-ea").installed("27.0.0-beta+30.0.ea"),
-            )]
+            ]
         );
     }
 
@@ -1770,12 +1710,14 @@ mod tests {
         );
         assert_eq!(
             rows,
-            vec![row(name("21")
-                .installed("21.0.11+10.0.LTS")
-                .latest("21.0.12+101.0.LTS")
-                .update()
-                .other("21.0.9+10.0.LTS", Status::Superseded)
-                .other("21.0.8+9.0.LTS", Status::Unmanaged))]
+            vec![
+                name("21")
+                    .installed("21.0.11+10.0.LTS")
+                    .latest("21.0.12+101.0.LTS")
+                    .update()
+                    .other("21.0.9+10.0.LTS", Status::Superseded)
+                    .other("21.0.8+9.0.LTS", Status::Unmanaged)
+            ]
         );
     }
 
@@ -1791,9 +1733,11 @@ mod tests {
         );
         assert_eq!(
             rows,
-            vec![row(name("21")
-                .installed("21.0.11+10.0.LTS")
-                .other("21.0.11+9.0.LTS", Status::Superseded))]
+            vec![
+                name("21")
+                    .installed("21.0.11+10.0.LTS")
+                    .other("21.0.11+9.0.LTS", Status::Superseded)
+            ]
         );
     }
 
@@ -1809,9 +1753,11 @@ mod tests {
         );
         assert_eq!(
             rows,
-            vec![row(name("21")
-                .installed("v21.0.11+9")
-                .other("21.0.11+9", Status::Installed))]
+            vec![
+                name("21")
+                    .installed("v21.0.11+9")
+                    .other("21.0.11+9", Status::Installed)
+            ]
         );
     }
 
@@ -1828,9 +1774,11 @@ mod tests {
         );
         assert_eq!(
             rows,
-            vec![row(name("21")
-                .installed("21.0.1+12")
-                .other("21.0.3+9", Status::Unmanaged))]
+            vec![
+                name("21")
+                    .installed("21.0.1+12")
+                    .other("21.0.3+9", Status::Unmanaged)
+            ]
         );
     }
 
@@ -1848,11 +1796,11 @@ mod tests {
         assert_eq!(
             rows,
             vec![
-                row(name("21")
+                name("21")
                     .latest("21.0.12+7")
                     .update()
-                    .other("21.0.11+9", Status::Unmanaged)),
-                row(name("17").other("17.0.20+101", Status::Unmanaged)),
+                    .other("21.0.11+9", Status::Unmanaged),
+                name("17").other("17.0.20+101", Status::Unmanaged),
             ]
         );
     }
@@ -1869,9 +1817,11 @@ mod tests {
         );
         assert_eq!(
             rows,
-            vec![row(name("21")
-                .installed("21.0.12+101.0.LTS")
-                .latest("21.0.11+10.0.LTS"))]
+            vec![
+                name("21")
+                    .installed("21.0.12+101.0.LTS")
+                    .latest("21.0.11+10.0.LTS")
+            ]
         );
     }
 
@@ -1886,12 +1836,12 @@ mod tests {
         ];
 
         let rows = build_rows(&[], &installed, Some("17.0.20+101"));
-        assert!(rows[1].head.active, "{rows:?}");
-        assert!(!rows[0].head.active, "{rows:?}");
+        assert!(rows[1].active, "{rows:?}");
+        assert!(!rows[0].active, "{rows:?}");
 
         let rows = build_rows(&[], &installed, Some("21.0.9+10.0.LTS"));
-        assert!(!rows[0].head.active, "{rows:?}");
-        assert!(rows[0].head.others[0].active, "{rows:?}");
+        assert!(!rows[0].active, "{rows:?}");
+        assert!(rows[0].others[0].active, "{rows:?}");
     }
 
     /// The two streams of one major are two names, so neither supersedes the
@@ -1907,16 +1857,16 @@ mod tests {
         );
         assert_eq!(
             rows,
-            vec![row_with(
+            vec![
                 name("26").installed("26.0.1+9"),
                 name("26-ea").installed("26.0.2-beta+101.0.ea"),
-            )]
+            ]
         );
     }
 
     /// An offered release must not be called an update to a pre-release
-    /// install: following it would change streams. The release still leads
-    /// the row - it is the name the major is now known by.
+    /// install: following it would change streams. The release still comes
+    /// first - it is the name the major is now known by.
     #[test]
     fn a_ga_release_is_not_an_update_to_an_installed_pre_release() {
         let rows = build_rows(
@@ -1926,10 +1876,10 @@ mod tests {
         );
         assert_eq!(
             rows,
-            vec![row_with(
+            vec![
                 name("28").latest("28.0.1+9"),
                 name("28-ea").installed("28.0.0-beta+16.0.ea"),
-            )]
+            ]
         );
     }
 
@@ -1945,10 +1895,10 @@ mod tests {
         );
         assert_eq!(
             rows,
-            vec![row_with(
+            vec![
                 name("26").installed("26.0.1+9"),
                 name("26-ea").latest("26.0.2-beta+101.0.ea"),
-            )]
+            ]
         );
     }
 
@@ -1968,10 +1918,10 @@ mod tests {
         assert_eq!(
             rows,
             vec![
-                row(name("28-ea").installed("28.0.0-beta+14.0.ea")),
-                row(name("21")
+                name("28-ea").installed("28.0.0-beta+14.0.ea"),
+                name("21")
                     .installed("21.0.11+10.0.LTS")
-                    .other("21.0.9+10.0.LTS", Status::Superseded)),
+                    .other("21.0.9+10.0.LTS", Status::Superseded),
             ]
         );
     }
@@ -1989,17 +1939,15 @@ mod tests {
         outdated.others[0].active = true;
 
         let listing = render_rows(&[
-            row(name("28-ea")
+            name("28-ea")
                 .installed("28.0.0-beta+14.0.ea")
                 .latest("28.0.0-beta+16.0.ea")
-                .update()),
-            row_with(
-                name("27").installed("27.0.0+35").active(),
-                name("27-ea").installed("27.0.0-beta+30.0.ea"),
-            ),
-            row(name("26").latest("26.0.2+101")),
-            row(outdated),
-            row(name("20").latest("20.0.2+9")),
+                .update(),
+            name("27").installed("27.0.0+35").active(),
+            name("27-ea").installed("27.0.0-beta+30.0.ea"),
+            name("26").latest("26.0.2+101"),
+            outdated,
+            name("20").latest("20.0.2+9"),
         ]);
 
         assert_eq!(
@@ -2020,10 +1968,10 @@ mod tests {
     /// than an update, and a superseded build is marked in the gutter.
     #[test]
     fn render_rows_says_offered_for_an_older_build_on_offer() {
-        let listing = render_rows(&[row(name("21")
+        let listing = render_rows(&[name("21")
             .installed("21.0.12+101.0.LTS")
             .latest("21.0.11+10.0.LTS")
-            .other("21.0.9+10.0.LTS", Status::Superseded))]);
+            .other("21.0.9+10.0.LTS", Status::Superseded)]);
         assert_eq!(
             listing.installed,
             vec![
@@ -2038,7 +1986,7 @@ mod tests {
 
     #[test]
     fn tip_line_is_silent_when_everything_is_current() {
-        let rows = vec![row(name("21").installed("21.0.12+101.0.LTS"))];
+        let rows = vec![name("21").installed("21.0.12+101.0.LTS")];
         assert_eq!(tip_line(&rows), None);
     }
 
@@ -2047,17 +1995,17 @@ mod tests {
         // One line whatever applies: a listing that ends in a stack of
         // advice reads as nagging, and this one prints on every `jlo list`.
         let rows = vec![
-            row(name("21")
+            name("21")
                 .installed("21.0.11+10.0.LTS")
                 .latest("21.0.12+101.0.LTS")
-                .update()),
-            row(name("17")
+                .update(),
+            name("17")
                 .installed("17.0.19+7")
                 .latest("17.0.20+101")
-                .update()),
-            row(name("11")
+                .update(),
+            name("11")
                 .installed("11.0.25+9")
-                .other("11.0.24+8", Status::Superseded)),
+                .other("11.0.24+8", Status::Superseded),
         ];
         assert_eq!(
             tip_line(&rows).as_deref(),
@@ -2074,22 +2022,20 @@ mod tests {
     #[test]
     fn tip_line_leaves_to_update_what_update_removes() {
         let rows = vec![
-            row(name("29-ea")
+            name("29-ea")
                 .installed("29.0.0-beta+1.0.ea")
                 .latest("29.0.0-beta+3.0.ea")
                 .update()
-                .other("29.0.0-beta+0.0.ea", Status::Superseded)),
-            row_with(
-                name("28").latest("28.0.1+3").update(),
-                name("28-ea")
-                    .installed("28.0.0-beta+16.0.ea")
-                    .other("28.0.0-beta+14.0.ea", Status::Superseded),
-            ),
-            row(name("21")
+                .other("29.0.0-beta+0.0.ea", Status::Superseded),
+            name("28").latest("28.0.1+3").update(),
+            name("28-ea")
+                .installed("28.0.0-beta+16.0.ea")
+                .other("28.0.0-beta+14.0.ea", Status::Superseded),
+            name("21")
                 .installed("21.0.9+10.0.LTS")
                 .latest("21.0.12+101.0.LTS")
                 .update()
-                .other("21.0.8+9.0.LTS", Status::Superseded)),
+                .other("21.0.8+9.0.LTS", Status::Superseded),
         ];
         assert_eq!(
             tip_line(&rows).as_deref(),
@@ -2099,9 +2045,11 @@ mod tests {
 
     #[test]
     fn tip_line_offers_only_what_applies() {
-        let rows = vec![row(name("21")
-            .installed("21.0.11+10.0.LTS")
-            .other("21.0.9+10.0.LTS", Status::Superseded))];
+        let rows = vec![
+            name("21")
+                .installed("21.0.11+10.0.LTS")
+                .other("21.0.9+10.0.LTS", Status::Superseded),
+        ];
         assert_eq!(
             tip_line(&rows).as_deref(),
             Some("run 'jlo remove --superseded' (1 superseded)")
@@ -2112,9 +2060,11 @@ mod tests {
     fn tip_line_does_not_offer_to_remove_an_unmanaged_install() {
         // `jlo remove --superseded` leaves it alone, so counting it would
         // promise a removal that will not happen.
-        let rows = vec![row(name("21")
-            .installed("21.0.11+10.0.LTS")
-            .other("21.0.9+10.0.LTS", Status::Unmanaged))];
+        let rows = vec![
+            name("21")
+                .installed("21.0.11+10.0.LTS")
+                .other("21.0.9+10.0.LTS", Status::Unmanaged),
+        ];
         assert_eq!(tip_line(&rows), None);
     }
 }

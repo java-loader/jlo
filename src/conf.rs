@@ -22,20 +22,22 @@ pub(crate) struct Resolved {
 /// Where a version in play came from.
 ///
 /// The variant names are the vocabulary, and their tags are fixed -
-/// `argument`, `project_config`, `default_config`, `newest_installed`,
-/// `latest_release`, `foreign` - so the machine-readable output still to come
-/// reports this fact under names that are already settled rather than
-/// inventing a second spelling. Renaming a variant is therefore a wire-format
-/// change, not a refactor.
+/// `project_config`, `default_config`, `newest_installed`, `foreign` - so the
+/// machine-readable output still to come reports this fact under names that
+/// are already settled rather than inventing a second spelling. Renaming a
+/// variant is therefore a wire-format change, not a refactor.
 ///
-/// The last two were added with the fallback cascade and are the reason this
-/// enum was left open: `resolve` resolves a version through four stages, and
-/// only the first two are this module's to answer. The cascade itself lives in
-/// `resolve` for the same reason - see the comment on `resolve::cascade`.
+/// An explicit argument and the cascade's last stage, the latest release, have
+/// no variant: nothing reports where those came from, so every caller dropped
+/// them.
+///
+/// `NewestInstalled` was added with the fallback cascade and is the reason
+/// this enum was left open: `resolve` resolves a version through four stages,
+/// and only the first two are this module's to answer. The cascade itself
+/// lives in `resolve` for the same reason - see the comment on
+/// `resolve::cascade`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Source {
-    /// An explicit CLI argument: `jlo env 21`.
-    Argument,
     /// The nearest `.jlorc` at or above the cwd.
     ProjectConfig(PathBuf),
     /// `$JLO_HOME/default.jlorc`.
@@ -45,11 +47,6 @@ pub(crate) enum Source {
     /// "the newest one here", not "the newest one there". Never produced by
     /// [`find`] - this module does not know where JDKs live.
     NewestInstalled,
-    /// Nothing was configured and nothing was installed, so the cascade fell
-    /// back to the latest release Adoptium offers. The only stage that
-    /// downloads, and the only one `--offline` refuses. Never produced by
-    /// [`find`] - this module does not touch the network.
-    LatestRelease,
     /// Not a resolution at all: `$JAVA_HOME` was set outside jlo, so no
     /// config had any say. Never produced by [`find`] - it is how a command
     /// that starts from the live `$JAVA_HOME` reports a JDK jlo does not
@@ -65,10 +62,8 @@ impl Source {
     /// [`find_in`], so formatting never has to consult the filesystem.
     pub(crate) fn label(&self) -> String {
         match self {
-            Self::Argument => "the command line".to_string(),
             Self::ProjectConfig(path) | Self::DefaultConfig(path) => path.display().to_string(),
             Self::NewestInstalled => "the newest installed JDK".to_string(),
-            Self::LatestRelease => "the latest release".to_string(),
             Self::Foreign => "$JAVA_HOME".to_string(),
         }
     }

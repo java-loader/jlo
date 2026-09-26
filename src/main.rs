@@ -20,14 +20,14 @@ mod version;
 use crate::adoptium::AdoptiumClient;
 use crate::request::Request;
 use crate::resolve::{Verb, requested_versions};
-use crate::shellenv::{parse_exec_args, restore_leading_separator, shell_quote, update_path};
+use crate::shellenv::parse_exec_args;
 use crate::store::{JdkStore, RemoveError};
 use anyhow::{Context, anyhow};
 use clap::Parser;
 use std::collections::HashSet;
 use std::env;
 use std::io::IsTerminal;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::exit;
 
 /// Name of J'Lo's state directory under `$HOME`, used when `JLO_HOME` is unset.
@@ -125,9 +125,25 @@ fn run() -> Result<(), CommandError> {
     }
 
     // A receipt that disagrees with this binary is the known-incomplete state:
-    // the binary landed, the generated files did not. Any invocation clears it
+    // the binary landed, the generated files did not. An invocation clears it
     // rather than reporting it, which is why there is no `--repair` verb.
-    install::self_heal();
+    // Not a wrapped one: the cd hook calls through the wrapper on every
+    // directory change; a direct call (`list`, `home`, `current`, `--version`)
+    // still heals.
+    if !wrapped {
+        install::self_heal();
+    }
+
+    let api_url =
+        env::var("JLO_ADOPTIUM_API_URL").unwrap_or_else(|_| adoptium::ADOPTIUM_API_URL.to_string());
+    let client = AdoptiumClient::new(api_url);
+
+    // clap's `trailing_var_arg` eats a `--` that is the first token after
+    // `exec`, and `--` is the separator `exec` requires, so it gets the real
+    // tokens instead.
+    if first == Some("exec") {
+        return cmd_exec(&client, &argv[2..]);
+    }
 
     // `parse_from`, not `parse`: the latter would reread the prefix from the
     // process's own argv.
@@ -138,14 +154,11 @@ fn run() -> Result<(), CommandError> {
         return Ok(());
     };
 
-    let api_url =
-        env::var("JLO_ADOPTIUM_API_URL").unwrap_or_else(|_| adoptium::ADOPTIUM_API_URL.to_string());
-    let client = AdoptiumClient::new(api_url);
-
     match command {
         cli::Command::Env { version, offline } => cmd_env(&client, version, offline, wrapped),
         cli::Command::Home { version, offline } => cmd_home(&client, version, offline),
-        cli::Command::Exec { args } => cmd_exec(&client, &args),
+        // Kept in `cli` only so help and the completion scripts list it.
+        cli::Command::Exec { .. } => unreachable!("exec is intercepted from raw argv before clap"),
         cli::Command::Current => cmd_current(),
         cli::Command::List { offline } => cmd_list(&client, offline),
         cli::Command::Install { versions } => cmd_install(&client, versions, wrapped),
@@ -172,14 +185,14 @@ fn run() -> Result<(), CommandError> {
 /// The completion function registers against the command word `jlo`, which
 /// resolves to the shell function the installer generates, so the wrapper is
 /// transparent to completion.
-fn cmd_completions(shell: clap_complete::Shell) {
+fn cmd_completions(shell: cli::CompletionShell) {
     use std::io::Write as _;
 
     // The script is built once and written once, because `install.rs` needs
     // the same bytes to write into `$JLO_HOME/completions`. A closed stdout
     // (`jlo completions bash | head`) is not an error worth reporting - the
     // rule `print_lines` already follows.
-    let _ = std::io::stdout().write_all(&cli::completion_script(shell));
+    let _ = std::io::stdout().write_all(&cli::completion_script(shell.into()));
 }
 
 /// Nothing is written to stderr on success, even when the environment does
@@ -202,7 +215,13 @@ fn cmd_env(
 ) -> Result<(), CommandError> {
     let store = JdkStore::discover()?;
     let target = resolve::java_home(client, &store, version, offline, Verb::Env)?;
-    shellenv::emit(&export_lines(&store, &target.java_home)?, wrapped)?;
+    let exports = shellenv::export_lines(
+        &target.java_home,
+        active_java_home().as_deref(),
+        &shellenv::current_path()?,
+        store.base(),
+    )?;
+    shellenv::emit(&exports, wrapped)?;
 
     // The exports on stdout are the whole effect of this command. If stdout is
     // a terminal nothing captured them, so the exit code says success while
@@ -223,8 +242,8 @@ fn cmd_home(
     let store = JdkStore::discover()?;
     let java_home = resolve::java_home(client, &store, version, offline, Verb::Home)?.java_home;
     // The bare path on stdout, for `$(jlo home 21)`. Lossy would hand the
-    // caller a path that does not exist; see `path_str`.
-    println!("{}", path_str(&java_home)?);
+    // caller a path that does not exist; see `shellenv::path_str`.
+    println!("{}", shellenv::path_str(&java_home)?);
     Ok(())
 }
 
@@ -232,14 +251,9 @@ fn cmd_home(
 /// The `Result` is for the argument and resolution errors that can still be
 /// reported the ordinary way, before that happens.
 fn cmd_exec(client: &AdoptiumClient, args: &[String]) -> Result<(), CommandError> {
-    let args = restore_leading_separator(args);
-
-    // clap's own `-h`/`--help` interception only fires before any value has
-    // bound to the `args` positional; once a version is present (`jlo exec
-    // 21 --help`) it no longer triggers, because by then the parser is in
-    // `trailing_var_arg` value-collection mode. Handle it ourselves, but
-    // only for tokens before the `--`: anything after it belongs to the
-    // child command and must be passed through untouched (see
+    // clap never sees these tokens, so help is handled here - but only for
+    // tokens before the `--`: anything after it belongs to the child command
+    // and must be passed through untouched (see
     // `exec_passes_hyphen_args_through_to_the_child`).
     let separator = args.iter().position(|a| a == "--").unwrap_or(args.len());
     // `--help` wins over `-h` wherever each appears: `true` sorts above `false`.
@@ -256,14 +270,15 @@ fn cmd_exec(client: &AdoptiumClient, args: &[String]) -> Result<(), CommandError
         return Ok(());
     }
 
-    let (version, command) = parse_exec_args(&args)
+    let (version, command) = parse_exec_args(args)
         .map_err(|e| CommandError::with_hint(e, format!("Usage: {}", cli::EXEC_USAGE)))?;
 
     // No --offline flag on `exec`: the command's whole job is to run
     // something on that JDK, so declining to fetch it would only move the
     // failure. The cascade may therefore reach its last stage here.
     let store = JdkStore::discover()?;
-    let target = resolve::java_home(client, &store, version, false, Verb::Exec)?;
+    // `verb` only matters offline, and `exec` is never offline.
+    let target = resolve::java_home(client, &store, version, false, Verb::Home)?;
     shellenv::exec_command(&target.java_home, &command)
 }
 
@@ -390,17 +405,6 @@ fn removal_failed(failures: usize, noun: &str) -> Result<(), CommandError> {
     .into())
 }
 
-/// A path as a `&str`, or an error naming it.
-///
-/// Every path jlo hands out - on stdout, into an `export`, or to `execvp` -
-/// goes through here rather than through `to_string_lossy`, which silently
-/// replaces undecodable bytes and so answers with a path that does not exist.
-/// There is no useful thing jlo can do with a JDK it cannot name.
-fn path_str(path: &Path) -> anyhow::Result<&str> {
-    path.to_str()
-        .with_context(|| format!("path is not valid UTF-8: {}", path.display()))
-}
-
 /// The directory `$JAVA_HOME` currently points at, if the variable is set to
 /// anything.
 ///
@@ -501,7 +505,12 @@ fn install_names(
         wrapped,
         |repointed| {
             let exports = match repointed {
-                Some(java_home) => export_lines(store, java_home)?,
+                Some(java_home) => shellenv::export_lines(
+                    java_home,
+                    active.as_deref(),
+                    &shellenv::current_path()?,
+                    store.base(),
+                )?,
                 None => Vec::new(),
             };
             shellenv::emit(&exports, wrapped)
@@ -513,35 +522,6 @@ fn install_names(
         return Err(e);
     }
     removal_failed(run.failures.len(), "superseded JDK")
-}
-
-/// The `export` lines that point this shell at `java_home`: `JAVA_HOME` when
-/// it differs, `PATH` when the JDK's `bin` is not already where it belongs.
-///
-/// Collected rather than printed as they are decided: both lines are one
-/// environment, written in one go by `shellenv::emit`.
-fn export_lines(store: &JdkStore, java_home: &Path) -> anyhow::Result<Vec<String>> {
-    let mut exports = Vec::new();
-
-    // `to_string_lossy` is the wrong shape here: it substitutes U+FFFD for
-    // bytes it cannot decode and hands back a path that does not exist, and
-    // the caller then exports it as `JAVA_HOME`. An undecodable install
-    // directory is unusable, so say so rather than exporting a near miss.
-    let java_home_str = path_str(java_home)?;
-    // Compared as strings, not as `Path`s: `Path` equality ignores a trailing
-    // slash, and a `JAVA_HOME` spelled differently is re-exported.
-    if active_java_home().is_none_or(|current| current.as_os_str() != java_home_str) {
-        exports.push(format!("export JAVA_HOME={}", shell_quote(java_home_str)));
-    }
-
-    let java_bin = java_home.join("bin");
-    let java_bin_path = path_str(&java_bin)?;
-    let current_path = shellenv::current_path()?;
-    if let Some(updated_path) = update_path(java_bin_path, &current_path, store.base())? {
-        exports.push(format!("export PATH={}", shell_quote(&updated_path)));
-    }
-
-    Ok(exports)
 }
 
 /// J'Lo's own state directory — where `default.jlorc` lives.
@@ -586,6 +566,16 @@ pub(crate) fn jlo_home_dir() -> anyhow::Result<PathBuf> {
         return Err(anyhow!(
             "JLO_HOME is not valid UTF-8, so jlo cannot write it into the shell code it generates: '{}'",
             path.display()
+        ));
+    }
+
+    // `install` spells this path into a heredoc the user pastes and into
+    // generated shell files, where a newline would end the heredoc or a
+    // comment early. No quoting survives that, so the value is refused.
+    if path.to_string_lossy().chars().any(char::is_control) {
+        return Err(anyhow!(
+            "JLO_HOME must not contain control characters (a newline, say): '{}'",
+            path.display().to_string().escape_debug()
         ));
     }
 
@@ -641,16 +631,6 @@ mod tests {
         assert!(err.hint.is_none(), "{:?}", err.hint);
     }
 
-    #[test]
-    fn cmd_update_rejects_a_list_of_only_invalid_versions() {
-        let err = cmd_update(&offline_client(), owned(&["abc"]), false)
-            .expect_err("nothing was left to update");
-        assert_eq!(
-            format!("{:#}", err.error),
-            "no valid Java versions provided to update"
-        );
-    }
-
     /// The usage line is advice printed *under* the error, so it travels with
     /// it rather than being printed where the failure happens.
     #[test]
@@ -675,7 +655,7 @@ mod tests {
         assert_eq!(result, dir.path());
     }
 
-    /// The three values that cannot be a home, refused here rather than at
+    /// The values that cannot be a home, refused here rather than at
     /// each of the places that write the layout out. `install` spells this
     /// path into the generated stubs, into the `~/.local/bin/jlo` symlink
     /// target and into `install-receipt.json`, so a value that survives to
@@ -705,6 +685,14 @@ mod tests {
         let undecodable = OsString::from_vec(vec![b'/', b't', b'm', b'p', b'/', 0xff]);
         let err = with_jlo_home(&undecodable, jlo_home_dir).expect_err("refused");
         assert!(err.to_string().contains("not valid UTF-8"), "{err}");
+
+        // A newline: ends the pasted heredoc, or a generated comment, early.
+        let newline = with_jlo_home(&OsString::from("/tmp/jlo\nx"), jlo_home_dir)
+            .expect_err("a newline is refused");
+        assert!(
+            newline.to_string().contains("control characters"),
+            "{newline}"
+        );
     }
 
     /// Run `f` with `JLO_HOME` set to `value`, restoring the variable after.

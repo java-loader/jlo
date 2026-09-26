@@ -21,6 +21,9 @@
 // Test code: an `unwrap` failure here is a test failure, which is the point.
 #![allow(clippy::unwrap_used)]
 
+mod common;
+
+use common::{INTERPRETERS, shells};
 use sha2::{Digest, Sha256};
 use std::fs::{self, File};
 use std::os::unix::fs::PermissionsExt as _;
@@ -285,14 +288,13 @@ fn a_newer_release_is_verified_published_and_reloaded() {
         3,
         "stdout is not just the reload block: {stdout:?}"
     );
-    assert_eq!(lines[0], format!(". '{home}/jlo.sh' __jlo_reload"));
+    assert_eq!(lines[0], format!(". '{home}/jlo.sh'"));
     assert!(
-        lines[1].contains("_JLO_AUTOLOAD") && lines[1].ends_with("autoload.sh' __jlo_reload; fi"),
+        lines[1].contains("_JLO_AUTOLOAD") && lines[1].ends_with("autoload.sh'; fi"),
         "{stdout:?}"
     );
     assert!(
-        lines[2].contains("_JLO_COMPLETIONS")
-            && lines[2].ends_with("completions.sh' __jlo_reload; fi"),
+        lines[2].contains("_JLO_COMPLETIONS") && lines[2].ends_with("completions.sh'; fi"),
         "{stdout:?}"
     );
 
@@ -309,11 +311,14 @@ fn a_newer_release_is_verified_published_and_reloaded() {
 }
 
 /// The staging directories under `bin/`, by the name the install verb sweeps.
-fn staging_leftovers(install: &Install) -> Vec<String> {
+fn staging_leftovers(install: &Install) -> Vec<PathBuf> {
     fs::read_dir(install.path().join("bin"))
         .unwrap()
-        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-        .filter(|name| name.starts_with(".jlo-install-"))
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with(".jlo-install-"))
+        })
         .collect()
 }
 
@@ -359,15 +364,7 @@ fn a_new_binary_that_fails_to_install_leaves_the_binary_alone() {
 
     // The staged copy outlived its own run, and only a later one can take it
     // away - but never while it may still belong to an install in progress.
-    let bin = install.path().join("bin");
-    let leftovers = || -> Vec<PathBuf> {
-        fs::read_dir(&bin)
-            .unwrap()
-            .map(|entry| entry.unwrap().path())
-            .filter(|path| path.to_string_lossy().contains("/.jlo-install-"))
-            .collect()
-    };
-    let abandoned = leftovers();
+    let abandoned = staging_leftovers(&install);
     assert_eq!(abandoned.len(), 1, "{abandoned:?}");
     let abandoned = &abandoned[0];
     let two_hours_ago = SystemTime::now() - Duration::from_hours(2);
@@ -375,7 +372,7 @@ fn a_new_binary_that_fails_to_install_leaves_the_binary_alone() {
         .unwrap()
         .set_modified(two_hours_ago)
         .unwrap();
-    let in_progress = bin.join(".jlo-install-in-progress");
+    let in_progress = install.path().join("bin").join(".jlo-install-in-progress");
     fs::create_dir(&in_progress).unwrap();
 
     install.selfupdate(&release.url());
@@ -455,29 +452,21 @@ fn a_wrapped_update_forwards_the_mode_to_the_new_binary() {
     let home = install.path().to_string_lossy();
     let lines: Vec<&str> = stdout.lines().collect();
     assert_eq!(lines.len(), 4, "{stdout:?}");
-    assert_eq!(lines[0], format!(". '{home}/jlo.sh' __jlo_reload &&"));
-    assert!(
-        lines[1].ends_with("autoload.sh' __jlo_reload; fi &&"),
-        "{stdout:?}"
-    );
-    assert!(
-        lines[2].ends_with("completions.sh' __jlo_reload; fi"),
-        "{stdout:?}"
-    );
+    assert_eq!(lines[0], format!(". '{home}/jlo.sh' &&"));
+    assert!(lines[1].ends_with("autoload.sh'; fi &&"), "{stdout:?}");
+    assert!(lines[2].ends_with("completions.sh'; fi"), "{stdout:?}");
     assert_eq!(lines[3], "# jlo'end");
 }
 
 /// End to end through the shell function: the wrapped update's reload,
 /// written by the binary on the far side of the `exec`, is evaluated.
-/// `jlo.sh` unsets `_jlo_d` as its last act, so a sentinel left in it
-/// survives unless the reload sourced `jlo.sh` again.
+/// `jlo.sh` defines `jlo`, so the update runs from a renamed copy while a
+/// stand-in holds the name: the stand-in survives unless the reload sourced
+/// `jlo.sh` again. (`JLO_HOME` cannot carry the sentinel: the new binary bakes
+/// whatever value it is handed into the regenerated `jlo.sh`.)
 #[test]
 fn a_wrapped_update_reloads_the_calling_shell() {
-    for (sh, dialect) in [("/bin/bash", "bash"), ("zsh", "zsh")] {
-        if Command::new(sh).arg("-c").arg("exit 0").output().is_err() {
-            eprintln!("SKIP a_wrapped_update_reloads_the_calling_shell: no {sh}");
-            continue;
-        }
+    for sh in shells("a_wrapped_update_reloads_the_calling_shell", INTERPRETERS) {
         let install = Install::new("installer");
         let release = Release::good(TAG, NEWER);
         let layout = Command::new(install.binary())
@@ -492,10 +481,11 @@ fn a_wrapped_update_reloads_the_calling_shell() {
             .arg("-c")
             .arg(
                 r#". "$JLO_HOME/jlo.sh"
-                _jlo_d=sentinel
-                jlo selfupdate
+                eval "_jlo_old$(typeset -f jlo | sed '1s/^jlo//')"
+                jlo() { echo stale; }
+                _jlo_old selfupdate
                 echo "status=$?"
-                echo "reloaded=${_jlo_d-yes}""#,
+                if typeset -f jlo | grep -q stale; then echo reloaded=no; else echo reloaded=yes; fi"#,
             )
             .env("JLO_HOME", install.path())
             .env("HOME", install.path())
@@ -504,7 +494,7 @@ fn a_wrapped_update_reloads_the_calling_shell() {
             .unwrap();
         let stdout = String::from_utf8_lossy(&out.stdout);
         let ctx = format!(
-            "{dialect}: {stdout:?} {:?}",
+            "{sh}: {stdout:?} {:?}",
             String::from_utf8_lossy(&out.stderr)
         );
         assert!(stdout.contains("status=0"), "{ctx}");

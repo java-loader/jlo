@@ -50,7 +50,7 @@ fn stdout_is_written_only_by_the_one_machine_output_path() {
     // functions above it fail this test, which teaches the next person to
     // edit the expectation rather than to read it. The line is still
     // reported, because a violation is much easier to find with one.
-    const ALLOWED: &str = "println!(\"{}\", path_str(&java_home)?);";
+    const ALLOWED: &str = "println!(\"{}\", shellenv::path_str(&java_home)?);";
 
     let mut found = Vec::new();
     for (name, source) in sources() {

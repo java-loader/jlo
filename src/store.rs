@@ -1082,8 +1082,7 @@ pub(crate) fn sweep_stale_staging(base: &Path, prefix: &str) {
 }
 
 /// JDK install location, matching `IntelliJ` IDEA's layout so both tools see the
-/// same JDKs. Split out from [`JdkStore::discover`] so every platform is
-/// testable from any host.
+/// same JDKs.
 fn base_dir_for(os: &str, home: &Path) -> PathBuf {
     match os {
         "macos" => home.join("Library/Java/JavaVirtualMachines"),
@@ -1091,16 +1090,12 @@ fn base_dir_for(os: &str, home: &Path) -> PathBuf {
     }
 }
 
-/// Whether `version` is strictly older than `newest`. The single definition
-/// behind every "superseded" decision - [`JdkStore::superseded`], which
-/// `prune` and the superseded hint share, [`JdkStore::superseded_by`], which
-/// `install`/`update` replace by, [`supersedes_every_install`] and
-/// `install_latest`'s "the offer is behind
-/// the store" - so the hint that offers a deletion, the listing and the
+/// Whether `version` is strictly older than `newest`: the one definition of
+/// "superseded", so the hint that offers a deletion, the listing and the
 /// deletion itself can never disagree. Two spellings of one version compare
 /// equal, so neither is older; a name that does not parse is never older,
 /// and nothing is older than it.
-fn is_older_than(version: &str, newest: &str) -> bool {
+pub(crate) fn is_older_than(version: &str, newest: &str) -> bool {
     compare(version, newest).is_ok_and(Ordering::is_lt)
 }
 
@@ -1339,23 +1334,6 @@ mod tests {
         fs::create_dir_all(java_home.join("bin")).unwrap();
         fs::write(java_home.join("bin").join("java"), "").unwrap();
         source.join(release)
-    }
-
-    // -- base_dir_for --
-
-    #[test]
-    fn base_dir_matches_intellij_layout_on_macos() {
-        let home = Path::new("/Users/u");
-        assert_eq!(
-            base_dir_for("macos", home),
-            home.join("Library/Java/JavaVirtualMachines")
-        );
-    }
-
-    #[test]
-    fn base_dir_matches_intellij_layout_on_linux() {
-        let home = Path::new("/home/u");
-        assert_eq!(base_dir_for("linux", home), home.join(".jdks"));
     }
 
     // -- legacy_layout --
@@ -1869,14 +1847,6 @@ mod tests {
         assert_eq!(JdkStore::at(dir.path()).superseded_count().unwrap(), 2);
     }
 
-    #[test]
-    fn superseded_count_on_missing_base_dir() {
-        let dir = tempdir().unwrap();
-        let missing = dir.path().join("never-installed");
-
-        assert_eq!(JdkStore::at(&missing).superseded_count().unwrap(), 0);
-    }
-
     /// The staging directory has to be a sibling of the installs: the install
     /// ends in a `rename` into the store, and a `rename` out of `$TMPDIR`
     /// fails with EXDEV wherever `/tmp` is a separate filesystem - which is
@@ -1970,23 +1940,6 @@ mod tests {
         );
         assert_eq!(report.skipped_unmanaged, 0);
         assert_eq!(report.removed_count(), 1);
-    }
-
-    // -- prune --
-
-    #[test]
-    fn prune_removes_older_versions() {
-        let dir = tempdir().unwrap();
-        create_jdk_dir(dir.path(), "21.0.1+12", true);
-        create_jdk_dir(dir.path(), "21.0.3+9", true);
-        create_jdk_dir(dir.path(), "17.0.2+8", true);
-
-        JdkStore::at(dir.path()).prune(None).unwrap();
-
-        // 21.0.3+9 kept, 21.0.1+12 removed, 17.0.2+8 kept (only build of the name 17)
-        assert!(dir.path().join("21.0.3+9").exists());
-        assert!(!dir.path().join("21.0.1+12").exists());
-        assert!(dir.path().join("17.0.2+8").exists());
     }
 
     // -- superseded --

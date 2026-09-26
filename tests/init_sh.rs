@@ -1,9 +1,5 @@
-//! Tests for the shell wrapper in `shell/jlo-init.{bash,zsh}`.
-//!
-//! The wrapper ships as one file per dialect: the binary writes both into
-//! `$JLO_HOME/bin/` and the generated `jlo.sh` picks one at source time. Each
-//! test therefore sources the file belonging to the interpreter it runs, which
-//! is exactly what a real shell does.
+//! Tests for the shell wrapper in `shell/jlo-init.sh`, which the binary writes
+//! to `$JLO_HOME/bin/` and the generated `jlo.sh` sources under every shell.
 //!
 //! The script is sourced by the user's interactive shell and its eval branch
 //! evaluates the binary's stdout - but only a payload ending in the marker
@@ -30,16 +26,7 @@ use common::{
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-/// Which wrapper file this interpreter would be handed by `jlo.sh`.
-fn dialect(sh: &str) -> &'static str {
-    if Path::new(sh).file_name().is_some_and(|n| n == "zsh") {
-        "zsh"
-    } else {
-        "bash"
-    }
-}
-
-/// A `JLO_HOME` whose `bin/` holds both wrapper dialects and a `jlo-bin`
+/// A `JLO_HOME` whose `bin/` holds the wrapper and a `jlo-bin`
 /// symlink to the binary under test, which is what the wrapper expects to find.
 fn jlo_home() -> tempfile::TempDir {
     let home = init_sh_home();
@@ -63,15 +50,12 @@ fn init_sh_home() -> tempfile::TempDir {
     let home = tempfile::tempdir().unwrap();
     let bin = home.path().join("bin");
     std::fs::create_dir_all(&bin).unwrap();
-    for name in WRAPPERS {
-        std::fs::copy(shell_source(name), bin.join(name)).unwrap();
-    }
+    std::fs::copy(shell_source(WRAPPER), bin.join(WRAPPER)).unwrap();
     home
 }
 
-/// The two wrapper dialects, named as they are both in the repo and under
-/// `$JLO_HOME/bin/`.
-const WRAPPERS: &[&str] = &["jlo-init.bash", "jlo-init.zsh"];
+/// The wrapper, named as it is both in the repo and under `$JLO_HOME/bin/`.
+const WRAPPER: &str = "jlo-init.sh";
 
 /// A stub line printing the marker a payload has to end in to be evaluated.
 const MARK: &str = "echo \"# jlo'end\"";
@@ -82,16 +66,15 @@ fn shell_source(name: &str) -> PathBuf {
         .join(name)
 }
 
-/// Source the wrapper dialect belonging to `sh` from `home`, then run `body`.
+/// Source the wrapper from `home` into `sh`, then run `body`.
 fn run_in(sh: &str, home: &Path, body: &str) -> Output {
     let script = format!(
         r#"
         export JLO_HOME="{}"
-        . "$JLO_HOME/bin/jlo-init.{}"
+        . "$JLO_HOME/bin/jlo-init.sh"
         {body}
         "#,
         home.display(),
-        dialect(sh),
     );
 
     Command::new(sh)
@@ -217,32 +200,30 @@ fn real_binary_offline_miss_fails_through_the_wrapper() {
 // Parseability: the shipped files are sourced from profiles we do not control
 // ---------------------------------------------------------------------------
 
-/// The whole point of splitting the wrapper per dialect: each file only has to
-/// parse under the shell it is named for. The Rust compiler never looks at
-/// these bytes, so this is the cheapest half of the net that catches a typo in
-/// one of them.
+/// One file serves bash, zsh and a stray `sh`, so it has to parse under all
+/// three. The Rust compiler never looks at these bytes, so this is the
+/// cheapest half of the net that catches a typo in them.
 #[test]
-fn each_wrapper_dialect_parses_under_its_own_shell() {
+fn the_wrapper_parses_under_every_shell_that_sources_it() {
     for sh in shells(
-        "each_wrapper_dialect_parses_under_its_own_shell",
-        INTERPRETERS,
+        "the_wrapper_parses_under_every_shell_that_sources_it",
+        INTERPRETERS.iter().chain(["/bin/sh"].iter()),
     ) {
         let out = Command::new(sh)
             .arg("-n")
-            .arg(shell_source(&format!("jlo-init.{}", dialect(sh))))
+            .arg(shell_source(WRAPPER))
             .output()
             .unwrap();
         assert!(
             out.status.success(),
-            "jlo-init.{} does not parse under {sh}: {}",
-            dialect(sh),
+            "{WRAPPER} does not parse under {sh}: {}",
             String::from_utf8_lossy(&out.stderr)
         );
     }
 }
 
-/// `install.sh` keeps the dual-parse requirement the wrappers shed: it is
-/// fetched over the network and piped into whatever shell the user typed.
+/// `install.sh` is fetched over the network and piped into whatever shell the
+/// user typed.
 #[test]
 fn the_installer_parses_under_every_supported_shell() {
     let installer = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("install.sh");
@@ -274,13 +255,12 @@ fn run_selfupdate(sh: &str, home: &Path, args: &str) -> Output {
     let script = format!(
         r#"
         export JLO_HOME="{}"
-        . "$JLO_HOME/bin/jlo-init.{}"
+        . "$JLO_HOME/bin/jlo-init.sh"
         jlo selfupdate {args}
         echo "status=$?"
         echo "reloaded=${{JLO_TEST_RELOADED-no}}"
         "#,
         home.display(),
-        dialect(sh),
     );
     Command::new(sh).arg("-c").arg(script).output().unwrap()
 }
@@ -419,7 +399,7 @@ fn a_marked_payload_is_evaluated_even_when_the_run_fails() {
 /// shells are not interactive, and those always honour `#`. `+m`: no job
 /// control, so the shell leaves the terminal running the tests alone.
 fn run_interactive_without_comments(sh: &str, home: &Path, body: &str) -> Output {
-    let (flags, comments_off): (&[&str], _) = if dialect(sh) == "zsh" {
+    let (flags, comments_off): (&[&str], _) = if Path::new(sh).ends_with("zsh") {
         (&["-f", "+m", "-i"], "unsetopt interactivecomments")
     } else {
         (&["--norc", "+m", "-i"], "shopt -u interactive_comments")
@@ -427,13 +407,12 @@ fn run_interactive_without_comments(sh: &str, home: &Path, body: &str) -> Output
     let script = format!(
         r#"
         export JLO_HOME="{}"
-        . "$JLO_HOME/bin/jlo-init.{}"
+        . "$JLO_HOME/bin/jlo-init.sh"
         {comments_off}
         set -eu
         {body}
         "#,
         home.display(),
-        dialect(sh),
     );
     Command::new(sh)
         .args(flags)
@@ -769,15 +748,13 @@ const ARGV_STUB: &str = r##"case "$1" in
   *) printf 'argv:'; printf ' [%s]' "$@"; echo ;;
 esac"##;
 
-/// A temp `HOME` whose `.jlo/bin` holds both dialects and `ARGV_STUB` as
+/// A temp `HOME` whose `.jlo/bin` holds the wrapper and `ARGV_STUB` as
 /// `jlo-bin` - the default install a replayed wrapper has to fall back to.
 fn home_with_default_install() -> tempfile::TempDir {
     let home = tempfile::tempdir().unwrap();
     let bin = home.path().join(".jlo").join("bin");
     std::fs::create_dir_all(&bin).unwrap();
-    for name in WRAPPERS {
-        std::fs::copy(shell_source(name), bin.join(name)).unwrap();
-    }
+    std::fs::copy(shell_source(WRAPPER), bin.join(WRAPPER)).unwrap();
     let stub = bin.join("jlo-bin");
     std::fs::write(&stub, format!("#!/bin/sh\n{ARGV_STUB}\n")).unwrap();
     chmod(&stub, 0o755);
@@ -802,7 +779,7 @@ fn dump_wrapper(sh: &str, home: &Path) -> PathBuf {
 }
 
 /// Load only `dump` into a fresh `sh` and run `body` there. The environment
-/// is cleared down to `PATH` before `env` is applied, so no dialect file is
+/// is cleared down to `PATH` before `env` is applied, so no wrapper file is
 /// sourced and no `JLO_HOME` exists unless `env` sets one.
 fn replay_wrapper(sh: &str, dump: &Path, env: &[(&str, &str)], body: &str) -> Output {
     Command::new(sh)

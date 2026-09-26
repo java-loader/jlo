@@ -1,13 +1,10 @@
-//! Tests for the shell integration in `shell/jlo-autoload.{bash,zsh}`.
+//! Tests for the shell integration in `shell/jlo-autoload.sh`.
 //!
-//! The two dialects are separate files: the binary writes both into
-//! `$JLO_HOME/bin/` and the generated `autoload.sh` picks one at source time,
-//! so neither file ever has to parse under the other shell. These tests source
-//! each dialect under the shell it is written for - a POSIX `sh` never reaches
-//! either, which `tests/install_sh.rs` asserts on the dispatch itself.
+//! One file serves bash and zsh, branching at run time on which shell is
+//! sourcing it, so the behaviour both share is asserted under both.
 //!
 //! The script is sourced by the user's interactive shell, so these tests drive
-//! a real `bash` and inspect the hook it registers. `JLO_HOME` and the working
+//! a real `bash` or `zsh` and inspect the hook it registers. `JLO_HOME` and the working
 //! directory both point at empty temp dirs so the script's "fresh shell" branch
 //! finds neither `.jlorc` nor `default.jlorc` and stays quiet.
 //!
@@ -33,10 +30,10 @@ use tempfile::tempdir;
 /// Separates the `declare -p` line from the element dump.
 const MARKER: &str = "--8<--";
 
-/// The dialect exactly as `__install` writes it, produced by running the verb
+/// The script exactly as `__install` writes it, produced by running the verb
 /// once per test run into a throwaway `$JLO_HOME`, so what is sourced here is
 /// the shipped file.
-fn autoload_script(dialect: &str) -> String {
+fn autoload_script() -> String {
     static HOME: OnceLock<PathBuf> = OnceLock::new();
     let home = HOME.get_or_init(|| {
         let home = Path::new(env!("CARGO_TARGET_TMPDIR")).join("autoload");
@@ -52,7 +49,7 @@ fn autoload_script(dialect: &str) -> String {
         home
     });
     home.join(".jlo/bin")
-        .join(format!("jlo-autoload.{dialect}"))
+        .join("jlo-autoload.sh")
         .display()
         .to_string()
 }
@@ -91,12 +88,12 @@ impl PromptCommand {
     }
 }
 
-/// Run `prologue`, then source the bash dialect `times` times in one bash
+/// Run `prologue`, then source the script `times` times in one bash
 /// session, and report the resulting `PROMPT_COMMAND`.
 fn source_script(prologue: &str, times: usize) -> PromptCommand {
     let cwd = tempdir().unwrap();
     let jlo_home = tempdir().unwrap();
-    let script = autoload_script("bash");
+    let script = autoload_script();
 
     // `set -e` so a failure inside the sourced script fails the test instead of
     // being masked by the trailing printf's exit status.
@@ -277,7 +274,7 @@ fn empty_array_gets_the_hook() {
 fn zsh_registers_chpwd_hook_once_and_leaves_prompt_command_alone() {
     let cwd = tempdir().unwrap();
     let jlo_home = tempdir().unwrap();
-    let script = autoload_script("zsh");
+    let script = autoload_script();
 
     let body = format!(
         "set -e\n. '{script}'\n. '{script}'\n. '{script}'\n\
@@ -310,22 +307,19 @@ fn zsh_registers_chpwd_hook_once_and_leaves_prompt_command_alone() {
 }
 
 // ---------------------------------------------------------------------------
-// Behaviour shared by both dialects
+// Behaviour shared by both shells
 // ---------------------------------------------------------------------------
 //
-// Everything from here down runs under *both* shells. The two dialect files
-// each carry their own copy of `jlo_find_jlorc` and `jlo_after_cd`, so a rule
-// that is asserted in only one of them - `--offline`, the `$PWD` guard, the
-// `return 0`, the `|| :` at the tail - is a rule that can silently disappear
-// from the other. These tests run each dialect under the shell that will
-// actually source it.
+// Everything from here down runs under *both* shells. They source the same
+// `jlo_find_jlorc` and `jlo_after_cd`, but a rule asserted under only one of
+// them - `--offline`, the `$PWD` guard, the `return 0`, the `|| :` at the
+// tail - is a rule that can break under the other's semantics unnoticed.
 
-/// The shells that source a dialect and are installed here, each paired with
-/// the file it gets.
-fn hook_shells(test: &str) -> impl Iterator<Item = (String, &'static str)> {
-    [(bash_bin(), "bash"), ("zsh".to_string(), "zsh")]
+/// The shells that source the script and are installed here.
+fn hook_shells(test: &str) -> impl Iterator<Item = String> {
+    [bash_bin(), "zsh".to_string()]
         .into_iter()
-        .filter(move |(sh, _)| !skip_missing(test, sh))
+        .filter(move |sh| !skip_missing(test, sh))
 }
 
 /// Run `body` under `sh` with `HOME`, `JLO_HOME` and the working directory
@@ -355,7 +349,7 @@ fn run_sh(sh: &str, body: &str, home: &Path, jlo_home: &Path, cwd: &Path) -> Str
 // Walk-up lookup: the hook must see a project's .jlorc from a subdirectory
 // ---------------------------------------------------------------------------
 
-/// Source the dialect from an empty directory (so the fresh-shell branch stays
+/// Source the script from an empty directory (so the fresh-shell branch stays
 /// quiet), `cd` to `start`, and report what `jlo_find_jlorc` decides.
 ///
 /// `HOME` is the temp tree rather than the real one: the search stops there,
@@ -363,10 +357,10 @@ fn run_sh(sh: &str, body: &str, home: &Path, jlo_home: &Path, cwd: &Path) -> Str
 /// whatever lives in it. The inert `jlo` stub is there for zsh, where the `cd`
 /// below fires the chpwd hook for real - without it an undefined `jlo` would
 /// abort the script under `set -e` before the assertion ran.
-fn finds_jlorc(sh: &str, dialect: &str, home: &Path, start: &Path) -> bool {
+fn finds_jlorc(sh: &str, home: &Path, start: &Path) -> bool {
     let neutral = tempdir().unwrap();
     let jlo_home = tempdir().unwrap();
-    let script = autoload_script(dialect);
+    let script = autoload_script();
 
     let body = format!(
         // `type` under `set -e`: without it a missing function would exit
@@ -390,16 +384,16 @@ fn canon(p: &Path) -> std::path::PathBuf {
     p.canonicalize().unwrap()
 }
 
-/// Builds a `HOME` tree, then asserts what every dialect makes of it.
+/// Builds a `HOME` tree, then asserts what every shell makes of it.
 fn assert_lookup(test: &str, build: impl Fn(&Path) -> std::path::PathBuf, expected: bool) {
-    for (sh, dialect) in hook_shells(test) {
+    for sh in hook_shells(test) {
         let home = tempdir().unwrap();
         let home = canon(home.path());
         let start = build(&home);
         assert_eq!(
-            finds_jlorc(&sh, dialect, &home, &start),
+            finds_jlorc(&sh, &home, &start),
             expected,
-            "{sh} ({dialect}) disagrees about {start:?}"
+            "{sh} disagrees about {start:?}"
         );
     }
 }
@@ -458,7 +452,7 @@ fn find_stops_at_vcs_root() {
 /// in `src/conf.rs`, in the other implementation. Two tests for one rule are
 /// justified here for the reason ADR-0004 gives: the walk exists twice, in
 /// Rust and in shell, and the shell half is `[ -e ]` rather than `[ -d ]`.
-/// Nothing but this notices if one dialect drifts to `-d`.
+/// Nothing but this notices if the shell half drifts to `-d`.
 #[test]
 fn find_stops_at_a_worktree_whose_git_is_a_file() {
     assert_lookup(
@@ -485,7 +479,7 @@ fn find_stops_at_a_worktree_whose_git_is_a_file() {
 /// temp tree rather than the tree itself.
 #[test]
 fn find_stops_at_home() {
-    for (sh, dialect) in hook_shells("find_stops_at_home") {
+    for sh in hook_shells("find_stops_at_home") {
         let outside = tempdir().unwrap();
         let outside = canon(outside.path());
         let home = outside.join("home");
@@ -493,10 +487,7 @@ fn find_stops_at_home() {
         std::fs::create_dir_all(&project).unwrap();
         std::fs::write(outside.join(".jlorc"), "17\n").unwrap();
 
-        assert!(
-            !finds_jlorc(&sh, dialect, &home, &project),
-            "{sh} ({dialect}) walked past $HOME"
-        );
+        assert!(!finds_jlorc(&sh, &home, &project), "{sh} walked past $HOME");
     }
 }
 
@@ -507,7 +498,7 @@ fn find_stops_at_home() {
 /// read - the two halves of one rule disagreeing about where home is.
 #[test]
 fn find_stops_at_home_with_a_trailing_slash() {
-    for (sh, dialect) in hook_shells("find_stops_at_home_with_a_trailing_slash") {
+    for sh in hook_shells("find_stops_at_home_with_a_trailing_slash") {
         let outside = tempdir().unwrap();
         let outside = canon(outside.path());
         let home = outside.join("home");
@@ -517,8 +508,8 @@ fn find_stops_at_home_with_a_trailing_slash() {
 
         let home_with_slash = std::path::PathBuf::from(format!("{}/", home.display()));
         assert!(
-            !finds_jlorc(&sh, dialect, &home_with_slash, &project),
-            "{sh} ({dialect}) walked past a $HOME spelled with a trailing slash"
+            !finds_jlorc(&sh, &home_with_slash, &project),
+            "{sh} walked past a $HOME spelled with a trailing slash"
         );
     }
 }
@@ -548,7 +539,7 @@ fn find_reports_none_when_absent() {
 /// several-hundred-megabyte download.
 #[test]
 fn hook_runs_jlo_env_from_a_project_subdirectory() {
-    for (sh, dialect) in hook_shells("hook_runs_jlo_env_from_a_project_subdirectory") {
+    for sh in hook_shells("hook_runs_jlo_env_from_a_project_subdirectory") {
         let home = tempdir().unwrap();
         let home = canon(home.path());
         let project = home.join("project");
@@ -558,7 +549,7 @@ fn hook_runs_jlo_env_from_a_project_subdirectory() {
 
         let neutral = tempdir().unwrap();
         let jlo_home = tempdir().unwrap();
-        let script = autoload_script(dialect);
+        let script = autoload_script();
         // zsh runs the hook on the `cd` itself; the explicit call after it is
         // what bash needs, and the `$PWD` guard makes it a no-op for zsh. One
         // line of output either way is the assertion.
@@ -568,7 +559,7 @@ fn hook_runs_jlo_env_from_a_project_subdirectory() {
         );
 
         let stdout = run_sh(&sh, &body, &home, jlo_home.path(), neutral.path());
-        assert_eq!(stdout.trim(), "jlo env --offline", "{sh} ({dialect})");
+        assert_eq!(stdout.trim(), "jlo env --offline", "{sh}");
     }
 }
 
@@ -576,7 +567,7 @@ fn hook_runs_jlo_env_from_a_project_subdirectory() {
 /// worst possible place to start a download, so it too must ask offline.
 #[test]
 fn fresh_shell_applies_the_user_default_offline() {
-    for (sh, dialect) in hook_shells("fresh_shell_applies_the_user_default_offline") {
+    for sh in hook_shells("fresh_shell_applies_the_user_default_offline") {
         let home = tempdir().unwrap();
         let home = canon(home.path());
         let neutral = home.join("neutral");
@@ -585,11 +576,11 @@ fn fresh_shell_applies_the_user_default_offline() {
         let jlo_home = tempdir().unwrap();
         std::fs::write(jlo_home.path().join("default.jlorc"), "21\n").unwrap();
 
-        let script = autoload_script(dialect);
+        let script = autoload_script();
         let body = format!("set -e\njlo() {{ echo \"jlo $*\"; }}\n. '{script}'\n");
 
         let stdout = run_sh(&sh, &body, &home, jlo_home.path(), &neutral);
-        assert_eq!(stdout.trim(), "jlo env --offline", "{sh} ({dialect})");
+        assert_eq!(stdout.trim(), "jlo env --offline", "{sh}");
     }
 }
 
@@ -597,18 +588,18 @@ fn fresh_shell_applies_the_user_default_offline() {
 /// branch must not run the binary at all - there is nothing for it to resolve.
 #[test]
 fn fresh_shell_stays_quiet_without_any_config() {
-    for (sh, dialect) in hook_shells("fresh_shell_stays_quiet_without_any_config") {
+    for sh in hook_shells("fresh_shell_stays_quiet_without_any_config") {
         let home = tempdir().unwrap();
         let home = canon(home.path());
         let neutral = home.join("neutral");
         std::fs::create_dir_all(&neutral).unwrap();
         let jlo_home = tempdir().unwrap();
 
-        let script = autoload_script(dialect);
+        let script = autoload_script();
         let body = format!("set -e\njlo() {{ echo \"jlo $*\"; }}\n. '{script}'\n");
 
         let stdout = run_sh(&sh, &body, &home, jlo_home.path(), &neutral);
-        assert_eq!(stdout.trim(), "", "{sh} ({dialect}) ran jlo for nothing");
+        assert_eq!(stdout.trim(), "", "{sh} ran jlo for nothing");
     }
 }
 
@@ -619,7 +610,7 @@ fn fresh_shell_stays_quiet_without_any_config() {
 /// carries the same guard so a hand call behaves identically.
 #[test]
 fn hook_runs_once_per_directory_not_once_per_prompt() {
-    for (sh, dialect) in hook_shells("hook_runs_once_per_directory_not_once_per_prompt") {
+    for sh in hook_shells("hook_runs_once_per_directory_not_once_per_prompt") {
         let home = tempdir().unwrap();
         let home = canon(home.path());
         let project = home.join("project");
@@ -628,7 +619,7 @@ fn hook_runs_once_per_directory_not_once_per_prompt() {
 
         let neutral = tempdir().unwrap();
         let jlo_home = tempdir().unwrap();
-        let script = autoload_script(dialect);
+        let script = autoload_script();
         let body = format!(
             "set -e\njlo() {{ echo \"jlo $*\"; }}\n. '{script}'\ncd '{}'\n\
              jlo_after_cd\njlo_after_cd\njlo_after_cd\n",
@@ -636,7 +627,7 @@ fn hook_runs_once_per_directory_not_once_per_prompt() {
         );
 
         let stdout = run_sh(&sh, &body, &home, jlo_home.path(), neutral.path());
-        assert_eq!(stdout.trim(), "jlo env --offline", "{sh} ({dialect})");
+        assert_eq!(stdout.trim(), "jlo env --offline", "{sh}");
     }
 }
 
@@ -645,7 +636,7 @@ fn hook_runs_once_per_directory_not_once_per_prompt() {
 /// not become the status their prompt reports.
 #[test]
 fn hook_reports_success_even_when_jlo_env_fails() {
-    for (sh, dialect) in hook_shells("hook_reports_success_even_when_jlo_env_fails") {
+    for sh in hook_shells("hook_reports_success_even_when_jlo_env_fails") {
         let home = tempdir().unwrap();
         let home = canon(home.path());
         let project = home.join("project");
@@ -654,7 +645,7 @@ fn hook_reports_success_even_when_jlo_env_fails() {
 
         let neutral = tempdir().unwrap();
         let jlo_home = tempdir().unwrap();
-        let script = autoload_script(dialect);
+        let script = autoload_script();
         // Both with and without `set -e`. Without it the failure shows up as
         // a status the prompt would report; with it, as a shell that is simply
         // gone - POSIX exempts every command of an AND-OR list from `set -e`
@@ -669,11 +660,7 @@ fn hook_reports_success_even_when_jlo_env_fails() {
             );
 
             let stdout = run_sh(&sh, &body, &home, jlo_home.path(), neutral.path());
-            assert_eq!(
-                stdout.trim(),
-                "status=0",
-                "{sh} ({dialect}) with prologue {prologue:?}"
-            );
+            assert_eq!(stdout.trim(), "status=0", "{sh} with prologue {prologue:?}");
         }
     }
 }
@@ -684,7 +671,7 @@ fn hook_reports_success_even_when_jlo_env_fails() {
 /// of the user's shell setup with it.
 #[test]
 fn fresh_shell_survives_a_failing_jlo_env_under_set_e() {
-    for (sh, dialect) in hook_shells("fresh_shell_survives_a_failing_jlo_env_under_set_e") {
+    for sh in hook_shells("fresh_shell_survives_a_failing_jlo_env_under_set_e") {
         let home = tempdir().unwrap();
         let home = canon(home.path());
         let project = home.join("project");
@@ -692,7 +679,7 @@ fn fresh_shell_survives_a_failing_jlo_env_under_set_e() {
         std::fs::write(project.join(".jlorc"), "99\n").unwrap();
 
         let jlo_home = tempdir().unwrap();
-        let script = autoload_script(dialect);
+        let script = autoload_script();
         let body =
             format!("set -eu\njlo() {{ return 1; }}\n. '{script}'\necho 'profile-continued'\n");
 
@@ -700,14 +687,14 @@ fn fresh_shell_survives_a_failing_jlo_env_under_set_e() {
         assert_eq!(
             stdout.trim(),
             "profile-continued",
-            "{sh} ({dialect}) aborted the profile"
+            "{sh} aborted the profile"
         );
     }
 }
 
 /// A profile may well run under `set -u`; the script must not abort it by
 /// touching `PROMPT_COMMAND`, `JLO_HOME` or `_JLO_LAST_DIR` before they exist.
-/// Checked in both dialects - a `set -u` failure in the zsh half would
+/// Checked under both shells - a `set -u` failure only zsh trips would
 /// otherwise only surface on a zsh user's next login.
 ///
 /// `JLO_HOME` is unset in the second pass on purpose. The fresh-shell branch
@@ -722,8 +709,8 @@ fn sources_and_runs_the_hook_under_set_u() {
     std::fs::create_dir_all(&neutral).unwrap();
     let jlo_home = tempdir().unwrap();
 
-    for (sh, dialect) in hook_shells("sources_and_runs_the_hook_under_set_u") {
-        let script = autoload_script(dialect);
+    for sh in hook_shells("sources_and_runs_the_hook_under_set_u") {
+        let script = autoload_script();
         for prologue in ["", "unset JLO_HOME\n"] {
             let body = format!(
                 "set -u\n{prologue}jlo() {{ return 1; }}\n. '{script}'\n\
@@ -733,7 +720,7 @@ fn sources_and_runs_the_hook_under_set_u() {
             assert_eq!(
                 stdout.trim(),
                 "rc=0",
-                "{sh} ({dialect}) with prologue {prologue:?}: the hook must not \
+                "{sh} with prologue {prologue:?}: the hook must not \
                  leak a failure into $?"
             );
         }

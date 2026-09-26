@@ -67,12 +67,54 @@ fn write_payload(out: &mut impl std::io::Write, statements: &[String]) -> std::i
     out.flush()
 }
 
+/// The `export` lines that point this shell at `java_home`: `JAVA_HOME` when
+/// it differs from `active`, `PATH` when the JDK's `bin` is not already where
+/// it belongs in `current_path`.
+///
+/// Both current values arrive as arguments rather than being read here, so the
+/// decision is testable without mutating the process environment. Collected
+/// rather than printed as they are decided: both lines are one environment,
+/// written in one go by [`emit`].
+pub(crate) fn export_lines(
+    java_home: &Path,
+    active: Option<&Path>,
+    current_path: &str,
+    jdk_base: &Path,
+) -> anyhow::Result<Vec<String>> {
+    let mut exports = Vec::new();
+
+    let java_home_str = path_str(java_home)?;
+    // Compared as strings, not as `Path`s: `Path` equality ignores a trailing
+    // slash, and a `JAVA_HOME` spelled differently is re-exported.
+    if active.is_none_or(|current| current.as_os_str() != java_home_str) {
+        exports.push(format!("export JAVA_HOME={}", shell_quote(java_home_str)));
+    }
+
+    let java_bin = java_home.join("bin");
+    if let Some(updated_path) = update_path(path_str(&java_bin)?, current_path, jdk_base)? {
+        exports.push(format!("export PATH={}", shell_quote(&updated_path)));
+    }
+
+    Ok(exports)
+}
+
+/// A path as a `&str`, or an error naming it.
+///
+/// Every path jlo hands out - on stdout, into an `export`, or to `execvp` -
+/// goes through here rather than through `to_string_lossy`, which silently
+/// replaces undecodable bytes and so answers with a path that does not exist.
+/// There is no useful thing jlo can do with a JDK it cannot name.
+pub(crate) fn path_str(path: &Path) -> anyhow::Result<&str> {
+    path.to_str()
+        .with_context(|| format!("path is not valid UTF-8: {}", path.display()))
+}
+
 /// Prepend `java_path` to `current_path`, dropping any entry already under
 /// `jdk_base`, or `None` when that changes nothing. `jdk_base` must be the JDK
-/// install directory ([`JdkStore::base`]) — the only tree whose PATH entries
-/// J'Lo owns. Passing a broader directory (the home directory, say) would strip
-/// unrelated user entries.
-pub(crate) fn update_path(
+/// install directory ([`crate::store::JdkStore::base`]) — the only tree whose
+/// PATH entries J'Lo owns. Passing a broader directory (the home directory,
+/// say) would strip unrelated user entries.
+fn update_path(
     java_path: &str,
     current_path: &str,
     jdk_base: &Path,
@@ -146,10 +188,7 @@ fn classify_path(looked_up: Result<String, env::VarError>) -> anyhow::Result<Str
 /// The child's `PATH`: the caller's with the JDK's `bin` directory prepended.
 fn child_path(java_home: &Path) -> anyhow::Result<String> {
     let java_bin = java_home.join("bin");
-    let bin = java_bin
-        .to_str()
-        .with_context(|| format!("path is not valid UTF-8: {}", java_bin.display()))?;
-    prepend(bin, &current_path()?, |_| true)
+    prepend(path_str(&java_bin)?, &current_path()?, |_| true)
 }
 
 /// Split the arguments following `exec` into an optional version and the command
@@ -173,39 +212,6 @@ pub(crate) fn parse_exec_args(args: &[String]) -> anyhow::Result<(Option<String>
     }
 
     Ok((version, command))
-}
-
-/// Whether the real, unparsed command line has a literal `--` as the token
-/// immediately following `exec`, i.e. no version was given before it.
-fn separator_immediately_follows_exec(mut raw_args: impl Iterator<Item = String>) -> bool {
-    raw_args
-        .find(|a| a == "exec")
-        .and_then(|_| raw_args.next())
-        .is_some_and(|a| a == "--")
-}
-
-/// clap's `trailing_var_arg` treats a literal `--` as the options/positional
-/// boundary rather than a value whenever it is the very first token handed to
-/// the subcommand - which is exactly `jlo exec -- <command>` (version
-/// omitted). It gets consumed before reaching us, so `args` arrives here
-/// without the separator `parse_exec_args` requires.
-///
-/// This is unambiguous precisely because it only ever happens to the
-/// *first* token: once any value (a version, or the reinstated `--` itself)
-/// has bound to the positional, every later token - including a second,
-/// user-typed `--` that is genuinely part of the command - survives
-/// untouched. So `args` here never already contains the eaten separator;
-/// any `--` already present in it is a distinct, later token that must be
-/// left exactly where it is, not mistaken for "already restored".
-pub(crate) fn restore_leading_separator(args: &[String]) -> Vec<String> {
-    if !separator_immediately_follows_exec(env::args()) {
-        return args.to_vec();
-    }
-
-    let mut restored = Vec::with_capacity(args.len() + 1);
-    restored.push("--".to_string());
-    restored.extend_from_slice(args);
-    restored
 }
 
 /// Replace the current process with `command`, having set `JAVA_HOME` and
@@ -421,50 +427,6 @@ mod tests {
         }
     }
 
-    // -- separator_immediately_follows_exec --
-
-    fn raw(tokens: &[&str]) -> impl Iterator<Item = String> {
-        tokens.iter().map(|s| (*s).to_string())
-    }
-
-    #[test]
-    fn detects_separator_right_after_exec() {
-        // `jlo exec -- java -version`: clap eats this `--` before `cmd_exec`
-        // ever sees it.
-        assert!(separator_immediately_follows_exec(raw(&[
-            "jlo-bin", "exec", "--", "java", "-version"
-        ])));
-    }
-
-    #[test]
-    fn does_not_trigger_when_a_version_precedes_it() {
-        // `jlo exec 21 -- java -version`: the version binds first, so clap
-        // never touches this `--`.
-        assert!(!separator_immediately_follows_exec(raw(&[
-            "jlo-bin", "exec", "21", "--", "java", "-version"
-        ])));
-    }
-
-    #[test]
-    fn still_detects_it_when_the_command_has_its_own_dash_dash() {
-        // `jlo exec -- -- echo hi`: the first `--` is still the one clap
-        // eats, even though a second, user-typed `--` (part of the command)
-        // immediately follows it. (Regression for the bug where
-        // `args.first() == "--"` was used as a stand-in for "already
-        // restored": that second `--` would land at `args[0]` after clap's
-        // parse and get mistaken for the already-restored separator.)
-        assert!(separator_immediately_follows_exec(raw(&[
-            "jlo-bin", "exec", "--", "--", "echo", "hi"
-        ])));
-    }
-
-    #[test]
-    fn does_not_trigger_without_any_separator() {
-        assert!(!separator_immediately_follows_exec(raw(&[
-            "jlo-bin", "exec", "java", "-version"
-        ])));
-    }
-
     #[test]
     fn exec_failure_code_distinguishes_not_found_and_not_executable() {
         use std::io::ErrorKind;
@@ -495,6 +457,67 @@ mod tests {
             classify_path(Err(env::VarError::NotPresent)).unwrap(),
             String::new()
         );
+    }
+
+    #[test]
+    fn export_lines_skips_a_java_home_that_is_already_set() {
+        let jdk_base = Path::new("/home/u/.jdks");
+        let java_home = Path::new("/home/u/.jdks/21.0.12");
+        let lines = export_lines(java_home, Some(java_home), "/usr/bin", jdk_base).unwrap();
+        assert_eq!(
+            lines,
+            owned(&["export PATH='/home/u/.jdks/21.0.12/bin:/usr/bin'"])
+        );
+    }
+
+    /// `Path` equality would call these equal; the shell holds the other
+    /// spelling, so it is re-exported. `PATH` already leads with the JDK's
+    /// `bin`, so it is not.
+    #[test]
+    fn export_lines_reexports_a_java_home_spelled_with_a_trailing_slash() {
+        let jdk_base = Path::new("/home/u/.jdks");
+        let lines = export_lines(
+            Path::new("/home/u/.jdks/21.0.12"),
+            Some(Path::new("/home/u/.jdks/21.0.12/")),
+            "/home/u/.jdks/21.0.12/bin:/usr/bin",
+            jdk_base,
+        )
+        .unwrap();
+        assert_eq!(lines, owned(&["export JAVA_HOME='/home/u/.jdks/21.0.12'"]));
+    }
+
+    /// `JAVA_HOME` first, then `PATH`, each quoted.
+    #[test]
+    fn export_lines_exports_both_when_both_differ() {
+        let jdk_base = Path::new("/home/u/.jdks");
+        let lines = export_lines(
+            Path::new("/home/u/.jdks/21.0.12"),
+            Some(Path::new("/home/u/.jdks/17.0.13")),
+            "/home/u/.jdks/17.0.13/bin:/usr/bin",
+            jdk_base,
+        )
+        .unwrap();
+        assert_eq!(
+            lines,
+            owned(&[
+                "export JAVA_HOME='/home/u/.jdks/21.0.12'",
+                "export PATH='/home/u/.jdks/21.0.12/bin:/usr/bin'",
+            ])
+        );
+    }
+
+    /// A lossy rendering would export a path that does not exist.
+    #[test]
+    fn export_lines_refuses_an_undecodable_java_home() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let java_home = Path::new(OsStr::from_bytes(b"/home/u/.jdks/21\xff"));
+        let err = export_lines(java_home, None, "/usr/bin", Path::new("/home/u/.jdks"))
+            .expect_err("an undecodable JAVA_HOME has no export");
+        let message = err.to_string();
+        assert!(message.contains("not valid UTF-8"), "{message}");
+        assert!(message.contains("/home/u/.jdks/21"), "{message}");
     }
 
     #[test]

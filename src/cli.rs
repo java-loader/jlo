@@ -6,7 +6,7 @@
 //! alias the binary had never heard of.
 
 use crate::ui;
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 /// `jlo -h` and a bare `jlo`: enough to get going.
 fn after_help() -> String {
@@ -124,6 +124,23 @@ pub(crate) struct Cli {
     pub(crate) command: Option<Command>,
 }
 
+/// The shells `jlo completions` accepts: the two jlo supports, not every one
+/// `clap_complete` can target, since 1.0 freezes what is accepted.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub(crate) enum CompletionShell {
+    Bash,
+    Zsh,
+}
+
+impl From<CompletionShell> for clap_complete::Shell {
+    fn from(shell: CompletionShell) -> Self {
+        match shell {
+            CompletionShell::Bash => Self::Bash,
+            CompletionShell::Zsh => Self::Zsh,
+        }
+    }
+}
+
 /// The completion script for `shell`, as bytes.
 ///
 /// Built here rather than at each call site because there are two: `jlo
@@ -152,11 +169,10 @@ pub(crate) fn print_help() {
 /// Print `jlo exec`'s own help, exactly as `jlo exec -h`/`jlo exec --help`
 /// would.
 ///
-/// clap intercepts `-h`/`--help` for us only until a value has bound to
-/// `exec`'s `args` positional; `jlo exec 21 --help` arrives past that point,
-/// so `cmd_exec` calls this directly instead. `long` selects between the
-/// short (`-h`) and long (`--help`) renderings, matching clap's own
-/// convention.
+/// `exec` is intercepted from raw argv before clap parses, so clap never sees
+/// its `-h`/`--help`; `cmd_exec` calls this directly instead. `long` selects
+/// between the short (`-h`) and long (`--help`) renderings, matching clap's
+/// own convention.
 pub(crate) fn print_exec_help(long: bool) {
     use clap::CommandFactory;
 
@@ -463,7 +479,7 @@ under the bash 3.2 macOS ships, and still exits 0."
     )]
     Completions {
         /// Shell to generate completions for
-        shell: clap_complete::Shell,
+        shell: CompletionShell,
     },
     // The `sing` easter egg is deliberately NOT a variant here - see
     // `main`'s comment for why.

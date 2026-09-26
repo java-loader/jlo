@@ -46,6 +46,12 @@ main() {
   # Exported, not merely set: the binary below reads it out of the environment
   # to decide where to write the layout.
   export JLO_HOME
+  # [:cntrl:], not [:print:], which rejects non-ASCII under the C locale.
+  case "$JLO_HOME" in
+    *[[:cntrl:]]*)
+      echo "JLO_HOME must not contain control characters." >&2
+      exit 1 ;;
+  esac
   JLO_BIN_DIR="$JLO_HOME/bin"
   # Overridable so the download half of this script can be pointed at a local
   # server, the way JLO_ADOPTIUM_API_URL and JLO_RELEASE_API_URL are for the
@@ -92,7 +98,6 @@ main() {
   FQ_JLO_SUM="$FQ_JLO_BUNDLE.sha256"
   if ! curl -fsSL "$JLO_URL" -o "$FQ_JLO_BUNDLE"; then
     echo "Failed to download jlo binary from $JLO_URL" >&2
-    rm -rf "$JLO_STAGE"
     exit 1
   fi
 
@@ -124,7 +129,6 @@ main() {
     esac
     if [ "$JLO_WELL_FORMED" = 0 ] || [ -n "$JLO_NOT_HEX" ]; then
       echo "Checksum file for $JLO_PACKAGE is not a SHA256; refusing to install." >&2
-      rm -rf "$JLO_STAGE"
       exit 1
     fi
     if JLO_ACTUAL="$(jlo_sha256 "$FQ_JLO_BUNDLE")"; then
@@ -136,7 +140,6 @@ main() {
         echo "Checksum mismatch for $JLO_PACKAGE" >&2
         echo "  expected $JLO_EXPECTED" >&2
         echo "  got      $JLO_ACTUAL" >&2
-        rm -rf "$JLO_STAGE"
         exit 1
       fi
     else
@@ -160,7 +163,6 @@ main() {
   # the subshell keeps the working directory change local.
   if ! (cd "$JLO_STAGE" && tar -xzf jlo.tar.gz); then
     echo "Failed to extract jlo binary from $FQ_JLO_BUNDLE" >&2
-    rm -rf "$JLO_STAGE"
     exit 1
   fi
   # Removed before the hand-over, which never returns here: what is left in the
@@ -171,7 +173,6 @@ main() {
   JLO_TARGET="$JLO_STAGE/jlo-bin"
   if [ ! -x "$JLO_TARGET" ]; then
     echo "The downloaded archive did not contain an executable jlo-bin." >&2
-    rm -rf "$JLO_STAGE"
     exit 1
   fi
 

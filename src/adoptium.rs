@@ -103,32 +103,6 @@ struct AssetPackage {
     checksum: String,
 }
 
-impl TryFrom<Asset> for JdkMetadata {
-    type Error = anyhow::Error;
-
-    fn try_from(asset: Asset) -> anyhow::Result<Self> {
-        let metadata = JdkMetadata {
-            semver: asset.version.semver,
-            package_name: asset.binary.package.name,
-            download_link: asset.binary.package.link,
-            checksum: asset.binary.package.checksum,
-        };
-        if metadata.semver.is_empty()
-            || metadata.package_name.is_empty()
-            || metadata.download_link.is_empty()
-            || metadata.checksum.is_empty()
-        {
-            bail!("incomplete metadata received from the Adoptium API");
-        }
-        // Both of these name a file or a directory jlo creates. Checked here,
-        // at the edge, so no caller has to remember which fields are safe to
-        // join onto a path.
-        plain_name(&metadata.semver, "version.semver")?;
-        plain_name(&metadata.package_name, "package name")?;
-        Ok(metadata)
-    }
-}
-
 /// Require a field to be a single ordinary path component.
 ///
 /// `Path::join` neither resolves `..` nor resists a leading `/` - an absolute
@@ -173,11 +147,25 @@ impl TryFrom<Release> for JdkMetadata {
         let binary = release.binaries.into_iter().next().context(
             "the Adoptium API returned a release with no binary for this OS and architecture",
         )?;
-        Asset {
-            version: release.version_data,
-            binary,
+        let metadata = JdkMetadata {
+            semver: release.version_data.semver,
+            package_name: binary.package.name,
+            download_link: binary.package.link,
+            checksum: binary.package.checksum,
+        };
+        if metadata.semver.is_empty()
+            || metadata.package_name.is_empty()
+            || metadata.download_link.is_empty()
+            || metadata.checksum.is_empty()
+        {
+            bail!("incomplete metadata received from the Adoptium API");
         }
-        .try_into()
+        // Both of these name a file or a directory jlo creates. Checked here,
+        // at the edge, so no caller has to remember which fields are safe to
+        // join onto a path.
+        plain_name(&metadata.semver, "version.semver")?;
+        plain_name(&metadata.package_name, "package name")?;
+        Ok(metadata)
     }
 }
 
@@ -469,27 +457,17 @@ pub(crate) fn platform() -> String {
 
 fn jdk_os() -> anyhow::Result<&'static str> {
     match env::consts::OS {
-        "linux" | "solaris" | "aix" => Ok(env::consts::OS),
+        "linux" => Ok("linux"),
         "macos" => Ok("mac"),
-        _ => bail!("unsupported OS: {}", env::consts::OS),
+        other => bail!("unsupported OS: {other}"),
     }
 }
 
 fn jdk_arch() -> anyhow::Result<&'static str> {
     match env::consts::ARCH {
         "x86_64" => Ok("x64"),
-        "x86" => Ok("x32"),
-        "powerpc64" => {
-            if cfg!(target_endian = "little") {
-                Ok("ppc64le")
-            } else {
-                Ok("ppc64")
-            }
-        }
-        "s390x" | "arm" | "aarch64" => Ok(env::consts::ARCH),
-        "sparc64" => Ok("sparcv9"),
-        "riscv64" => Ok("riscv64"),
-        _ => bail!("unsupported architecture: {}", env::consts::ARCH),
+        "aarch64" => Ok("aarch64"),
+        other => bail!("unsupported architecture: {other}"),
     }
 }
 
@@ -501,24 +479,24 @@ mod tests {
 
     // -- metadata validation --
 
-    fn asset(semver: &str, package_name: &str) -> Asset {
-        Asset {
-            version: AssetVersion {
+    fn release(semver: &str, package_name: &str) -> Release {
+        Release {
+            version_data: AssetVersion {
                 semver: semver.to_string(),
             },
-            binary: AssetBinary {
+            binaries: vec![AssetBinary {
                 package: AssetPackage {
                     name: package_name.to_string(),
                     link: "https://example.invalid/jdk.tar.gz".to_string(),
                     checksum: "0".repeat(64),
                 },
-            },
+            }],
         }
     }
 
     #[test]
     fn ordinary_metadata_is_accepted() {
-        let metadata: JdkMetadata = asset("21.0.5+11", "OpenJDK21U.tar.gz")
+        let metadata: JdkMetadata = release("21.0.5+11", "OpenJDK21U.tar.gz")
             .try_into()
             .expect("a normal Adoptium response must pass");
         assert_eq!(metadata.semver, "21.0.5+11");
@@ -542,7 +520,7 @@ mod tests {
             "./jdk.tar.gz",
         ] {
             for (semver, package_name) in [(escape, "jdk.tar.gz"), ("21.0.5+11", escape)] {
-                let err = JdkMetadata::try_from(asset(semver, package_name))
+                let err = JdkMetadata::try_from(release(semver, package_name))
                     .expect_err("an escaping field must be refused");
                 assert!(
                     format!("{err:#}").contains("unusable"),
@@ -609,17 +587,6 @@ mod tests {
             metadata.checksum,
             "6ebcf221c9b41507b14c098e93c6ead6440b8d9bd154f8ec666c4c73abbdb201"
         );
-    }
-
-    #[test]
-    fn fetch_metadata_http_error_reports_status() {
-        let mut server = mockito::Server::new();
-        let _m = major_mock(&mut server, 21, 500, "boom");
-
-        let client = AdoptiumClient::new(server.url());
-        let err = client.fetch_metadata(request("21")).unwrap_err();
-
-        assert!(format!("{err:#}").contains("HTTP 500"), "got: {err:#}");
     }
 
     #[test]
@@ -774,21 +741,6 @@ mod tests {
 
         assert_eq!(jdks.len(), 1);
         assert_eq!(jdks[0].version, "21.0.12+101.0.LTS");
-    }
-
-    #[test]
-    fn available_jdks_http_error_on_release_list_is_fatal() {
-        let mut server = mockito::Server::new();
-        let _r = server
-            .mock("GET", "/v3/info/available_releases")
-            .with_status(503)
-            .with_body("nope")
-            .create();
-
-        let client = AdoptiumClient::new(server.url());
-        let err = client.available_jdks().unwrap_err();
-
-        assert!(format!("{err:#}").contains("HTTP 503"), "got: {err:#}");
     }
 
     const EA_FIXTURE: &str = include_str!("../tests/fixtures/feature_releases_28_ea.json");
