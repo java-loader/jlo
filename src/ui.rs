@@ -118,7 +118,11 @@ impl InstallUi {
         self.bar.finish_and_clear();
         eprintln!(
             "{}",
-            format_summary(&self.version, &tilde(dest), self.started.elapsed())
+            format_summary(
+                &self.version,
+                &tilde(dest, std::env::home_dir().as_deref()),
+                self.started.elapsed()
+            )
         );
     }
 
@@ -206,7 +210,10 @@ pub(crate) fn update_report(run: &InstallRun) {
         print_removed(count, "superseded JDK");
     }
     if let Some(java_home) = &run.repointed {
-        note(format!("  JAVA_HOME now points at {}", tilde(java_home)));
+        note(format!(
+            "  JAVA_HOME now points at {}",
+            tilde(java_home, std::env::home_dir().as_deref())
+        ));
     }
     if let Some(version) = &run.kept_active {
         hint!("{}", kept_active_hint(version));
@@ -1208,16 +1215,14 @@ fn format_elapsed(elapsed: Duration) -> String {
     }
 }
 
-/// Collapse the home directory so install paths stay readable. Unlike the
-/// Debug-quoted paths in error messages, this line is only ever printed on
-/// success, where there is no odd whitespace to expose.
-fn tilde(path: &Path) -> String {
-    let Some(home) = std::env::home_dir() else {
-        return path.display().to_string();
-    };
-    match path.strip_prefix(&home) {
-        Ok(rest) => format!("~/{}", rest.display()),
-        Err(_) => path.display().to_string(),
+/// Collapse the home directory so install paths stay readable. Only for
+/// prose: never used where a shell reads the line back, and only printed on
+/// success, so unlike the Debug-quoted paths in error messages there is no odd
+/// whitespace to expose.
+pub(crate) fn tilde(path: &Path, home: Option<&Path>) -> String {
+    match home.and_then(|h| path.strip_prefix(h).ok()) {
+        Some(rest) => format!("~/{}", rest.display()),
+        None => path.display().to_string(),
     }
 }
 
@@ -1412,17 +1417,22 @@ mod tests {
 
     #[test]
     fn tilde_collapses_the_home_directory() {
-        let Some(home) = std::env::home_dir() else {
-            return;
-        };
+        let home = Path::new("/Users/jane");
         let path = home.join("Library/Java/JavaVirtualMachines/21.0.8");
-        assert_eq!(tilde(&path), "~/Library/Java/JavaVirtualMachines/21.0.8");
+        assert_eq!(
+            tilde(&path, Some(home)),
+            "~/Library/Java/JavaVirtualMachines/21.0.8"
+        );
     }
 
     #[test]
     fn tilde_leaves_paths_outside_home_alone() {
         let path = Path::new("/opt/jdks/21.0.8");
-        assert_eq!(tilde(path), "/opt/jdks/21.0.8");
+        assert_eq!(
+            tilde(path, Some(Path::new("/Users/jane"))),
+            "/opt/jdks/21.0.8"
+        );
+        assert_eq!(tilde(path, None), "/opt/jdks/21.0.8");
     }
 
     #[test]

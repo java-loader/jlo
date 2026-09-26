@@ -21,6 +21,7 @@
 use crate::CommandError;
 use crate::store::same_path;
 use crate::ui;
+use crate::ui::tilde;
 use anyhow::{Context, Result, anyhow};
 use std::fs::{self, File};
 use std::io::Write as _;
@@ -817,14 +818,6 @@ fn profile_target(profile: &Path, home: Option<&Path>) -> String {
         }
     }
     sq(&display(profile))
-}
-
-/// `~/x` for human-readable prose. Never used where a shell will read it back.
-fn tilde(path: &Path, home: Option<&Path>) -> String {
-    match home.and_then(|h| path.strip_prefix(h).ok()) {
-        Some(rest) => format!("~/{}", display(rest)),
-        None => display(path),
-    }
 }
 
 /// POSIX single-quoting, as the one implementation of it.
