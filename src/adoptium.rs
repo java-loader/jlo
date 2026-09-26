@@ -39,11 +39,7 @@ pub(crate) fn agent() -> Agent {
 /// Stream a response body into `file`, reporting progress to `ui`, and return
 /// the SHA256 of what was written as lowercase hex. Comparing it is left to the
 /// caller, which knows what to name in the mismatch.
-pub(crate) fn stream_hashed(
-    body: &mut Body,
-    file: &mut File,
-    ui: &InstallUi,
-) -> anyhow::Result<String> {
+fn stream_hashed(body: &mut Body, file: &mut File, ui: &InstallUi) -> anyhow::Result<String> {
     let total_size = body
         .content_length()
         .context("could not determine the download size: no Content-Length header")?;

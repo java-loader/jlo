@@ -27,69 +27,13 @@ use std::time::{Duration, Instant};
 #[derive(Debug)]
 pub(crate) struct InstallUi {
     bar: ProgressBar,
-    /// What is being fetched. Only the non-tty lines and the summary name it;
-    /// the live bar carries the version in its prefix.
-    subject: Subject,
     version: String,
     started: Instant,
     tty: bool,
 }
 
-/// What an [`InstallUi`] is fetching: a JDK, or J'Lo itself - which wears the
-/// magenta mark wherever it is named.
-#[derive(Debug, Clone, Copy)]
-enum Subject {
-    Jdk,
-    Jlo,
-}
-
-impl Subject {
-    fn label(self) -> &'static str {
-        match self {
-            Subject::Jdk => "JDK",
-            Subject::Jlo => "J'Lo",
-        }
-    }
-
-    /// `<label> <version>` as the install lines say it: the magenta mark for
-    /// J'Lo, plain for a JDK. Name and version together - half a mark in
-    /// colour would read as an accident.
-    fn mark(self, version: &str) -> String {
-        match self {
-            Subject::Jdk => format!("JDK {version}"),
-            Subject::Jlo => jlo_mark(version),
-        }
-    }
-
-    /// The label inside a progress template. Styled, like the prefix beside
-    /// it, so the mark stays whole across the two template slots it occupies.
-    fn progress_label(self) -> String {
-        match self {
-            Subject::Jdk => self.label().to_string(),
-            Subject::Jlo => style(self.label()).magenta().for_stderr().to_string(),
-        }
-    }
-
-    fn progress_prefix(self, version: &str) -> String {
-        match self {
-            Subject::Jdk => version.to_string(),
-            Subject::Jlo => jlo_mark_bare(version),
-        }
-    }
-}
-
 impl InstallUi {
     pub(crate) fn new(version: &str) -> Self {
-        Self::live(Subject::Jdk, version)
-    }
-
-    /// The same live region for J'Lo's own binary, which `selfupdate`
-    /// downloads over the same `ureq` stack as a JDK.
-    pub(crate) fn jlo(version: &str) -> Self {
-        Self::live(Subject::Jlo, version)
-    }
-
-    fn live(subject: Subject, version: &str) -> Self {
         let tty = supports_live_region();
         let bar = if tty {
             // Styled via the builder, which does not draw: a bar configured
@@ -97,8 +41,8 @@ impl InstallUi {
             // redraw. "connecting" is literally true here - the caller has the
             // metadata but has not yet opened the download response.
             ProgressBar::new(0)
-                .with_style(spinner_style(&subject.progress_label()))
-                .with_prefix(subject.progress_prefix(version))
+                .with_style(spinner_style())
+                .with_prefix(version.to_string())
                 .with_message("connecting")
         } else {
             // Without a terminal there is nothing to redraw over; the plain
@@ -108,18 +52,17 @@ impl InstallUi {
         if tty {
             bar.enable_steady_tick(TICK);
         }
-        Self::with_bar(subject, version, bar, tty)
+        Self::with_bar(version, bar, tty)
     }
 
     #[cfg(test)]
     pub(crate) fn hidden(version: &str) -> Self {
-        Self::with_bar(Subject::Jdk, version, ProgressBar::hidden(), false)
+        Self::with_bar(version, ProgressBar::hidden(), false)
     }
 
-    fn with_bar(subject: Subject, version: &str, bar: ProgressBar, tty: bool) -> Self {
+    fn with_bar(version: &str, bar: ProgressBar, tty: bool) -> Self {
         Self {
             bar,
-            subject,
             version: version.to_string(),
             started: Instant::now(),
             tty,
@@ -132,12 +75,10 @@ impl InstallUi {
             // bar, so switching to the bar style before the length is known
             // would flash a completed download on the first frame.
             self.bar.set_length(total_size);
-            self.bar
-                .set_style(download_style(&self.subject.progress_label()));
+            self.bar.set_style(download_style());
         } else {
             eprintln!(
-                "Downloading {} {} ({})",
-                self.subject.label(),
+                "Downloading JDK {} ({})",
                 self.version,
                 indicatif::HumanBytes(total_size)
             );
@@ -161,8 +102,7 @@ impl InstallUi {
 
     fn phase(&self, name: &str) {
         if self.tty {
-            self.bar
-                .set_style(spinner_style(&self.subject.progress_label()));
+            self.bar.set_style(spinner_style());
             self.bar.set_message(name.to_string());
         }
     }
@@ -178,12 +118,7 @@ impl InstallUi {
         self.bar.finish_and_clear();
         eprintln!(
             "{}",
-            format_summary(
-                self.subject,
-                &self.version,
-                &tilde(dest),
-                self.started.elapsed()
-            )
+            format_summary(&self.version, &tilde(dest), self.started.elapsed())
         );
     }
 
@@ -1228,23 +1163,16 @@ const TICK: Duration = Duration::from_millis(100);
 /// reader that it never meant much - a cyan spinner beside the cyan "this one
 /// is active" gutter costs that gutter its meaning. Dim is what is left: the
 /// bar is secondary to the line it leaves behind.
-///
-/// `label` is interpolated rather than hard-coded. Both templates said `JDK`
-/// whatever they were downloading, including the one `selfupdate` builds by
-/// calling `InstallUi::jlo(..)` - the label existed and the live
-/// region ignored it.
-fn download_style(label: &str) -> ProgressStyle {
+fn download_style() -> ProgressStyle {
     ProgressStyle::default_bar()
-        .template(&format!(
-            "{{spinner:.dim}} {label} {{prefix}}  [{{bar:20.dim}}]  {{bytes}}/{{total_bytes}}  {{eta}}"
-        ))
+        .template("{spinner:.dim} JDK {prefix}  [{bar:20.dim}]  {bytes}/{total_bytes}  {eta}")
         .expect("progress bar template is a valid literal")
         .progress_chars("#>-")
 }
 
-fn spinner_style(label: &str) -> ProgressStyle {
+fn spinner_style() -> ProgressStyle {
     ProgressStyle::default_spinner()
-        .template(&format!("{{spinner:.dim}} {label} {{prefix}}  {{msg}}"))
+        .template("{spinner:.dim} JDK {prefix}  {msg}")
         .expect("spinner template is a valid literal")
 }
 
@@ -1255,11 +1183,10 @@ fn spinner_style(label: &str) -> ProgressStyle {
 /// emit colour by looking at *stdout*, and the `jlo` shell function runs
 /// `. <(jlo-bin env)` - so stdout is a pipe on the one path that matters and
 /// the default targeting silently strips every colour from this line.
-fn format_summary(subject: Subject, version: &str, dest: &str, elapsed: Duration) -> String {
+fn format_summary(version: &str, dest: &str, elapsed: Duration) -> String {
     format!(
-        "{} {} {} {}  {}",
+        "{} JDK {version} {} {}  {}",
         style("✓").green().for_stderr(),
-        subject.mark(version),
         punctuation_arrow(),
         dest,
         dim(format!("({})", format_elapsed(elapsed)))
@@ -1497,12 +1424,7 @@ mod tests {
     fn summary_names_the_exact_version_and_destination() {
         // The major version is what the user typed; the exact version is the
         // one fact the summary exists to record.
-        let line = format_summary(
-            Subject::Jdk,
-            "21.0.8+9",
-            "~/.jdks/21.0.8",
-            Duration::from_secs(18),
-        );
+        let line = format_summary("21.0.8+9", "~/.jdks/21.0.8", Duration::from_secs(18));
         assert!(line.contains("JDK 21.0.8+9"), "got: {line}");
         assert!(line.contains("~/.jdks/21.0.8"), "got: {line}");
         assert!(line.contains("(18s)"), "got: {line}");

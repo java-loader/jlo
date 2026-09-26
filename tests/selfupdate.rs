@@ -1,41 +1,37 @@
 //! End-to-end tests for `jlo selfupdate` against a `mockito` release host.
 //!
-//! There is no spare release to point a real test at, so `JLO_RELEASE_API_URL`
-//! (the seam ADR-0002 established for Adoptium) stands in for
-//! `github.com/.../releases`. That makes the whole path testable offline: the
-//! `/releases/latest` redirect, the checksum, the download, and the `exec` of
-//! the staged binary that then publishes itself.
+//! `JLO_RELEASE_API_URL` stands in for `github.com/.../releases`: the
+//! `/latest` redirect, the tag's `install.sh`, and the tarball and checksum
+//! that script fetches. The script served is the repo's own `install.sh`, run
+//! by the real `sh` and `curl`, so the path under test is the one a user takes.
 //!
-//! Each test builds a real `$JLO_HOME`: the binary under test is *copied* to
-//! `$JLO_HOME/bin/jlo-bin` and run from there, because `selfupdate` refuses an
-//! install whose receipt names a different executable - running it straight
-//! out of `target/` would only ever exercise that refusal.
-//!
-//! The tarball those tests serve carries a shell script called `jlo-bin`
-//! rather than a second Rust binary. A released jlo has to answer two
-//! questions - `--version`, and the hidden install verb - and a script answers
-//! both, which lets a test serve a version that is genuinely *newer* than the
-//! one under test. Serving the real binary would only ever reproduce the
-//! already-current case.
+//! Each test builds a real `$JLO_HOME` with a copy of the binary under test at
+//! `bin/jlo-bin` and runs it from there: `selfupdate` refuses any other
+//! executable.
 
 // Test code: an `unwrap` failure here is a test failure, which is the point.
 #![allow(clippy::unwrap_used)]
 
 mod common;
 
-use common::{INTERPRETERS, hermetic, jlo_bin, shells};
+use common::{INTERPRETERS, hermetic, jlo_bin, shells, squote};
 use sha2::{Digest, Sha256};
-use std::fs::{self, File};
-use std::os::unix::fs::PermissionsExt as _;
+use std::fs;
+use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::process::{Command, Output};
 
-/// A version no real release will ever carry, so the "is it newer?" check has
-/// an unambiguous answer whatever the crate version happens to be.
-const NEWER: &str = "99.9.9";
+/// A tag no real release will ever carry, so "is it newer?" has an
+/// unambiguous answer whatever the crate version is.
 const TAG: &str = "jlo-bin-v99.9.9";
+const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// What the release workflow names the asset for this platform.
+fn current_tag() -> String {
+    format!("jlo-bin-v{VERSION}")
+}
+
+/// What the release workflow names the asset for this platform - and what
+/// `install.sh` derives from `uname`.
 fn package() -> &'static str {
     match (std::env::consts::OS, std::env::consts::ARCH) {
         ("linux", "x86_64") => "jlo-linux-x86_64.tar.gz",
@@ -45,22 +41,26 @@ fn package() -> &'static str {
     }
 }
 
-/// A `$JLO_HOME` holding a real copy of the binary under test plus the receipt
-/// that install would have written for it.
+/// The repo's `install.sh`, as a release serves it.
+fn installer() -> String {
+    fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("install.sh")).unwrap()
+}
+
+/// A `$JLO_HOME` - also the test's `$HOME` - holding a copy of the binary under
+/// test at `bin/jlo-bin`.
 struct Install {
     home: tempfile::TempDir,
 }
 
 impl Install {
-    fn new(method: &str) -> Self {
+    fn new() -> Self {
         let home = tempfile::tempdir().unwrap();
         let bin = home.path().join("bin");
         fs::create_dir_all(&bin).unwrap();
         let target = bin.join("jlo-bin");
         // Copied by a child `cp`, not `fs::copy`: a write fd on `target` held
         // by this process leaks into any child another test thread forks at
-        // that moment, and exec'ing `target` then fails with ETXTBSY until
-        // that child has exec'd in turn.
+        // that moment, and exec'ing `target` then fails with ETXTBSY.
         let copied = hermetic("cp", home.path())
             .arg(jlo_bin())
             .arg(&target)
@@ -68,10 +68,7 @@ impl Install {
             .unwrap();
         assert!(copied.success(), "cp of the binary under test failed");
         fs::set_permissions(&target, fs::Permissions::from_mode(0o755)).unwrap();
-
-        let install = Self { home };
-        install.write_receipt(method, &Self::version(), &target);
-        install
+        Self { home }
     }
 
     fn path(&self) -> &Path {
@@ -79,233 +76,135 @@ impl Install {
     }
 
     fn binary(&self) -> PathBuf {
-        self.home.path().join("bin").join("jlo-bin")
+        self.path().join("bin").join("jlo-bin")
     }
 
-    fn receipt_path(&self) -> PathBuf {
-        self.home.path().join("install-receipt.json")
+    /// The installed binary, with the release host at `release_url`.
+    fn command(&self, release_url: &str) -> Command {
+        let mut cmd = hermetic(self.binary(), self.path());
+        cmd.env("JLO_HOME", self.path())
+            .env("JLO_RELEASE_API_URL", release_url);
+        cmd
     }
 
-    /// The version of the binary under test, read from the binary itself so
-    /// the fixtures never drift from `Cargo.toml`.
-    fn version() -> String {
-        let home = tempfile::tempdir().unwrap();
-        let out = hermetic(jlo_bin(), home.path())
-            .arg("--version")
-            .output()
-            .unwrap();
-        String::from_utf8_lossy(&out.stdout)
-            .split_whitespace()
-            .next_back()
-            .unwrap()
-            .to_string()
+    fn run(&self, args: &[&str], release_url: &str) -> Output {
+        self.command(release_url).args(args).output().unwrap()
     }
 
-    fn write_receipt(&self, method: &str, version: &str, binary: &Path) {
-        fs::write(
-            self.receipt_path(),
-            format!(
-                "{{\n  \"version\": {:?},\n  \"method\": {:?},\n  \
-                 \"jlo_home\": {:?},\n  \"binary\": {:?}\n}}\n",
-                version,
-                method,
-                self.home.path().to_string_lossy(),
-                binary.to_string_lossy()
-            ),
-        )
-        .unwrap();
+    fn selfupdate(&self, release_url: &str) -> Output {
+        self.run(&["selfupdate"], release_url)
     }
 
-    /// Runs `jlo selfupdate` as the installed binary, with the release host
-    /// pointed at `base_url`.
-    fn selfupdate(&self, base_url: &str) -> std::process::Output {
-        self.run(&["selfupdate"], base_url)
+    fn wrapped_selfupdate(&self, release_url: &str) -> Output {
+        self.run(&["__wrapped", "selfupdate"], release_url)
     }
 
-    /// The same, as the `jlo` shell function calls it.
-    fn wrapped_selfupdate(&self, base_url: &str) -> std::process::Output {
-        self.run(&["__wrapped", "selfupdate"], base_url)
-    }
-
-    fn run(&self, args: &[&str], base_url: &str) -> std::process::Output {
-        hermetic(self.binary(), self.home.path())
-            .args(args)
-            .env("JLO_HOME", self.home.path())
-            .env("JLO_RELEASE_API_URL", base_url)
-            .output()
-            .unwrap()
+    /// Writes the layout the way an earlier install left it.
+    fn write_layout(&self) {
+        let out = self.run(&["__install"], "http://127.0.0.1:1");
+        assert!(out.status.success(), "{out:?}");
     }
 }
 
-/// A `jlo-bin` that stands in for a released one.
-///
-/// It answers `--version` with a version the test chose - which is the whole
-/// point, because a release carrying the *real* binary could only ever
-/// reproduce the already-current case - and then hands the install verb to
-/// the real binary under test. So the layout the update publishes is generated
-/// by the genuine generator, not faked, and the reload line on stdout is the
-/// genuine one.
-///
-/// The hand-over renames a copy of the real binary over this script and
-/// `exec`s it from the staged path, because `--publish-self` publishes
-/// whatever executable is running: an `exec` of the binary in `target/` would
-/// move *that* into the test's `$JLO_HOME`. It reports the inode it runs as,
-/// so a test can tell the staged file was renamed into place rather than
-/// copied or replaced by something else.
-///
-/// Before delegating it probes the lock, which is the only way to observe
-/// invariant 5 from outside: `selfupdate` holds an exclusive `flock` and the
-/// fd has to survive the `exec` that produced this process. std opens every
-/// file `O_CLOEXEC`, so without the explicit `fcntl` the lock would be gone
-/// here - silently, and exactly while this process publishes.
-fn fake_release_binary(version: &str) -> String {
-    let real = jlo_bin();
-    format!(
-        "#!/bin/sh\n\
-         case \"$1\" in\n\
-         \x20 --version) echo 'jlo-bin {version}' ;;\n\
-         \x20 __install|__wrapped)\n\
-         \x20   python3 -c 'import fcntl, os, sys\n\
-         f = open(os.environ[\"JLO_HOME\"] + \"/.selfupdate.lock\", \"w\")\n\
-         try:\n\
-        \x20    fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)\n\
-        \x20    print(\"lock=free\", file=sys.stderr)\n\
-         except BlockingIOError:\n\
-        \x20    print(\"lock=held\", file=sys.stderr)\n\
-         '\n\
-         \x20   echo \"delegating {version}\" >&2\n\
-         \x20   cp {real:?} \"$0.new\" && mv \"$0.new\" \"$0\" || exit 70\n\
-         \x20   echo \"staged-inode=$(ls -i \"$0\" | awk '{{print $1}}')\" >&2\n\
-         \x20   exec \"$0\" \"$@\"\n\
-         \x20   ;;\n\
-         \x20 *) echo \"unexpected argv: $*\" >&2; exit 64 ;;\n\
-         esac\n",
-        real = real.display().to_string(),
-    )
-}
-
-/// The release tarball, built exactly the way the workflow builds it: one
-/// entry named `jlo-bin` at the root, gzipped.
-fn tarball(body: &str) -> Vec<u8> {
+/// The release tarball as the workflow builds it: one entry, `jlo-bin`.
+fn tarball(binary: &[u8]) -> Vec<u8> {
     let mut header = tar::Header::new_gnu();
     header.set_path("jlo-bin").unwrap();
-    header.set_size(body.len() as u64);
+    header.set_size(binary.len() as u64);
     header.set_mode(0o755);
     header.set_cksum();
-
     let mut tar = tar::Builder::new(Vec::new());
-    tar.append(&header, body.as_bytes()).unwrap();
+    tar.append(&header, binary).unwrap();
     let raw = tar.into_inner().unwrap();
-
-    let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
     std::io::Write::write_all(&mut gz, &raw).unwrap();
     gz.finish().unwrap()
 }
 
-/// A release host serving `tag` with the given tarball bytes and checksum.
+/// A release host whose `/latest` redirects to one tag. Every mock states how
+/// often it is hit, and [`Release::assert`] checks all of them.
 struct Release {
     server: mockito::ServerGuard,
-    _mocks: Vec<mockito::Mock>,
+    mocks: Vec<mockito::Mock>,
 }
 
 impl Release {
-    fn serving(tag: &str, archive: &[u8], checksum: &str) -> Self {
+    fn at(tag: &str, lookups: usize) -> Self {
         let mut server = mockito::Server::new();
-        let url = server.url();
-        let mocks = vec![
-            server
-                .mock("GET", "/latest")
-                .with_status(302)
-                .with_header("location", &format!("{url}/tag/{tag}"))
-                .create(),
-            server
-                .mock(
-                    "GET",
-                    format!("/download/{tag}/{}.sha256", package()).as_str(),
-                )
-                .with_body(format!("{checksum}  {}\n", package()))
-                .create(),
-            server
-                .mock("GET", format!("/download/{tag}/{}", package()).as_str())
-                .with_body(archive)
-                .create(),
-        ];
+        let location = format!("{}/tag/{tag}", server.url());
+        let latest = server
+            .mock("GET", "/latest")
+            .with_status(302)
+            .with_header("location", &location)
+            .expect(lookups)
+            .create();
         Self {
             server,
-            _mocks: mocks,
+            mocks: vec![latest],
         }
     }
 
-    fn good(tag: &str, version: &str) -> Self {
-        let archive = tarball(&fake_release_binary(version));
-        let checksum = hex::encode(Sha256::digest(&archive));
-        Self::serving(tag, &archive, &checksum)
+    /// `script` as `tag`'s `install.sh`.
+    fn script(mut self, tag: &str, script: &str, hits: usize) -> Self {
+        let mock = self
+            .server
+            .mock("GET", format!("/download/{tag}/install.sh").as_str())
+            .with_body(script)
+            .expect(hits)
+            .create();
+        self.mocks.push(mock);
+        self
+    }
+
+    /// `tag`'s `install.sh` answering 404.
+    fn no_script(mut self, tag: &str) -> Self {
+        let mock = self
+            .server
+            .mock("GET", format!("/download/{tag}/install.sh").as_str())
+            .with_status(404)
+            .expect(1)
+            .create();
+        self.mocks.push(mock);
+        self
+    }
+
+    /// The binary under test as `tag`'s tarball, with its checksum.
+    fn package(mut self, tag: &str, hits: usize) -> Self {
+        let archive = tarball(&fs::read(jlo_bin()).unwrap());
+        let sum = hex::encode(Sha256::digest(&archive));
+        let base = format!("/download/{tag}/{}", package());
+        let tarball = self
+            .server
+            .mock("GET", base.as_str())
+            .with_body(archive)
+            .expect(hits)
+            .create();
+        let checksum = self
+            .server
+            .mock("GET", format!("{base}.sha256").as_str())
+            .with_body(format!("{sum}  {}\n", package()))
+            .expect(hits)
+            .create();
+        self.mocks.extend([tarball, checksum]);
+        self
+    }
+
+    /// The real installer and package for `tag`, each fetched `hits` times.
+    fn serving(tag: &str, lookups: usize, hits: usize) -> Self {
+        Self::at(tag, lookups)
+            .script(tag, &installer(), hits)
+            .package(tag, hits)
     }
 
     fn url(&self) -> String {
         self.server.url()
     }
-}
 
-// ---------------------------------------------------------------------------
-
-/// The whole path: resolve the tag from the redirect, verify the checksum,
-/// and `exec` the *staged* binary so it publishes itself and generates its own
-/// files. The reload line on stdout is what the wrapper evals.
-#[test]
-fn a_newer_release_is_verified_published_and_reloaded() {
-    let install = Install::new("installer");
-    let release = Release::good(TAG, NEWER);
-
-    let out = install.selfupdate(&release.url());
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(out.status.success(), "{stdout:?} {stderr:?}");
-
-    // The exec'd binary is the one that wrote the files, which is the whole
-    // reason for the exec: the running process carries the *old* templates.
-    assert!(
-        stderr.contains(&format!("delegating {NEWER}")),
-        "the new binary never ran the install verb: {stderr:?}"
-    );
-    // Invariant 5: the lock is on the open file description and the fd has to
-    // survive the exec. `O_CLOEXEC` - which std sets on every file - would
-    // drop it silently, right here, just before this process publishes.
-    assert!(
-        stderr.contains("lock=held"),
-        "the update lock did not survive the exec: {stderr:?}"
-    );
-
-    // stdout is the environment channel (ADR-0001) and carries *only* the
-    // reload block: three lines, nothing else. A substring check would let
-    // any amount of pollution through.
-    let home = install.path().to_string_lossy();
-    let lines: Vec<&str> = stdout.lines().collect();
-    assert_eq!(
-        lines.len(),
-        3,
-        "stdout is not just the reload block: {stdout:?}"
-    );
-    assert_eq!(lines[0], format!(". '{home}/jlo.sh'"));
-    assert!(
-        lines[1].contains("_JLO_AUTOLOAD") && lines[1].ends_with("autoload.sh'; fi"),
-        "{stdout:?}"
-    );
-    assert!(
-        lines[2].contains("_JLO_COMPLETIONS") && lines[2].ends_with("completions.sh'; fi"),
-        "{stdout:?}"
-    );
-
-    assert_published_from_staging(&stderr, &install);
-    // The generator really ran, rather than a fixture printing a line that
-    // looks like it did.
-    assert!(
-        install.path().join("jlo.sh").is_file(),
-        "the exec'd binary did not generate the layout"
-    );
-    // Staged beside the target and removed again; nothing left in bin/.
-    let leftovers = staging_leftovers(&install);
-    assert!(leftovers.is_empty(), "staging left behind: {leftovers:?}");
+    fn assert(&self) {
+        for mock in &self.mocks {
+            mock.assert();
+        }
+    }
 }
 
 /// The staging directories under `bin/`, by the name the install verb sweeps.
@@ -320,124 +219,68 @@ fn staging_leftovers(install: &Install) -> Vec<PathBuf> {
         .collect()
 }
 
-/// The published binary is the very file that was staged and ran the install
-/// verb, moved into place by `rename` - not a copy, and not written by the
-/// process that downloaded it.
-fn assert_published_from_staging(stderr: &str, install: &Install) {
-    use std::os::unix::fs::MetadataExt as _;
-    let staged = stderr
-        .lines()
-        .find_map(|line| line.strip_prefix("staged-inode="))
-        .unwrap_or_else(|| panic!("the staged binary never ran: {stderr:?}"));
-    let published = fs::metadata(install.binary()).unwrap().ino();
-    assert_eq!(
-        staged,
-        published.to_string(),
-        "the binary was not published from staging"
-    );
-}
-
-/// The gain of handing publication to the staged binary: a new binary that
-/// cannot run the install verb publishes nothing, and the one the user is
-/// running stays in place.
-#[test]
-fn a_new_binary_that_fails_to_install_leaves_the_binary_alone() {
-    let install = Install::new("installer");
-    let before = fs::read(install.binary()).unwrap();
-    let archive = tarball(&format!(
-        "#!/bin/sh\n\
-         case \"$1\" in\n\
-         \x20 --version) echo 'jlo-bin {NEWER}' ;;\n\
-         \x20 *) exit 1 ;;\n\
-         esac\n"
-    ));
-    let release = Release::serving(TAG, &archive, &hex::encode(Sha256::digest(&archive)));
-
-    let out = install.selfupdate(&release.url());
+/// stdout must be the reload block and nothing else: a substring check would
+/// let any amount of pollution into what the wrapper evaluates.
+fn assert_reload_lines(stdout: &str, home: &Path, wrapped: bool) {
+    let home = home.to_string_lossy();
+    let joiner = if wrapped { " &&" } else { "" };
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), if wrapped { 4 } else { 3 }, "{stdout:?}");
+    assert_eq!(lines[0], format!(". '{home}/jlo.sh'{joiner}"));
     assert!(
-        !out.status.success(),
-        "a failed install verb was reported as success"
+        lines[1].contains("_JLO_AUTOLOAD")
+            && lines[1].ends_with(&format!("autoload.sh'; fi{joiner}")),
+        "{stdout:?}"
     );
-    assert_eq!(fs::read(install.binary()).unwrap(), before);
-
-    // The staged copy outlived its own run, and only a later one can take it
-    // away - but never while it may still belong to an install in progress.
-    let abandoned = staging_leftovers(&install);
-    assert_eq!(abandoned.len(), 1, "{abandoned:?}");
-    let abandoned = &abandoned[0];
-    let two_hours_ago = SystemTime::now() - Duration::from_hours(2);
-    File::open(abandoned)
-        .unwrap()
-        .set_modified(two_hours_ago)
-        .unwrap();
-    let in_progress = install.path().join("bin").join(".jlo-install-in-progress");
-    fs::create_dir(&in_progress).unwrap();
-
-    install.selfupdate(&release.url());
     assert!(
-        !abandoned.exists(),
-        "an abandoned staging directory survived"
+        lines[2].contains("_JLO_COMPLETIONS") && lines[2].ends_with("completions.sh'; fi"),
+        "{stdout:?}"
     );
-    assert!(in_progress.exists(), "a fresh staging directory was swept");
-}
-
-/// Invariant 3, asserted rather than assumed: the staging directory is a
-/// *sibling* of the target file, because `rename` is atomic only within one
-/// filesystem and `bin/` can itself be a mount point or a symlink.
-///
-/// Observed by making `bin/` unwritable: staging under it must fail and name
-/// the path it tried. A version that staged in `std::env::temp_dir()` would
-/// get past this point and fail later, somewhere else.
-#[test]
-fn staging_happens_beside_the_target_not_in_the_temp_dir() {
-    let install = Install::new("installer");
-    let release = Release::good(TAG, NEWER);
-    let bin = install.path().join("bin");
-
-    fs::set_permissions(&bin, fs::Permissions::from_mode(0o555)).unwrap();
-    let out = install.selfupdate(&release.url());
-    // Restore before any assertion, so a failure still leaves a removable
-    // temp directory behind.
-    fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
-
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(!out.status.success(), "an unwritable bin/ was not noticed");
-    assert!(
-        stderr.contains("could not create") && stderr.contains("/bin/.jlo-install-"),
-        "the update did not stage beside the target: {stderr:?}"
-    );
-}
-
-/// Nothing to reload when there is nothing to do: for the wrapper, the
-/// marker alone, so "nothing to do" is not mistaken for "cut short"; for
-/// anyone else, nothing at all.
-#[test]
-fn an_up_to_date_install_prints_no_reload() {
-    let install = Install::new("installer");
-    let version = Install::version();
-    let release = Release::good(&format!("jlo-bin-v{version}"), &version);
-
-    for (out, expected) in [
-        (install.selfupdate(&release.url()), ""),
-        (install.wrapped_selfupdate(&release.url()), "# jlo'end\n"),
-    ] {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(out.status.success(), "{stderr:?}");
-        assert_eq!(String::from_utf8_lossy(&out.stdout), expected);
-        assert!(
-            stderr.contains("already the latest version"),
-            "no status line: {stderr:?}"
-        );
+    if wrapped {
+        assert_eq!(lines[3], "# jlo'end", "{stdout:?}");
     }
 }
 
-/// Wrapped mode crosses the `exec`: the new binary writes the reload block,
-/// so only it can end it with the marker - `&&`-joined, so a reload that
-/// cannot source `jlo.sh` fails the call.
+// ---------------------------------------------------------------------------
+// A newer release
+// ---------------------------------------------------------------------------
+
+/// The whole path: the tag from the redirect, that tag's `install.sh`, and the
+/// tarball and checksum from that same tag - `/latest/download` is not served,
+/// so a script that resolved `latest` on its own would fail. The script's
+/// stdout goes to stderr; stdout carries the reload block alone.
 #[test]
-fn a_wrapped_update_forwards_the_mode_to_the_new_binary() {
-    let install = Install::new("installer");
-    let release = Release::good(TAG, NEWER);
+fn a_newer_release_runs_its_own_installer_pinned_to_the_tag() {
+    let install = Install::new();
+    let before = fs::metadata(install.binary()).unwrap().ino();
+    let script = format!("echo noise-on-stdout\n{}", installer());
+    let release = Release::at(TAG, 1).script(TAG, &script, 1).package(TAG, 1);
+
+    let out = install.selfupdate(&release.url());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stdout:?} {stderr:?}");
+
+    assert_reload_lines(&stdout, install.path(), false);
+    assert!(stderr.contains("noise-on-stdout"), "{stderr:?}");
+    assert!(
+        stderr.contains("installed to"),
+        "the installer's report is missing: {stderr:?}"
+    );
+    assert_ne!(
+        fs::metadata(install.binary()).unwrap().ino(),
+        before,
+        "the installer did not publish a new binary"
+    );
+    assert!(staging_leftovers(&install).is_empty());
+    release.assert();
+}
+
+/// Wrapped, the reload block ends in the marker the wrapper looks for.
+#[test]
+fn a_wrapped_update_ends_its_reload_with_the_marker() {
+    let install = Install::new();
+    let release = Release::serving(TAG, 1, 1);
 
     let out = install.wrapped_selfupdate(&release.url());
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -446,259 +289,440 @@ fn a_wrapped_update_forwards_the_mode_to_the_new_binary() {
         "{:?}",
         String::from_utf8_lossy(&out.stderr)
     );
-
-    let home = install.path().to_string_lossy();
-    let lines: Vec<&str> = stdout.lines().collect();
-    assert_eq!(lines.len(), 4, "{stdout:?}");
-    assert_eq!(lines[0], format!(". '{home}/jlo.sh' &&"));
-    assert!(lines[1].ends_with("autoload.sh'; fi &&"), "{stdout:?}");
-    assert!(lines[2].ends_with("completions.sh'; fi"), "{stdout:?}");
-    assert_eq!(lines[3], "# jlo'end");
+    assert_reload_lines(&stdout, install.path(), true);
+    release.assert();
 }
 
-/// End to end through the shell function: the wrapped update's reload,
-/// written by the binary on the far side of the `exec`, is evaluated.
-/// `jlo.sh` defines `jlo`, so the update runs from a renamed copy while a
-/// stand-in holds the name: the stand-in survives unless the reload sourced
-/// `jlo.sh` again. (`JLO_HOME` cannot carry the sentinel: the new binary bakes
-/// whatever value it is handed into the regenerated `jlo.sh`.)
+/// A failing installer is the command's failure, and nothing is reloaded -
+/// for the wrapper there is no payload at all, so nothing is evaluated.
 #[test]
-fn a_wrapped_update_reloads_the_calling_shell() {
-    for sh in shells("a_wrapped_update_reloads_the_calling_shell", INTERPRETERS) {
-        let install = Install::new("installer");
-        let release = Release::good(TAG, NEWER);
-        let layout = hermetic(install.binary(), install.path())
-            .arg("__install")
-            .env("JLO_HOME", install.path())
-            .output()
-            .unwrap();
-        assert!(layout.status.success(), "{layout:?}");
+fn a_failing_installer_fails_the_update_and_reloads_nothing() {
+    let install = Install::new();
+    let before = fs::read(install.binary()).unwrap();
+    let release = Release::at(TAG, 2).script(TAG, "echo half-way >&2\nexit 3\n", 2);
 
-        let out = hermetic(sh, install.path())
-            .arg("-c")
-            .arg(
-                r#". "$JLO_HOME/jlo.sh"
-                eval "_jlo_old$(typeset -f jlo | sed '1s/^jlo//')"
-                jlo() { echo stale; }
-                _jlo_old selfupdate
-                echo "status=$?"
-                if typeset -f jlo | grep -q stale; then echo reloaded=no; else echo reloaded=yes; fi"#,
-            )
-            .env("JLO_HOME", install.path())
-            .env("JLO_RELEASE_API_URL", release.url())
-            .output()
-            .unwrap();
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        let ctx = format!(
-            "{sh}: {stdout:?} {:?}",
-            String::from_utf8_lossy(&out.stderr)
+    for out in [
+        install.selfupdate(&release.url()),
+        install.wrapped_selfupdate(&release.url()),
+    ] {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(1), "{stderr:?}");
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "", "{stderr:?}");
+        assert!(stderr.contains("half-way"), "{stderr:?}");
+        assert!(
+            stderr.contains("install.sh"),
+            "no way out named: {stderr:?}"
         );
-        assert!(stdout.contains("status=0"), "{ctx}");
-        assert!(stdout.contains("reloaded=yes"), "{ctx}");
     }
+    assert!(fs::read(install.binary()).unwrap() == before);
+    release.assert();
 }
 
-/// A corrupt or tampered download must never be unpacked, and the binary the
-/// user is running must survive it untouched.
+/// An HTTP error on the script is an error, never an empty script run.
 #[test]
-fn a_checksum_mismatch_leaves_the_binary_alone() {
-    let install = Install::new("installer");
-    let before = fs::read(install.binary()).unwrap();
-    let archive = tarball(&fake_release_binary(NEWER));
-    let release = Release::serving(TAG, &archive, &"0".repeat(64));
+fn an_http_error_on_the_installer_runs_nothing() {
+    let install = Install::new();
+    let release = Release::at(TAG, 1).no_script(TAG).package(TAG, 0);
 
     let out = install.selfupdate(&release.url());
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(!out.status.success(), "a bad checksum was accepted");
-    assert!(
-        stderr.contains("checksum mismatch"),
-        "the error does not name the checksum: {stderr:?}"
-    );
-    assert_eq!(fs::read(install.binary()).unwrap(), before);
+    assert_eq!(out.status.code(), Some(1), "{stderr:?}");
+    assert!(stderr.contains("HTTP 404"), "{stderr:?}");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "");
+    release.assert();
 }
 
-/// The release the tag promises and the binary inside it must be the same
-/// version; a release whose assets disagree with its tag is refused.
-#[test]
-fn a_release_whose_binary_disagrees_with_its_tag_is_refused() {
-    let install = Install::new("installer");
-    let before = fs::read(install.binary()).unwrap();
-    let release = Release::good(TAG, "98.0.0");
-
-    let out = install.selfupdate(&release.url());
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(!out.status.success(), "a mismatched release was accepted");
-    assert!(
-        stderr.contains("contains J'Lo 98.0.0"),
-        "the error does not name what it found: {stderr:?}"
-    );
-    assert_eq!(fs::read(install.binary()).unwrap(), before);
-}
-
-/// The tag format is a contract with release-please. A tag it does not
-/// recognise is an error, not a guess about which version is on the other end.
+/// The tag format is a contract with release-please; an unknown one is an
+/// error, not a guess about what is on the other end.
 #[test]
 fn an_unrecognised_tag_stops_the_update() {
-    let install = Install::new("installer");
-    let release = Release::good("v99.9.9", NEWER);
+    let install = Install::new();
+    let release = Release::serving("v99.9.9", 1, 0);
 
     let out = install.selfupdate(&release.url());
-    let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(!out.status.success());
-    assert!(stderr.contains("unrecognised release tag"), "{stderr:?}");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("unrecognised release tag"));
+    release.assert();
 }
 
-/// A local build is exactly the case where somebody does not want a release
-/// written over their work, so `selfupdate` stops and says why.
-#[test]
-fn a_local_build_is_not_silently_replaced_by_a_release() {
-    let install = Install::new("local");
-    let release = Release::good(TAG, NEWER);
+// ---------------------------------------------------------------------------
+// Already current: the repair
+// ---------------------------------------------------------------------------
 
-    let out = install.selfupdate(&release.url());
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(!out.status.success(), "a local build was overwritten");
-    assert!(
-        stderr.contains("local build"),
-        "the refusal does not say why: {stderr:?}"
-    );
-    assert!(
-        stderr.contains("install-local.sh"),
-        "the refusal does not name the way out: {stderr:?}"
-    );
+/// Nothing downloaded; the shell files come back and the reload is printed,
+/// because the stale piece may be the wrapper resident in the calling shell.
+#[test]
+fn a_current_install_rewrites_its_shell_files_and_reloads() {
+    let install = Install::new();
+    install.write_layout();
+    let release = Release::serving(&current_tag(), 2, 0);
+
+    for wrapped in [false, true] {
+        fs::remove_file(install.path().join("bin").join("jlo-init.sh")).unwrap();
+        let out = if wrapped {
+            install.wrapped_selfupdate(&release.url())
+        } else {
+            install.selfupdate(&release.url())
+        };
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "{stderr:?}");
+        assert!(stderr.contains("already the latest version"), "{stderr:?}");
+        assert_reload_lines(
+            &String::from_utf8_lossy(&out.stdout),
+            install.path(),
+            wrapped,
+        );
+        assert!(install.path().join("bin").join("jlo-init.sh").is_file());
+    }
+    release.assert();
 }
 
-/// The receipt's whole point: a future Homebrew formula owns its install, and
-/// jlo must not fight it.
+/// A published release older than this binary - a local build installed into
+/// `$JLO_HOME/bin` - is not an update: no download, no downgrade.
 #[test]
-fn a_package_manager_install_is_refused() {
-    let install = Install::new("package-manager");
-    let release = Release::good(TAG, NEWER);
-
-    let out = install.selfupdate(&release.url());
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(!out.status.success());
-    assert!(stderr.contains("package manager"), "{stderr:?}");
-}
-
-/// Guessing is how a package-manager install gets clobbered, so a receipt that
-/// cannot be parsed stops the update and names the file.
-#[test]
-fn a_malformed_receipt_stops_the_update() {
-    let install = Install::new("installer");
-    fs::write(install.receipt_path(), "{ not json").unwrap();
-    let release = Release::good(TAG, NEWER);
-
-    let out = install.selfupdate(&release.url());
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(!out.status.success());
-    assert!(
-        stderr.contains("install-receipt.json") && stderr.contains("not a valid install receipt"),
-        "{stderr:?}"
-    );
-}
-
-/// A receipt naming a path this executable does not occupy means jlo was moved
-/// or copied; updating would write a release over somebody else's install.
-#[test]
-fn a_receipt_naming_another_binary_stops_the_update() {
-    let install = Install::new("installer");
-    install.write_receipt(
-        "installer",
-        &Install::version(),
-        Path::new("/nowhere/jlo-bin"),
-    );
-    let release = Release::good(TAG, NEWER);
-
-    let out = install.selfupdate(&release.url());
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(!out.status.success());
-    assert!(
-        stderr.contains("/nowhere/jlo-bin"),
-        "the refusal does not name the receipt's path: {stderr:?}"
-    );
-}
-
-/// A missing receipt is an install that predates them, not a broken one: the
-/// update proceeds, and the install verb writes one.
-#[test]
-fn a_missing_receipt_does_not_stop_the_update() {
-    let install = Install::new("installer");
-    fs::remove_file(install.receipt_path()).unwrap();
-    let release = Release::good(TAG, NEWER);
+fn an_older_latest_release_is_not_a_downgrade() {
+    let install = Install::new();
+    let release = Release::serving("jlo-bin-v0.0.1", 1, 0);
 
     let out = install.selfupdate(&release.url());
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "{stderr:?}");
-    assert_published_from_staging(&stderr, &install);
+    assert!(stderr.contains("already the latest version"), "{stderr:?}");
+    release.assert();
 }
 
-/// Two updates must not interleave their writes. The lock is exclusive and
-/// fails fast rather than waiting on something the user cannot see.
-///
-/// The holder is a `python3` one-liner rather than `flock(1)`, which is a
-/// util-linux tool and absent on macOS - and a test that silently skips on
-/// the developer's own machine is not a test. It takes the lock from its own
-/// open file description, which is the only way to observe the `flock` from
-/// outside this process.
+/// A required file that cannot be written fails the repair, and nothing is
+/// reloaded; once the path is writable again, a retry succeeds.
 #[test]
-fn a_held_lock_stops_a_second_update() {
-    let install = Install::new("installer");
-    let release = Release::good(TAG, NEWER);
+fn a_failed_required_write_fails_the_repair_and_reloads_nothing() {
+    let install = Install::new();
+    install.write_layout();
+    let release = Release::serving(&current_tag(), 3, 0);
+    let jlo_sh = install.path().join("jlo.sh");
+    // A non-empty directory where the file belongs: the rename onto it fails.
+    fs::remove_file(&jlo_sh).unwrap();
+    fs::create_dir(&jlo_sh).unwrap();
+    fs::write(jlo_sh.join("keep"), "").unwrap();
 
-    let lock = install.path().join(".selfupdate.lock");
-    let ready = install.path().join("lock-held");
-    let holder = hermetic("python3", install.path())
-        .arg("-c")
-        .arg(
-            "import fcntl, pathlib, sys, time\n\
-             f = open(sys.argv[1], 'w')\n\
-             fcntl.flock(f, fcntl.LOCK_EX)\n\
-             pathlib.Path(sys.argv[2]).write_text('held')\n\
-             time.sleep(30)\n",
-        )
-        .arg(&lock)
-        .arg(&ready)
-        .spawn();
-    let Ok(mut holder) = holder else {
-        eprintln!("SKIP a_held_lock_stops_a_second_update: python3 is not installed here.");
-        return;
-    };
-
-    let mut held = false;
-    for _ in 0..100 {
-        if ready.exists() {
-            held = true;
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(20));
+    for out in [
+        install.selfupdate(&release.url()),
+        install.wrapped_selfupdate(&release.url()),
+    ] {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(1), "{stderr:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            "",
+            "reloaded anyway: {stderr:?}"
+        );
+        assert!(stderr.contains("jlo.sh"), "{stderr:?}");
     }
 
-    let out = held.then(|| install.selfupdate(&release.url()));
-    let _ = holder.kill();
-    let _ = holder.wait();
-    assert!(held, "the holder never took the lock");
-
-    let out = out.unwrap();
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(!out.status.success(), "the lock was ignored: {stderr:?}");
+    fs::remove_dir_all(&jlo_sh).unwrap();
+    let out = install.selfupdate(&release.url());
     assert!(
-        stderr.contains("already running"),
-        "the refusal does not name the reason: {stderr:?}"
+        out.status.success(),
+        "{:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(jlo_sh.is_file());
+    release.assert();
+}
+
+/// The repair follows the install verb's symlink rules: an owned link keeps
+/// its inode, a missing one comes back, anything else is left alone.
+#[test]
+fn the_repair_keeps_the_symlink_rules() {
+    let install = Install::new();
+    install.write_layout();
+    let release = Release::serving(&current_tag(), 3, 0);
+    let link = install.path().join(".local").join("bin").join("jlo");
+    let identity = |p: &Path| {
+        let m = fs::symlink_metadata(p).unwrap();
+        (m.ino(), m.dev())
+    };
+
+    let owned = identity(&link);
+    assert!(install.selfupdate(&release.url()).status.success());
+    assert_eq!(identity(&link), owned, "an owned link was recreated");
+
+    fs::remove_file(&link).unwrap();
+    assert!(install.selfupdate(&release.url()).status.success());
+    assert_eq!(fs::read_link(&link).unwrap(), install.binary());
+
+    fs::remove_file(&link).unwrap();
+    fs::write(&link, "not ours\n").unwrap();
+    let out = install.selfupdate(&release.url());
+    assert!(out.status.success());
+    assert_eq!(fs::read_to_string(&link).unwrap(), "not ours\n");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("not managed by J'Lo"));
+    release.assert();
+}
+
+// ---------------------------------------------------------------------------
+// Not ours
+// ---------------------------------------------------------------------------
+
+/// A J'Lo that is not `$JLO_HOME/bin/jlo-bin` - a build in `target/`, a
+/// Homebrew keg - is refused before anything is asked or written.
+#[test]
+fn a_jlo_that_is_not_the_installed_one_is_refused() {
+    let home = tempfile::tempdir().unwrap();
+    let jlo_home = tempfile::tempdir().unwrap();
+    let release = Release::serving(TAG, 0, 0);
+
+    let out = hermetic(jlo_bin(), home.path())
+        .arg("selfupdate")
+        .env("JLO_HOME", jlo_home.path())
+        .env("JLO_RELEASE_API_URL", release.url())
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{stderr:?}");
+    assert!(stderr.contains("not the one installed at"), "{stderr:?}");
+    assert!(
+        stderr.contains("brew upgrade"),
+        "no way out named: {stderr:?}"
+    );
+    assert_eq!(fs::read_dir(home.path()).unwrap().count(), 0);
+    assert_eq!(fs::read_dir(jlo_home.path()).unwrap().count(), 0);
+    release.assert();
+}
+
+// ---------------------------------------------------------------------------
+// The calling shell
+// ---------------------------------------------------------------------------
+
+/// Through the shell function, both branches reload the calling shell. `jlo.sh`
+/// defines `jlo`, so the update runs from a renamed copy while a stand-in holds
+/// the name: the stand-in survives unless the reload sourced `jlo.sh` again.
+#[test]
+fn selfupdate_reloads_the_calling_shell_whether_it_upgrades_or_repairs() {
+    for sh in shells("selfupdate_reloads_the_calling_shell", INTERPRETERS) {
+        for (tag, hits) in [(TAG.to_string(), 1), (current_tag(), 0)] {
+            let install = Install::new();
+            install.write_layout();
+            let release = Release::serving(&tag, 1, hits);
+
+            let out = hermetic(sh, install.path())
+                .arg("-c")
+                .arg(
+                    r#". "$JLO_HOME/jlo.sh"
+                    eval "_jlo_old$(typeset -f jlo | sed '1s/^jlo//')"
+                    jlo() { echo stale; }
+                    rm "$JLO_HOME/bin/jlo-init.sh"
+                    _jlo_old selfupdate
+                    echo "status=$?"
+                    if typeset -f jlo | grep -q stale; then echo reloaded=no; else echo reloaded=yes; fi"#,
+                )
+                .env("JLO_HOME", install.path())
+                .env("JLO_RELEASE_API_URL", release.url())
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let ctx = format!(
+                "{sh} {tag}: {stdout:?} {:?}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            assert!(stdout.contains("status=0"), "{ctx}");
+            assert!(stdout.contains("reloaded=yes"), "{ctx}");
+            assert!(
+                install.path().join("bin").join("jlo-init.sh").is_file(),
+                "{ctx}"
+            );
+            release.assert();
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The released updaters' hand-over
+// ---------------------------------------------------------------------------
+
+/// J'Lo 0.4.0's resident wrapper (zsh dialect), comments dropped: it evaluates
+/// whatever stdout a successful `selfupdate` prints, marker or not.
+const WRAPPER_0_4_0: &str = r#"
+jlo() {
+  local J arg out
+  J="${JLO_HOME-}/bin/jlo-bin"
+  case "$1" in
+    env|use|selfupdate)
+      for arg in "$@"; do
+        case "$arg" in
+          -h|--help|-V|--version)
+            "$J" "$@"
+            return
+            ;;
+        esac
+      done
+      out="$("$J" "$@")" || return
+      eval "$out"
+      ;;
+    *)
+      "$J" "$@"
+      ;;
+  esac
+}
+"#;
+
+/// J'Lo 0.5.0's resident wrapper (zsh dialect), comments dropped: it
+/// evaluates stdout only when it ends in the marker.
+const WRAPPER_0_5_0: &str = r##"
+jlo() {
+  local J out rc=0
+  J="${JLO_HOME-}/bin/jlo-bin"
+  case "${1-}" in
+    env|use|selfupdate|install|update)
+      if ! ( JAVA_HOME='' PATH='' ) 2>/dev/null; then
+        echo "jlo: JAVA_HOME or PATH is read-only" >&2
+        return 1
+      fi
+      out="$("$J" __wrapped "$@")" || rc=$?
+      case "$out" in
+        *"# jlo'end") eval "${out%"# jlo'end"}" || [ "$rc" -ne 0 ] || rc=1 ;;
+        *) [ "$rc" -ne 0 ] || printf '%s\n' "$out" >&1 || rc=1 ;;
+      esac
+      return "$rc"
+      ;;
+    *)
+      "$J" "$@"
+      ;;
+  esac
+}
+"##;
+
+/// Runs `jlo selfupdate` through a released `wrapper`, with `updater` - a
+/// stand-in for that release's binary, from the point its download verified -
+/// at `bin/jlo-bin`. Reports the status and whether the calling shell now has
+/// the current wrapper, which alone says "neither `JLO_HOME` nor HOME".
+fn released_hand_over(install: &Install, wrapper: &str, updater: &str) -> Output {
+    install.write_layout();
+    // Written by this process to a file that is never exec'd, then copied by
+    // a child `cp` onto a fresh inode and renamed into place: a write fd this
+    // process held on the exec'd inode itself could leak into another test
+    // thread's fork and fail the exec with ETXTBSY (see `Install::new`).
+    let source = install.path().join("updater.src");
+    fs::write(&source, updater).unwrap();
+    let fresh = install.path().join("bin").join(".jlo-bin.standin");
+    let placed = hermetic("/bin/sh", install.path())
+        .arg("-c")
+        .arg("cp \"$1\" \"$2\" && chmod 755 \"$2\" && mv \"$2\" \"$3\"")
+        .arg("sh")
+        .arg(&source)
+        .arg(&fresh)
+        .arg(install.binary())
+        .status()
+        .unwrap();
+    assert!(placed.success());
+
+    hermetic("zsh", install.path())
+        .arg("-c")
+        .arg(format!(
+            r#". "$JLO_HOME/jlo.sh"
+            {wrapper}
+            jlo selfupdate
+            echo "status=$?"
+            if typeset -f jlo | grep -q 'neither JLO_HOME nor HOME'; then echo reloaded=yes; else echo reloaded=no; fi"#
+        ))
+        .env("JLO_HOME", install.path())
+        .output()
+        .unwrap()
+}
+
+/// Both released updaters probed the staged binary with `--version` and
+/// refused the hand-over unless the output's last word was the tag's version.
+/// The stand-ins below do the same, so a change to the version output that
+/// the released updaters would refuse fails here.
+fn version_probe(staged: &str) -> String {
+    format!(
+        "v=$({staged} --version) || exit 71\n\
+         [ \"${{v##* }}\" = '{VERSION}' ] || {{ echo \"probe refused: $v\" >&2; exit 73; }}\n"
+    )
+}
+
+/// 0.4.0 staged and probed the new binary, renamed it into place itself, then
+/// ran it as `__install --reload --locked`, unwrapped: the reload lines arrive
+/// without the marker, and 0.4.0's wrapper evaluates them.
+#[test]
+fn the_0_4_0_updater_hands_over_and_reloads() {
+    if common::skip_missing("the_0_4_0_updater_hands_over_and_reloads", "zsh") {
+        return;
+    }
+    let install = Install::new();
+    let updater = format!(
+        "#!/bin/sh\n\
+         [ \"$1\" = selfupdate ] || exit 64\n\
+         stage=\"$JLO_HOME/bin/.jlo-install-$$\"\n\
+         mkdir \"$stage\" && cp {real} \"$stage/jlo-bin\" || exit 70\n\
+         {probe}\
+         mv \"$stage/jlo-bin\" \"$JLO_HOME/bin/jlo-bin\" && rmdir \"$stage\" || exit 70\n\
+         exec \"$JLO_HOME/bin/jlo-bin\" __install --reload --locked\n",
+        real = squote(jlo_bin()),
+        probe = version_probe("\"$stage/jlo-bin\""),
+    );
+    let out = released_hand_over(&install, WRAPPER_0_4_0, &updater);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let ctx = format!("{stdout:?} {:?}", String::from_utf8_lossy(&out.stderr));
+    assert!(stdout.contains("status=0"), "{ctx}");
+    assert!(stdout.contains("reloaded=yes"), "{ctx}");
+
+    let direct = install.run(&["__install", "--reload", "--locked"], "http://127.0.0.1:1");
+    assert!(direct.status.success());
+    assert_reload_lines(
+        &String::from_utf8_lossy(&direct.stdout),
+        install.path(),
+        false,
     );
 }
 
+/// 0.5.0 staged the new binary, probed it with `--version` - which must leave
+/// it in place - then ran `__wrapped __install --publish-self --reload
+/// --locked`: the staged file is published by rename, the reload carries the
+/// marker 0.5.0's wrapper needs, and the staging directory goes.
+#[test]
+fn the_0_5_0_updater_hands_over_and_reloads() {
+    if common::skip_missing("the_0_5_0_updater_hands_over_and_reloads", "zsh") {
+        return;
+    }
+    let install = Install::new();
+    let updater = format!(
+        "#!/bin/sh\n\
+         [ \"$1 $2\" = \"__wrapped selfupdate\" ] || exit 64\n\
+         stage=\"$JLO_HOME/bin/.jlo-install-$$\"\n\
+         mkdir \"$stage\" && cp {real} \"$stage/jlo-bin\" || exit 70\n\
+         {probe}\
+         [ -x \"$stage/jlo-bin\" ] || exit 72\n\
+         set -- $(ls -i \"$stage/jlo-bin\")\n\
+         echo \"staged-inode=$1\" >&2\n\
+         exec \"$stage/jlo-bin\" __wrapped __install --publish-self --reload --locked\n",
+        real = squote(jlo_bin()),
+        probe = version_probe("\"$stage/jlo-bin\""),
+    );
+    let out = released_hand_over(&install, WRAPPER_0_5_0, &updater);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let ctx = format!("{stdout:?} {stderr:?}");
+    assert!(stdout.contains("status=0"), "{ctx}");
+    assert!(stdout.contains("reloaded=yes"), "{ctx}");
+
+    let staged = stderr
+        .lines()
+        .find_map(|line| line.strip_prefix("staged-inode="))
+        .unwrap_or_else(|| panic!("the staged binary never ran: {ctx}"));
+    assert_eq!(
+        staged,
+        fs::metadata(install.binary()).unwrap().ino().to_string()
+    );
+    assert!(staging_leftovers(&install).is_empty(), "{ctx}");
+}
+
 /// `--reload` is the only thing that puts shell code on the install verb's
-/// stdout, and it re-sources only what this shell had already enabled.
+/// stdout.
 #[test]
 fn the_install_verb_prints_the_reload_line_only_with_reload() {
-    let install = Install::new("installer");
+    let install = Install::new();
 
-    let quiet = hermetic(install.binary(), install.path())
-        .arg("__install")
-        .env("JLO_HOME", install.path())
-        .output()
-        .unwrap();
+    let quiet = install.run(&["__install"], "http://127.0.0.1:1");
     assert!(quiet.status.success());
     assert_eq!(
         String::from_utf8_lossy(&quiet.stdout),
@@ -706,20 +730,11 @@ fn the_install_verb_prints_the_reload_line_only_with_reload() {
         "the bootstrap install wrote to the environment channel"
     );
 
-    let loud = hermetic(install.binary(), install.path())
-        .args(["__install", "--reload"])
-        .env("JLO_HOME", install.path())
-        .output()
-        .unwrap();
+    let loud = install.run(&["__install", "--reload"], "http://127.0.0.1:1");
     assert!(loud.status.success());
-    let stdout = String::from_utf8_lossy(&loud.stdout);
-    let home = install.path().to_string_lossy();
-    assert!(
-        stdout.contains(&format!(". '{home}/jlo.sh'")),
-        "no unconditional reload of jlo.sh: {stdout:?}"
-    );
-    assert!(
-        stdout.contains("_JLO_AUTOLOAD") && stdout.contains("_JLO_COMPLETIONS"),
-        "the optional stubs are not gated on their markers: {stdout:?}"
+    assert_reload_lines(
+        &String::from_utf8_lossy(&loud.stdout),
+        install.path(),
+        false,
     );
 }

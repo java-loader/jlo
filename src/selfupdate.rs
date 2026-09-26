@@ -1,80 +1,47 @@
-//! `jlo selfupdate`: the binary replaces itself from a GitHub release.
+//! `jlo selfupdate`: J'Lo replaced by its newest release.
 //!
-//! This used to be six lines of shell that re-ran `install.sh` from
-//! `refs/heads/main` over `curl | bash` - no version check, no verification of
-//! jlo's own artifact, and an exit status that reported success on an empty
-//! download. It is a Rust command now, reusing the pieces the JDK path already
-//! has: the `ureq` stack, the streaming SHA256, and `extract`.
+//! The binary does not download itself. It resolves the latest release tag and,
+//! when that release is newer, runs the release's own `install.sh`, pinned to
+//! the tag - so there is one publisher of a new binary, whoever started it. A
+//! pipeline in here (download, checksum, staging, a hand-over by `exec`) was a
+//! second implementation of the installer, and a bug in whichever copy an old
+//! install carried could strand it on a version that cannot update itself.
 //!
-//! The order below is not incidental, and each step exists because of a way
-//! the obvious arrangement fails:
-//!
-//! 1. **Read the receipt.** It says whether this install is one jlo may touch
-//!    at all - a local build or a package-manager install is not.
-//! 2. **Resolve the tag once**, from the `/releases/latest` redirect. Both
-//!    assets are then fetched from `/releases/download/<tag>/`. Discovery via
-//!    `latest` followed by a download from `latest/download` are two separate
-//!    resolutions, and a release published between them yields a tarball from
-//!    one release and a checksum from another.
-//! 3. **Compare against `CARGO_PKG_VERSION` and stop early** when there is
-//!    nothing to do. Nothing to reload in that case: the wrapper gets the
-//!    end marker alone, anyone else nothing.
-//! 4. **Verify, then stage** - into a directory beside the target file, never
-//!    `std::env::temp_dir()`, because `rename` is atomic only within one
-//!    filesystem.
-//! 5. **`exec` the *staged* binary** with the hidden install verb, which
-//!    publishes it the way it publishes a binary `install.sh` staged: `rename`
-//!    under the lock, then the layout. The running process carries its *own*
-//!    `include_str!` templates, so a process that renames a new binary into
-//!    place and then writes the shell files itself would install new code
-//!    beside old scripts. There is exactly one generator and one publisher,
-//!    and a new binary that cannot start publishes nothing.
-//!
-//! See `docs/adr/0006`. Two invariants are easy to break by accident and have
-//! their own comments below: the lock fd must not carry `FD_CLOEXEC`, or the
-//! lock is dropped at exactly the moment the new binary starts publishing; and
-//! the base URL is injectable so the whole path is testable against mockito.
+//! When J'Lo is already current it rewrites its shell files instead: the repair
+//! for an upgrade cut off between the binary and its scripts. Either way the
+//! reload lines follow, because the stale piece may be the wrapper resident in
+//! the shell that asked.
 
 use crate::CommandError;
-use crate::extract;
-use crate::install::{self, Layout, Lock};
-use crate::ui::{self, InstallUi};
+use crate::install::{self, Layout};
+use crate::ui;
 use anyhow::{Context, Result, anyhow, bail};
 use std::cmp::Ordering;
-use std::fs::{self, File};
-use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::Duration;
 use ureq::Agent;
 
-/// The release root. `JLO_RELEASE_API_URL` overrides it, mirroring
-/// `JLO_ADOPTIUM_API_URL` (ADR-0002), which is what makes the whole path
-/// testable offline - there is no spare release to point a test at.
+/// The release root. `JLO_RELEASE_API_URL` overrides it, the way
+/// `JLO_ADOPTIUM_API_URL` does for Adoptium, so the path is testable offline.
 pub(crate) const RELEASES_URL: &str = "https://github.com/java-loader/jlo/releases";
 
 /// release-please tags the crate, not the repository, so the tag is
-/// `jlo-bin-v0.3.0` and not a bare `v0.3.0`. A tag that does not carry this
-/// prefix is an error rather than a guess: the version it yields decides
-/// whether we overwrite the binary the user is running.
+/// `jlo-bin-v0.3.0` and not a bare `v0.3.0`. A tag without this prefix is an
+/// error rather than a guess: the version it yields decides whether the
+/// running J'Lo is replaced.
 const TAG_PREFIX: &str = "jlo-bin-v";
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Install methods `selfupdate` recognises. Anything else in the receipt stops
-/// the update, for the same reason a malformed receipt does.
-const METHOD_INSTALLER: &str = "installer";
-const METHOD_LOCAL: &str = "local";
-const METHOD_PACKAGE_MANAGER: &str = "package-manager";
+/// What a user runs when `selfupdate` cannot finish the job.
+const INSTALL_LINE: &str = "/bin/bash -c \"$(curl -fsSL https://github.com/java-loader/jlo/releases/latest/download/install.sh)\"";
 
-// ---------------------------------------------------------------------------
-// The remote
-// ---------------------------------------------------------------------------
-
-/// The single point of contact with the GitHub release host, the way
-/// `AdoptiumClient` is for Adoptium. ADR-0002's "one network seam" is no
-/// longer literally one, but the shape it asked for holds: one type per
-/// remote, each with an injectable base URL and mockito coverage.
+/// The one contact with the GitHub release host, the way `AdoptiumClient` is
+/// for Adoptium: one type per remote, each with an injectable base URL.
 pub(crate) struct ReleaseClient {
     agent: Agent,
     base_url: String,
+    timeout: Option<Duration>,
 }
 
 impl std::fmt::Debug for ReleaseClient {
@@ -90,15 +57,19 @@ impl ReleaseClient {
         Self {
             agent: crate::adoptium::agent(),
             base_url: base_url.into(),
+            timeout: None,
         }
+    }
+
+    fn from_env() -> Self {
+        Self::new(std::env::var("JLO_RELEASE_API_URL").unwrap_or_else(|_| RELEASES_URL.to_string()))
     }
 
     /// The tag of the latest release, read from the `Location` header of
     /// `/releases/latest`.
     ///
     /// Not the REST API: no token, no 60/hr unauthenticated rate limit to hit
-    /// from a shared CI runner, no JSON contract to keep fixtures for, and it
-    /// exercises the same host `install.sh` already trusts.
+    /// from a shared CI runner, no JSON contract to keep fixtures for.
     ///
     /// `max_redirects(0)` is what makes that possible at all - ureq follows
     /// redirects by default, so without it the 302 is consumed and the
@@ -110,6 +81,7 @@ impl ReleaseClient {
             .get(&url)
             .config()
             .max_redirects(0)
+            .timeout_global(self.timeout)
             .build()
             .call()
             .with_context(|| format!("could not reach {url}"))?;
@@ -128,48 +100,17 @@ impl ReleaseClient {
             .ok_or_else(|| anyhow!("could not read a release tag from {location:?}"))
     }
 
-    fn asset_url(&self, tag: &str, name: &str) -> String {
-        format!("{}/download/{tag}/{name}", self.base_url)
+    /// Where `tag`'s assets live - and what `install.sh` is pinned to, so the
+    /// tarball and its checksum come from the tag resolved here rather than
+    /// from a `latest` that a release published in between would move.
+    fn download_base(&self, tag: &str) -> String {
+        format!("{}/download/{tag}", self.base_url)
     }
 
-    /// The published `<package>.sha256`, as bare lowercase hex.
-    ///
-    /// Unlike `install.sh`, a missing checksum is fatal here. That asymmetry
-    /// is deliberate: the bootstrap has to cope with releases published before
-    /// checksums existed, but `selfupdate` only ever asks for a release that
-    /// is newer than the running binary, so every release it can reach has
-    /// one. The artifact that *becomes jlo* is the last place to fail open.
-    fn fetch_checksum(&self, tag: &str, package: &str) -> Result<String> {
-        let url = self.asset_url(tag, &format!("{package}.sha256"));
-        let mut response = self
-            .agent
-            .get(&url)
-            .call()
-            .with_context(|| format!("could not reach {url}"))?;
-        if !response.status().is_success() {
-            bail!(
-                "could not download the checksum from {url}: HTTP {}",
-                response.status()
-            );
-        }
-        let body = response
-            .body_mut()
-            .read_to_string()
-            .with_context(|| format!("could not read the checksum from {url}"))?;
-        parse_checksum(&body).ok_or_else(|| anyhow!("{url} is not a SHA256 checksum file"))
-    }
-
-    /// Stream the tarball into `file`, hashing as it goes, and refuse it when
-    /// the digest does not match - the same shape as the JDK download.
-    fn download(
-        &self,
-        tag: &str,
-        package: &str,
-        expected: &str,
-        file: &mut File,
-        ui: &InstallUi,
-    ) -> Result<()> {
-        let url = self.asset_url(tag, package);
+    /// `tag`'s `install.sh`, written to `file`. An HTTP error is an error:
+    /// an empty body run by `sh` would succeed at doing nothing.
+    fn fetch_installer(&self, tag: &str, file: &mut std::fs::File) -> Result<()> {
+        let url = format!("{}/install.sh", self.download_base(tag));
         let mut response = self
             .agent
             .get(&url)
@@ -178,22 +119,15 @@ impl ReleaseClient {
         if !response.status().is_success() {
             bail!("could not download {url}: HTTP {}", response.status());
         }
-
-        let hash = crate::adoptium::stream_hashed(response.body_mut(), file, ui)?;
-        file.sync_all()
-            .context("could not flush the downloaded package to disk")?;
-
-        if hash != expected {
-            bail!("checksum mismatch for {package}: expected {expected}, got {hash}");
-        }
+        std::io::copy(&mut response.body_mut().as_reader(), file)
+            .with_context(|| format!("could not download {url}"))?;
         Ok(())
     }
 }
 
 /// The last non-empty path segment of a redirect target, with any query or
-/// fragment dropped. GitHub answers with an absolute URL today, but the header
-/// is allowed to carry a relative reference, so this parses a path rather than
-/// a URL.
+/// fragment dropped. The header may carry a relative reference, so this parses
+/// a path rather than a URL.
 fn tag_from_location(location: &str) -> Option<String> {
     let path = location
         .split(['?', '#'])
@@ -202,22 +136,11 @@ fn tag_from_location(location: &str) -> Option<String> {
         .trim_end_matches('/');
     let tag = path.rsplit('/').next()?;
     // "latest" back again means the redirect did not resolve to a release -
-    // an empty repository, say. Treated as unreadable rather than as a tag.
+    // an empty repository, say.
     if tag.is_empty() || tag == "latest" {
         return None;
     }
     Some(tag.to_string())
-}
-
-/// `<hex>  <filename>` is what `shasum -a 256` writes, and the first line is
-/// all of it that matters. Rejects anything that is not exactly 64 hex digits:
-/// an empty or truncated expectation must never pass for a match.
-fn parse_checksum(body: &str) -> Option<String> {
-    let field = body.lines().next()?.split_whitespace().next()?;
-    if field.len() != 64 || !field.chars().all(|c| c.is_ascii_hexdigit()) {
-        return None;
-    }
-    Some(field.to_ascii_lowercase())
 }
 
 fn version_from_tag(tag: &str) -> Result<&str> {
@@ -230,157 +153,6 @@ fn version_from_tag(tag: &str) -> Result<&str> {
         })
 }
 
-/// The release asset for this platform, matching the names the release
-/// workflow builds. `uname -m` says `arm64` on Apple silicon where Rust says
-/// `aarch64`, which is why this is a table and not a format string.
-fn package_name() -> Result<String> {
-    let platform = match (std::env::consts::OS, std::env::consts::ARCH) {
-        ("linux", "x86_64") => "linux-x86_64",
-        ("linux", "aarch64") => "linux-aarch64",
-        ("macos", "aarch64") => "macos-arm64",
-        (os, arch) => bail!("J'Lo publishes no release build for {os}/{arch}."),
-    };
-    Ok(format!("jlo-{platform}.tar.gz"))
-}
-
-// ---------------------------------------------------------------------------
-// The command
-// ---------------------------------------------------------------------------
-
-pub(crate) fn cmd_selfupdate(wrapped: bool) -> Result<(), CommandError> {
-    let layout = Layout::new(crate::jlo_home_dir()?);
-    let receipt = install::load_receipt(&layout).map_err(|e| {
-        CommandError::with_hint(
-            e,
-            "Re-run the installer to rewrite it: \
-             /bin/bash -c \"$(curl -fsSL https://github.com/java-loader/jlo/releases/latest/download/install.sh)\"",
-        )
-    })?;
-    if let Some(receipt) = &receipt {
-        check_owned(receipt, &layout)?;
-    }
-    // Resolved before the lock and before the network: a platform with no
-    // published build has no update to look for, and saying so costs nothing.
-    let package = package_name()?;
-
-    let base_url =
-        std::env::var("JLO_RELEASE_API_URL").unwrap_or_else(|_| RELEASES_URL.to_string());
-    let client = ReleaseClient::new(base_url);
-
-    // Held from here across the `exec`, so nothing else can publish underneath us
-    // - the binary, the generated scripts and the receipt are three
-    // filesystem writes and no `rename` makes them one transaction. The
-    // install verb takes the same lock, so `install.sh`, `install-local.sh`
-    // and the self-heal are all shut out for the duration.
-    let lock = Lock::acquire(layout.home())?;
-
-    let tag = client.latest_tag()?;
-    let latest = version_from_tag(&tag)?;
-    if !is_newer(latest, VERSION)? {
-        ui::created!("{} is already the latest version.", ui::jlo_mark(VERSION));
-        return Ok(crate::shellenv::emit(&[], wrapped)?);
-    }
-
-    eprintln!(
-        "Updating {} {} {}",
-        ui::jlo_mark(VERSION),
-        ui::punctuation_arrow(),
-        ui::jlo_mark_bare(latest)
-    );
-    let staged = stage(&client, &layout, &tag, latest, &package)?;
-
-    // Re-read under the lock, immediately before handing over. A slower
-    // updater carrying an older release must not overwrite a newer install
-    // that landed since this process read what was installed. Every current
-    // publisher - `install.sh` and `install-local.sh` through the `__install`
-    // verb, and the self-heal - takes the lock held here and cannot publish
-    // while it is held, but one may have finished before it was taken; a
-    // publisher from a release before the lock existed can land at any time.
-    guard_against_a_newer_install(&layout, latest)?;
-
-    publish(&layout, lock, staged, wrapped)
-}
-
-/// Whether this install is one `selfupdate` may replace.
-///
-/// Each refusal names what it saw. Guessing is how a package-manager install
-/// gets clobbered, and a local build is precisely the case where somebody does
-/// not want a release quietly written over their work.
-fn check_owned(receipt: &install::Receipt, layout: &Layout) -> Result<(), CommandError> {
-    match receipt.method.as_str() {
-        METHOD_INSTALLER => {}
-        METHOD_LOCAL => {
-            return Err(CommandError::with_hint(
-                anyhow!("this J'Lo was installed from a local build, not from a release."),
-                "Run ./install-local.sh again to replace it, or re-run the installer to switch back to releases.",
-            ));
-        }
-        METHOD_PACKAGE_MANAGER => {
-            return Err(CommandError::with_hint(
-                anyhow!("this J'Lo was installed by a package manager."),
-                "Update it the same way you installed it.",
-            ));
-        }
-        other => {
-            return Err(anyhow!(
-                "{:?} records an install method J'Lo does not recognise: {other:?}.",
-                layout.home().join("install-receipt.json")
-            )
-            .into());
-        }
-    }
-
-    if !crate::store::same_path(Path::new(&receipt.jlo_home), layout.home()) {
-        return Err(anyhow!(
-            "the install receipt in {:?} describes a different JLO_HOME ({:?}).",
-            layout.home(),
-            receipt.jlo_home
-        )
-        .into());
-    }
-
-    // A receipt whose recorded path is not the executable running means jlo
-    // was moved or copied. Updating would write a release over a path this
-    // process does not occupy.
-    if !install::is_current_exe(Path::new(&receipt.binary)) {
-        return Err(CommandError::with_hint(
-            anyhow!(
-                "this executable is not the install described by the receipt, which names {:?}.",
-                receipt.binary
-            ),
-            "Run the J'Lo that lives at that path, or re-run the installer.",
-        ));
-    }
-    Ok(())
-}
-
-/// Stop rather than downgrade when someone else published in the meantime.
-///
-/// The receipt is the weaker of the two signals and is checked here only for
-/// completeness. The strong one is `CARGO_PKG_VERSION`, compared before the
-/// download: `check_owned` has already established that this executable *is*
-/// the installed binary, so `VERSION` is what is on disk whatever the receipt
-/// happens to say - including in the incomplete-install state where a crashed
-/// updater left a newer binary behind an older receipt.
-///
-/// What this re-read still catches is a publication that finished after
-/// this process started: one by a current publisher, which takes the same
-/// lock and so can only have finished before it was taken, or one by a
-/// publisher from a release before the lock existed, at any time.
-fn guard_against_a_newer_install(layout: &Layout, latest: &str) -> Result<()> {
-    let Some(receipt) = install::load_receipt(layout)? else {
-        return Ok(());
-    };
-    if is_newer(&receipt.version, latest)? {
-        bail!(
-            "J'Lo {} was installed while this update was downloading; \
-             not replacing it with {latest}.",
-            receipt.version
-        );
-    }
-    Ok(())
-}
-
 fn is_newer(candidate: &str, current: &str) -> Result<bool> {
     let ordering = crate::version::compare(candidate, current).with_context(|| {
         format!("could not compare J'Lo versions {candidate:?} and {current:?}")
@@ -388,169 +160,69 @@ fn is_newer(candidate: &str, current: &str) -> Result<bool> {
     Ok(ordering == Ordering::Greater)
 }
 
-// ---------------------------------------------------------------------------
-// Staging
-// ---------------------------------------------------------------------------
+pub(crate) fn cmd_selfupdate(wrapped: bool) -> Result<(), CommandError> {
+    let layout = Layout::new(crate::jlo_home_dir()?);
+    // Before the network: a J'Lo this command may not replace has nothing to ask.
+    check_owned(&layout)?;
 
-/// A staging directory beside the target file, removed on drop.
-///
-/// Beside it, and not under `std::env::temp_dir()`: `rename` is atomic only
-/// within one filesystem, and it fails with `EXDEV` rather than degrading.
-/// "Somewhere under `$JLO_HOME`" is not enough either, because `bin/` can
-/// itself be a mount point or a symlink.
-///
-/// The drop covers every failure up to and including an `exec` that returns.
-/// A successful `exec` runs no destructors; from there the staged binary's own
-/// install verb removes the directory.
-#[derive(Debug)]
-struct Staged {
-    dir: PathBuf,
-    binary: PathBuf,
+    let client = ReleaseClient::from_env();
+    let tag = client.latest_tag()?;
+    let latest = version_from_tag(&tag)?;
+    if is_newer(latest, VERSION)? {
+        eprintln!(
+            "Updating {} {} {}",
+            ui::jlo_mark(VERSION),
+            ui::punctuation_arrow(),
+            ui::jlo_mark_bare(latest)
+        );
+        run_installer(&client, &layout, &tag)?;
+    } else {
+        install::refresh_layout(&layout)?;
+        ui::created!("{} is already the latest version.", ui::jlo_mark(VERSION));
+    }
+    Ok(install::print_reload(&layout, wrapped)?)
 }
 
-impl Drop for Staged {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.dir);
+/// Whether this is the J'Lo `selfupdate` may replace: the binary at
+/// `$JLO_HOME/bin/jlo-bin`, nothing else. Homebrew's keg and a build in
+/// `target/` are updated the way they were installed; running the installer
+/// from either would publish a second J'Lo beside the one the user runs.
+fn check_owned(layout: &Layout) -> Result<(), CommandError> {
+    if install::is_current_exe(&layout.binary()) {
+        return Ok(());
     }
-}
-
-fn stage(
-    client: &ReleaseClient,
-    layout: &Layout,
-    tag: &str,
-    latest: &str,
-    package: &str,
-) -> Result<Staged> {
-    // A staged binary that verified but then died before its install verb
-    // could clean up leaves a whole copy of J'Lo here, and nothing else ever
-    // comes back for it: `install.sh` sweeps only its own directory.
-    layout.sweep_stale_staging();
-    let dir = layout.staging_dir(std::process::id());
-    // A directory left behind by a killed run would otherwise make the unpack
-    // below read as a success with stale contents.
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).with_context(|| format!("could not create {dir:?}"))?;
-    let staged = Staged {
-        binary: dir.join("jlo-bin"),
-        dir,
-    };
-
-    let ui = InstallUi::jlo(latest);
-    let result = fetch_and_unpack(client, &staged, tag, package, &ui);
-    if result.is_err() {
-        ui.abandon();
-    }
-    result?;
-
-    // Executable first, then run it. `make_executable` exists for an archive
-    // that did not carry the x bit, and running the binary is the one step
-    // that needs it - in the other order the repair never got the chance, and
-    // such an archive failed with "could not run the downloaded jlo" instead.
-    make_executable(&staged.binary)?;
-    verify_staged_version(&staged.binary, latest)?;
-    Ok(staged)
-}
-
-fn fetch_and_unpack(
-    client: &ReleaseClient,
-    staged: &Staged,
-    tag: &str,
-    package: &str,
-    ui: &InstallUi,
-) -> Result<()> {
-    let expected = client.fetch_checksum(tag, package)?;
-    let archive = staged.dir.join(package);
-    let mut file =
-        File::create(&archive).with_context(|| format!("could not create {archive:?}"))?;
-    client.download(tag, package, &expected, &mut file, ui)?;
-    drop(file);
-
-    extract::extract(&archive, &staged.dir, ui)?;
-    // The install verb that takes over this directory removes the binary and
-    // then the directory only if that emptied it, never recursively. A
-    // tarball left in here would keep it standing after every update; failing
-    // to remove it costs that directory and nothing else.
-    let _ = fs::remove_file(&archive);
-    if !staged.binary.is_file() {
-        bail!("the release archive {package} did not contain a jlo-bin.");
-    }
-    ui.abandon();
-    Ok(())
-}
-
-/// The last check before the swap: the binary we are about to publish must
-/// actually be the version the tag promised.
-///
-/// Running it is safe by this point - the archive it came out of matched its
-/// published SHA256 - and it is the only thing that can catch a release whose
-/// assets do not match its tag.
-fn verify_staged_version(binary: &Path, expected: &str) -> Result<()> {
-    let output = std::process::Command::new(binary)
-        .arg("--version")
-        .output()
-        .with_context(|| format!("could not run the downloaded {binary:?}"))?;
-    if !output.status.success() {
-        bail!("the downloaded J'Lo binary failed to report its version.");
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let reported = stdout.split_whitespace().next_back().unwrap_or_default();
-    if reported != expected {
-        bail!("the release tagged {TAG_PREFIX}{expected} contains J'Lo {reported}.");
-    }
-    Ok(())
-}
-
-fn make_executable(binary: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt as _;
-    fs::set_permissions(binary, fs::Permissions::from_mode(0o755))
-        .with_context(|| format!("could not make {binary:?} executable"))
-}
-
-// ---------------------------------------------------------------------------
-// Publication
-// ---------------------------------------------------------------------------
-
-/// Hand over to the staged binary, which publishes itself.
-///
-/// `exec`, not a child process: the new `jlo-bin` carries its own shell
-/// templates and its own completions, so it is the only thing that can write a
-/// layout guaranteed to match it. `--publish-self` is what makes it rename
-/// itself into place - flushed, under the lock, and only once it is running -
-/// so this process never replaces the binary itself. `--reload` is what makes
-/// it print the `. jlo.sh` line on stdout for the wrapper to eval, and the
-/// forwarded wrapped mode is what makes it end that with the marker the
-/// wrapper looks for.
-///
-/// `lock` and `staged` stay alive until the call - `exec` replaces the process
-/// image and runs no destructors, so the fd (and the lock on it) carries into
-/// the new program, and the staged binary is still there to be run.
-fn publish(layout: &Layout, lock: Lock, staged: Staged, wrapped: bool) -> Result<(), CommandError> {
-    use std::os::unix::process::CommandExt as _;
-
-    let mut command = std::process::Command::new(&staged.binary);
-    if wrapped {
-        command.arg(crate::shellenv::WRAPPED);
-    }
-    let error = command
-        .arg(install::VERB)
-        .arg("--publish-self")
-        .arg("--reload")
-        // We hold the lock; the fd carries across the exec, so the new
-        // process must not try to take it again from a second open file
-        // description - that would deadlock it against its own parent's lock.
-        .arg("--locked")
-        // Explicit rather than inherited: this process may have resolved
-        // $JLO_HOME from $HOME, and the two must not disagree across the exec.
-        .env("JLO_HOME", layout.home())
-        .exec();
-    let binary = staged.binary.clone();
-    // The staging directory goes while the lock is still held.
-    drop(staged);
-    drop(lock);
     Err(CommandError::with_hint(
-        anyhow!("the new binary {binary:?} could not be started: {error}."),
-        "J'Lo was not changed; the binary you are running is still in place.",
+        anyhow!(
+            "this J'Lo is not the one installed at {:?}, the only one selfupdate replaces.",
+            layout.binary()
+        ),
+        "Update it the way it was installed: 'brew upgrade jlo' for Homebrew, ./install-local.sh for a local build.",
     ))
+}
+
+/// Run `tag`'s `install.sh`, pinned to `tag`.
+///
+/// `JLO_HOME` goes explicitly: this process may have resolved it from `$HOME`,
+/// and the installer must write where this binary reads. The child's stdout
+/// goes to stderr, because stdout is the channel the wrapper evaluates.
+fn run_installer(client: &ReleaseClient, layout: &Layout, tag: &str) -> Result<(), CommandError> {
+    let mut script =
+        tempfile::NamedTempFile::new().context("could not create a file for the installer")?;
+    client.fetch_installer(tag, script.as_file_mut())?;
+    let status = Command::new("sh")
+        .arg(script.path())
+        .env("JLO_INSTALL_BASE_URL", client.download_base(tag))
+        .env("JLO_HOME", layout.home())
+        .stdout(Stdio::from(std::io::stderr()))
+        .status()
+        .context("could not run the installer with sh")?;
+    if !status.success() {
+        return Err(CommandError::with_hint(
+            anyhow!("the installer of {tag} failed ({status})."),
+            format!("Run the installer directly: {INSTALL_LINE}"),
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -566,7 +238,7 @@ mod tests {
     }
 
     /// The tag format is a contract with release-please, and reading it wrong
-    /// decides whether the running binary gets overwritten. Fail loudly.
+    /// decides whether the running binary gets replaced. Fail loudly.
     #[test]
     fn an_unknown_tag_format_is_an_error_not_a_guess() {
         for tag in ["v0.4.0", "0.4.0", "jlo-v0.4.0", "jlo-bin-v"] {
@@ -601,35 +273,6 @@ mod tests {
     }
 
     #[test]
-    fn a_checksum_file_yields_bare_lowercase_hex() {
-        let hex = "a".repeat(64);
-        assert_eq!(
-            parse_checksum(&format!("{hex}  jlo-linux-x86_64.tar.gz\n")).as_deref(),
-            Some(hex.as_str())
-        );
-        assert_eq!(
-            parse_checksum(&format!("{}  x\n", "A".repeat(64))).as_deref(),
-            Some(hex.as_str())
-        );
-    }
-
-    /// An empty or truncated expectation must never pass for a match - the
-    /// same rule `install.sh` enforces with its glob and its `tr`.
-    #[test]
-    fn a_malformed_checksum_file_is_refused() {
-        for body in [
-            "",
-            "\n",
-            "not-a-checksum  x\n",
-            &format!("{}  x\n", "a".repeat(63)),
-            &format!("{}  x\n", "a".repeat(65)),
-            &format!("{}zz  x\n", "a".repeat(62)),
-        ] {
-            assert!(parse_checksum(body).is_none(), "accepted {body:?}");
-        }
-    }
-
-    #[test]
     fn version_comparison_is_semver_not_string() {
         assert!(is_newer("0.10.0", "0.9.0").expect("compare"));
         assert!(!is_newer("0.4.0", "0.4.0").expect("compare"));
@@ -640,11 +283,10 @@ mod tests {
 #[cfg(test)]
 mod http_tests {
     use super::*;
-    use sha2::Digest as _;
 
-    /// The whole discovery step depends on *not* following the redirect. If a
-    /// future ureq upgrade changes the default, or the per-request override is
-    /// dropped, this is what notices.
+    /// Discovery depends on *not* following the redirect. If a future ureq
+    /// changes the default, or the per-request override is dropped, this
+    /// notices.
     #[test]
     fn latest_tag_does_not_follow_the_redirect() {
         let mut server = mockito::Server::new();
@@ -671,8 +313,9 @@ mod http_tests {
         let mut server = mockito::Server::new();
         let _mock = server.mock("GET", "/latest").with_status(404).create();
 
-        let client = ReleaseClient::new(server.url());
-        let err = client.latest_tag().expect_err("404");
+        let err = ReleaseClient::new(server.url())
+            .latest_tag()
+            .expect_err("404");
         assert!(format!("{err:#}").contains("HTTP 404"), "{err:#}");
     }
 
@@ -681,102 +324,9 @@ mod http_tests {
         let mut server = mockito::Server::new();
         let _mock = server.mock("GET", "/latest").with_status(302).create();
 
-        let client = ReleaseClient::new(server.url());
-        let err = client.latest_tag().expect_err("no location");
+        let err = ReleaseClient::new(server.url())
+            .latest_tag()
+            .expect_err("no location");
         assert!(format!("{err:#}").contains("Location"), "{err:#}");
-    }
-
-    fn sha256(bytes: &[u8]) -> String {
-        hex::encode(sha2::Sha256::digest(bytes))
-    }
-
-    #[test]
-    fn download_writes_a_verified_file() {
-        let mut server = mockito::Server::new();
-        let body = b"a release tarball".to_vec();
-        let _sum = server
-            .mock("GET", "/download/jlo-bin-v1.0.0/pkg.tar.gz.sha256")
-            .with_body(format!("{}  pkg.tar.gz\n", sha256(&body)))
-            .create();
-        let _pkg = server
-            .mock("GET", "/download/jlo-bin-v1.0.0/pkg.tar.gz")
-            .with_body(body.clone())
-            .create();
-
-        let client = ReleaseClient::new(server.url());
-        let expected = client
-            .fetch_checksum("jlo-bin-v1.0.0", "pkg.tar.gz")
-            .expect("checksum");
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("pkg.tar.gz");
-        let mut file = File::create(&path).expect("create");
-        client
-            .download(
-                "jlo-bin-v1.0.0",
-                "pkg.tar.gz",
-                &expected,
-                &mut file,
-                &InstallUi::hidden("1.0.0"),
-            )
-            .expect("download");
-        assert_eq!(fs::read(&path).expect("read"), body);
-    }
-
-    #[test]
-    fn download_refuses_a_checksum_mismatch() {
-        let mut server = mockito::Server::new();
-        let _pkg = server
-            .mock("GET", "/download/jlo-bin-v1.0.0/pkg.tar.gz")
-            .with_body("something else")
-            .create();
-
-        let client = ReleaseClient::new(server.url());
-        let dir = tempfile::tempdir().expect("tempdir");
-        let mut file = File::create(dir.path().join("pkg.tar.gz")).expect("create");
-        let err = client
-            .download(
-                "jlo-bin-v1.0.0",
-                "pkg.tar.gz",
-                &sha256(b"the real thing"),
-                &mut file,
-                &InstallUi::hidden("1.0.0"),
-            )
-            .expect_err("mismatch");
-        assert!(format!("{err:#}").contains("checksum mismatch"), "{err:#}");
-    }
-
-    /// A release with no published checksum is refused rather than installed,
-    /// unlike the bootstrap - see `fetch_checksum`.
-    #[test]
-    fn a_missing_checksum_stops_the_update() {
-        let mut server = mockito::Server::new();
-        let _sum = server
-            .mock("GET", "/download/jlo-bin-v1.0.0/pkg.tar.gz.sha256")
-            .with_status(404)
-            .create();
-
-        let client = ReleaseClient::new(server.url());
-        let err = client
-            .fetch_checksum("jlo-bin-v1.0.0", "pkg.tar.gz")
-            .expect_err("404");
-        assert!(format!("{err:#}").contains("HTTP 404"), "{err:#}");
-    }
-
-    #[test]
-    fn a_malformed_checksum_asset_stops_the_update() {
-        let mut server = mockito::Server::new();
-        let _sum = server
-            .mock("GET", "/download/jlo-bin-v1.0.0/pkg.tar.gz.sha256")
-            .with_body("\n")
-            .create();
-
-        let client = ReleaseClient::new(server.url());
-        let err = client
-            .fetch_checksum("jlo-bin-v1.0.0", "pkg.tar.gz")
-            .expect_err("malformed");
-        assert!(
-            format!("{err:#}").contains("not a SHA256 checksum file"),
-            "{err:#}"
-        );
     }
 }

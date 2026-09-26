@@ -460,8 +460,9 @@ an install J'Lo did not make alone without calling it an error."
 
     /// Update jlo itself
     ///
-    /// Downloads the latest release, verifies its published SHA256, and
-    /// replaces this binary. Does nothing when it is already current.
+    /// Runs the installer of the latest release, which verifies its published
+    /// SHA256 and replaces this binary. When jlo is already current, rewrites
+    /// its shell files instead. Either way the calling shell is reloaded.
     Selfupdate,
 
     #[command(

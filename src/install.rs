@@ -106,17 +106,6 @@ impl Layout {
         &self.bin
     }
 
-    /// Where `selfupdate` stages the download, under the name [`Staging`]
-    /// sweeps once the staged binary has taken over. A *sibling* of the
-    /// binary, because `rename` is only atomic within one filesystem and
-    /// `bin/` can itself be a mount point or a symlink.
-    ///
-    /// The name is a contract across versions: the binary that stages is the
-    /// old one, the binary that sweeps is the release it downloaded.
-    pub(crate) fn staging_dir(&self, pid: u32) -> PathBuf {
-        self.bin.join(format!("{STAGING_PREFIX}-{pid}"))
-    }
-
     /// Remove staging directories an earlier run abandoned; see
     /// [`crate::store::sweep_stale_staging`] for why that is judged by age.
     pub(crate) fn sweep_stale_staging(&self) {
@@ -291,6 +280,9 @@ pub(crate) fn cmd_install(args: &[String], wrapped: bool) -> Result<(), CommandE
     } else {
         Lock::acquire(layout.home())?
     };
+    // An installer killed after unpacking leaves its staging directory, and
+    // every run has a new pid, so nothing else ever comes back for it.
+    layout.sweep_stale_staging();
     // Read before writing: what `report` prints turns on whether a receipt
     // was already there, and the new one is about to replace it.
     let had_receipt = read_receipt(&layout).is_some();
@@ -426,9 +418,10 @@ impl Drop for Staging {
 /// caller to `eval`, which is how the shell that ran `jlo selfupdate` gets the
 /// freshly generated wrapper in place of its resident one.
 ///
-/// Only `selfupdate` passes `--reload`. `install.sh` must not: its stdout is
-/// not evaluated by anything, and the line would be noise there - the
-/// activation block `report` prints is what a bootstrap needs.
+/// `selfupdate` calls this directly; `--reload` is for the updaters of J'Lo
+/// 0.4.0 and 0.5.0, which hand over to this verb. `install.sh` must not: its
+/// stdout is not evaluated by anything, and the line would be noise there -
+/// the activation block `report` prints is what a bootstrap needs.
 ///
 /// The two optional lines re-source only what this shell had *already*
 /// enabled, never more. The signal is the marker each stub sets after it
@@ -439,7 +432,7 @@ impl Drop for Staging {
 /// Every optional line is a full `if`, not `[ ... ] && . ...`: a
 /// `[ -n ... ]` that is simply false would fail the `&&`-joined payload and
 /// turn a successful update into a non-zero `jlo selfupdate`.
-fn print_reload(layout: &Layout, wrapped: bool) -> Result<()> {
+pub(crate) fn print_reload(layout: &Layout, wrapped: bool) -> Result<()> {
     let jlo_sh = sq(&display(&layout.home.join("jlo.sh")));
     let autoload = sq(&display(&layout.home.join("autoload.sh")));
     let completions = sq(&display(&layout.home.join("completions.sh")));
@@ -518,6 +511,18 @@ fn write_layout(layout: &Layout) -> Result<()> {
     if partial {
         ui::hint!("Re-run the installer once that path is writable to restore it.");
     }
+    Ok(())
+}
+
+/// Everything under `$JLO_HOME` but the binary: the generated files and the
+/// `~/.local/bin/jlo` link, by the same rules the install verb follows.
+///
+/// What `jlo selfupdate` does when J'Lo is already current - the repair for an
+/// upgrade cut off between the binary and its scripts. Only a required file
+/// that cannot be written is an error.
+pub(crate) fn refresh_layout(layout: &Layout) -> Result<()> {
+    write_layout(layout)?;
+    ensure_symlink(layout);
     Ok(())
 }
 

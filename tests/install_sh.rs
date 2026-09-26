@@ -2386,3 +2386,32 @@ fn staging_cleanup_stops_at_anything_it_did_not_put_there() {
         "{bystander:?} was swept away with the staging directory"
     );
 }
+
+/// An installer killed after unpacking leaves `.jlo-install-<pid>`, and every
+/// run has a new pid, so only an age-based sweep in the one publisher ever
+/// removes it. A fresh one may belong to an install running right now.
+#[test]
+fn the_install_verb_sweeps_abandoned_staging_only() {
+    let (dir, _) = install(None);
+    let home = dir.path().join("home");
+    let bin = home.join(".jlo").join("bin");
+
+    let abandoned = bin.join(".jlo-install-4242");
+    std::fs::create_dir_all(&abandoned).unwrap();
+    std::fs::write(abandoned.join("jlo-bin"), "").unwrap();
+    let two_hours_ago = std::time::SystemTime::now() - std::time::Duration::from_hours(2);
+    std::fs::File::open(&abandoned)
+        .unwrap()
+        .set_modified(two_hours_ago)
+        .unwrap();
+    let fresh = bin.join(".jlo-install-in-progress");
+    std::fs::create_dir_all(&fresh).unwrap();
+
+    let out = reinstall_over(&home);
+    assert!(out.status.success(), "{}", printed(&out));
+    assert!(
+        !abandoned.exists(),
+        "an abandoned staging directory survived"
+    );
+    assert!(fresh.exists(), "a fresh staging directory was swept");
+}
