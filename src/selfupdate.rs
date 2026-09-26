@@ -253,7 +253,7 @@ pub(crate) fn cmd_selfupdate(wrapped: bool) -> Result<(), CommandError> {
         CommandError::with_hint(
             e,
             "Re-run the installer to rewrite it: \
-             /bin/bash -c \"$(curl -fsSL https://raw.githubusercontent.com/java-loader/jlo/refs/heads/main/install.sh)\"",
+             /bin/bash -c \"$(curl -fsSL https://github.com/java-loader/jlo/releases/latest/download/install.sh)\"",
         )
     })?;
     if let Some(receipt) = &receipt {
@@ -291,8 +291,11 @@ pub(crate) fn cmd_selfupdate(wrapped: bool) -> Result<(), CommandError> {
 
     // Re-read under the lock, immediately before handing over. A slower
     // updater carrying an older release must not overwrite a newer install
-    // that landed while it was downloading - `install.sh` and
-    // `install-local.sh` write the same layout and take no lock.
+    // that landed since this process read what was installed. Every current
+    // publisher - `install.sh` and `install-local.sh` through the `__install`
+    // verb, and the self-heal - takes the lock held here and cannot publish
+    // while it is held, but one may have finished before it was taken; a
+    // publisher from a release before the lock existed can land at any time.
     guard_against_a_newer_install(&layout, latest)?;
 
     publish(&layout, lock, staged, wrapped)
@@ -360,10 +363,10 @@ fn check_owned(receipt: &install::Receipt, layout: &Layout) -> Result<(), Comman
 /// happens to say - including in the incomplete-install state where a crashed
 /// updater left a newer binary behind an older receipt.
 ///
-/// What this re-read still catches is the case the ADR names: a publication
-/// that finished while we were downloading. Since 0.4.0 that publication has
-/// to go through the install verb, which takes the same lock we are holding,
-/// so the remaining window is a writer that predates this release.
+/// What this re-read still catches is a publication that finished after
+/// this process started: one by a current publisher, which takes the same
+/// lock and so can only have finished before it was taken, or one by a
+/// publisher from a release before the lock existed, at any time.
 fn guard_against_a_newer_install(layout: &Layout, latest: &str) -> Result<()> {
     let Some(receipt) = install::load_receipt(layout)? else {
         return Ok(());
