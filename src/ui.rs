@@ -1926,8 +1926,18 @@ mod tests {
 
     // -- render_rows --
 
+    /// Pins `console`'s colour off for the rows under test, which would
+    /// otherwise follow `CLICOLOR_FORCE`, `NO_COLOR` and `TERM` in the
+    /// environment of whoever runs the suite. The switch is process-wide;
+    /// that is safe only because no test here wants colour on.
+    fn plain() {
+        console::set_colors_enabled(false);
+        console::set_colors_enabled_stderr(false);
+    }
+
     #[test]
     fn render_rows_puts_installed_names_first_and_marks_each_exception() {
+        plain();
         let mut outdated = name("21")
             .installed("21.0.11+10.0.LTS")
             .latest("21.0.12+101.0.LTS")
@@ -1966,6 +1976,7 @@ mod tests {
     /// than an update, and a superseded build is marked in the gutter.
     #[test]
     fn render_rows_says_offered_for_an_older_build_on_offer() {
+        plain();
         let listing = render_rows(&[name("21")
             .installed("21.0.12+101.0.LTS")
             .latest("21.0.11+10.0.LTS")
@@ -1984,12 +1995,14 @@ mod tests {
 
     #[test]
     fn tip_line_is_silent_when_everything_is_current() {
+        plain();
         let rows = vec![name("21").installed("21.0.12+101.0.LTS")];
         assert_eq!(tip_line(&rows), None);
     }
 
     #[test]
     fn tip_line_joins_both_offers_on_one_line() {
+        plain();
         // One line whatever applies: a listing that ends in a stack of
         // advice reads as nagging, and this one prints on every `jlo list`.
         let rows = vec![
@@ -2019,6 +2032,7 @@ mod tests {
     /// under `29-ea` does not.
     #[test]
     fn tip_line_leaves_to_update_what_update_removes() {
+        plain();
         let rows = vec![
             name("29-ea")
                 .installed("29.0.0-beta+1.0.ea")
@@ -2043,6 +2057,7 @@ mod tests {
 
     #[test]
     fn tip_line_offers_only_what_applies() {
+        plain();
         let rows = vec![
             name("21")
                 .installed("21.0.11+10.0.LTS")
@@ -2056,6 +2071,7 @@ mod tests {
 
     #[test]
     fn tip_line_does_not_offer_to_remove_an_unmanaged_install() {
+        plain();
         // `jlo remove --superseded` leaves it alone, so counting it would
         // promise a removal that will not happen.
         let rows = vec![

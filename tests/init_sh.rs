@@ -21,11 +21,11 @@
 mod common;
 
 use common::{
-    INTERPRETERS, bash_bin, chmod, fake_jdk_archive, install_fake_jdk, jdk_store_in, jlo_bin,
-    offer, shells,
+    INTERPRETERS, bash_bin, chmod, fake_jdk_archive, hermetic, install_fake_jdk, jdk_store_in,
+    jlo_bin, offer, shells,
 };
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Output;
 
 /// A `JLO_HOME` whose `bin/` holds the wrapper and a `jlo-bin`
 /// symlink to the binary under test, which is what the wrapper expects to find.
@@ -67,7 +67,8 @@ fn shell_source(name: &str) -> PathBuf {
         .join(name)
 }
 
-/// Source the wrapper from `home` into `sh`, then run `body`.
+/// Source the wrapper from `home` into `sh`, then run `body`. `home` doubles
+/// as `HOME`, so the binary behind the wrapper sees an empty store.
 fn run_in(sh: &str, home: &Path, body: &str) -> Output {
     let script = format!(
         r#"
@@ -78,10 +79,9 @@ fn run_in(sh: &str, home: &Path, body: &str) -> Output {
         home.display(),
     );
 
-    Command::new(sh)
+    hermetic(sh, home)
         .arg("-c")
         .arg(script)
-        .env("JLO_ADOPTIUM_API_URL", "http://127.0.0.1:1")
         .output()
         .unwrap_or_else(|e| panic!("failed to run {sh}: {e}"))
 }
@@ -210,7 +210,8 @@ fn the_wrapper_parses_under_every_shell_that_sources_it() {
         "the_wrapper_parses_under_every_shell_that_sources_it",
         INTERPRETERS.iter().chain(["/bin/sh"].iter()),
     ) {
-        let out = Command::new(sh)
+        let home = tempfile::tempdir().unwrap();
+        let out = hermetic(sh, home.path())
             .arg("-n")
             .arg(shell_source(WRAPPER))
             .output()
@@ -232,7 +233,12 @@ fn the_installer_parses_under_every_supported_shell() {
         "the_installer_parses_under_every_supported_shell",
         INTERPRETERS.iter().chain(["/bin/sh"].iter()),
     ) {
-        let out = Command::new(sh).arg("-n").arg(&installer).output().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let out = hermetic(sh, home.path())
+            .arg("-n")
+            .arg(&installer)
+            .output()
+            .unwrap();
         assert!(
             out.status.success(),
             "install.sh does not parse under {sh}: {}",
@@ -263,7 +269,7 @@ fn run_selfupdate(sh: &str, home: &Path, args: &str) -> Output {
         "#,
         home.display(),
     );
-    Command::new(sh).arg("-c").arg(script).output().unwrap()
+    hermetic(sh, home).arg("-c").arg(script).output().unwrap()
 }
 
 /// The point of moving `selfupdate` onto the `env`/`use` branch: the binary
@@ -415,7 +421,7 @@ fn run_interactive_without_comments(sh: &str, home: &Path, body: &str) -> Output
         "#,
         home.display(),
     );
-    Command::new(sh)
+    hermetic(sh, home)
         .args(flags)
         .arg("-c")
         .arg(script)
@@ -781,14 +787,15 @@ fn dump_wrapper(sh: &str, home: &Path) -> PathBuf {
 }
 
 /// Load only `dump` into a fresh `sh` and run `body` there. The environment
-/// is cleared down to `PATH` before `env` is applied, so no wrapper file is
-/// sourced and no `JLO_HOME` exists unless `env` sets one.
-fn replay_wrapper(sh: &str, dump: &Path, env: &[(&str, &str)], body: &str) -> Output {
-    Command::new(sh)
+/// is [`hermetic`] before `env` is applied, so no wrapper file is sourced and
+/// no `JLO_HOME` exists unless `env` sets one. `HOME` is `home` at startup
+/// even where the test is about its absence and unsets it in `body`: without
+/// one, zsh takes the real home from the user database and reads its
+/// `.zshenv`.
+fn replay_wrapper(sh: &str, home: &Path, dump: &Path, env: &[(&str, &str)], body: &str) -> Output {
+    hermetic(sh, home)
         .arg("-c")
         .arg(format!(". '{}'\n{body}", dump.display()))
-        .env_clear()
-        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
         .envs(env.iter().copied())
         .output()
         .unwrap_or_else(|e| panic!("failed to run {sh}: {e}"))
@@ -814,6 +821,7 @@ fn a_replayed_wrapper_without_jlo_home_uses_the_default_install() {
         ] {
             let out = replay_wrapper(
                 sh,
+                home.path(),
                 &dump,
                 &env,
                 "jlo exec -- a 'b c'\njlo env\necho \"probe=[${JLO_PROBE-}]\"",
@@ -849,6 +857,7 @@ fn a_replayed_wrapper_without_home_fails_without_aborting_a_nounset_shell() {
         let dump = dump_wrapper(sh, home.path());
         let out = replay_wrapper(
             sh,
+            home.path(),
             &dump,
             &[],
             "unset HOME JLO_HOME\nset -u\njlo exec -- a\necho \"survived rc=$?\"",

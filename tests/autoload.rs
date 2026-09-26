@@ -23,7 +23,6 @@ mod common;
 use common::{bash_bin, hermetic, jlo_bin, skip_missing};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::OnceLock;
 use tempfile::tempdir;
 
@@ -107,12 +106,11 @@ fn source_script(prologue: &str, times: usize) -> PromptCommand {
     // Unset expands to zero words, so nothing is printed.
     body.push_str("printf '%s\\0' \"${PROMPT_COMMAND[@]}\"\n");
 
-    let out = Command::new(bash_bin())
+    let out = hermetic(bash_bin(), jlo_home.path())
         .arg("-c")
         .arg(&body)
         .current_dir(cwd.path())
         .env("JLO_HOME", jlo_home.path())
-        .env_remove("PROMPT_COMMAND")
         .output()
         .unwrap_or_else(|e| panic!("failed to run {}: {e}", bash_bin()));
 
@@ -141,7 +139,8 @@ fn source_script(prologue: &str, times: usize) -> PromptCommand {
 /// bash only honours an array-valued `PROMPT_COMMAND` from 5.1 on; before that
 /// only element 0 ever runs, so array-shaped expectations are meaningless.
 fn array_prompt_command_supported() -> bool {
-    Command::new(bash_bin())
+    let home = tempdir().unwrap();
+    hermetic(bash_bin(), home.path())
         .arg("-c")
         .arg("(( BASH_VERSINFO[0] > 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] >= 1) ))")
         .output()
@@ -271,6 +270,12 @@ fn empty_array_gets_the_hook() {
 
 #[test]
 fn zsh_registers_chpwd_hook_once_and_leaves_prompt_command_alone() {
+    if skip_missing(
+        "zsh_registers_chpwd_hook_once_and_leaves_prompt_command_alone",
+        "zsh",
+    ) {
+        return;
+    }
     let cwd = tempdir().unwrap();
     let jlo_home = tempdir().unwrap();
     let script = autoload_script();
@@ -280,12 +285,11 @@ fn zsh_registers_chpwd_hook_once_and_leaves_prompt_command_alone() {
          print -r -- \"hooks=$chpwd_functions\"\nprint -r -- \"pc=${{PROMPT_COMMAND-}}\"\n"
     );
 
-    let out = Command::new("zsh")
+    let out = hermetic("zsh", jlo_home.path())
         .arg("-c")
         .arg(&body)
         .current_dir(cwd.path())
         .env("JLO_HOME", jlo_home.path())
-        .env_remove("PROMPT_COMMAND")
         .output()
         .expect("failed to run zsh");
 
@@ -325,13 +329,11 @@ fn hook_shells(test: &str) -> impl Iterator<Item = String> {
 /// pinned to the given temp trees, and hand back stdout. The stub `jlo`
 /// defined by the callers below records what the script asked for.
 fn run_sh(sh: &str, body: &str, home: &Path, jlo_home: &Path, cwd: &Path) -> String {
-    let out = Command::new(sh)
+    let out = hermetic(sh, home)
         .arg("-c")
         .arg(body)
         .current_dir(cwd)
-        .env("HOME", home)
         .env("JLO_HOME", jlo_home)
-        .env_remove("PROMPT_COMMAND")
         .output()
         .unwrap_or_else(|e| panic!("failed to run {sh}: {e}"));
 

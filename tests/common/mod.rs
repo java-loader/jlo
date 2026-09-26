@@ -10,6 +10,12 @@ use std::process::Command;
 /// reaching the real service.
 const DEAD_URL: &str = "http://127.0.0.1:1";
 
+/// The `PATH` every spawned process gets: the system directories alone, enough
+/// for `sh`, `bash`, `zsh`, `cp`, `tar` and `python3`. A tool found only on the
+/// developer's `PATH` is one CI does not have.
+#[allow(dead_code)]
+pub(crate) const HERMETIC_PATH: &str = "/usr/bin:/bin";
+
 /// The binary under test.
 #[allow(dead_code)]
 pub(crate) fn jlo_bin() -> PathBuf {
@@ -17,18 +23,18 @@ pub(crate) fn jlo_bin() -> PathBuf {
 }
 
 /// `program` run with nothing inherited from whoever runs the tests: jlo reads
-/// `JAVA_HOME`, `JLO_HOME`, `TERM`, the colour variables and more, and a test
-/// that forgets one passes on its author's machine and fails where the
-/// environment differs. `home` is required because the store and the `.jlorc`
-/// walk derive from it, and no default can be trusted not to be the real one.
-/// `PATH` is the system directories alone: enough for `sh`, `cp` and `python3`,
-/// the tools the tests and their fake releases run.
+/// `JAVA_HOME`, `JLO_HOME`, `TERM`, the colour variables and more, and a shell
+/// reads `BASH_ENV`, `ENV` and `ZDOTDIR` before the test body runs. A test that
+/// forgets one passes on its author's machine and fails where the environment
+/// differs. `home` is required because the store, the `.jlorc` walk and zsh's
+/// startup files derive from it, and no default can be trusted not to be the
+/// real one. A bare `program` is looked up on [`HERMETIC_PATH`].
 #[allow(dead_code)]
 pub(crate) fn hermetic(program: impl AsRef<OsStr>, home: &Path) -> Command {
     let mut cmd = Command::new(program);
     cmd.env_clear()
         .env("HOME", home)
-        .env("PATH", "/usr/bin:/bin")
+        .env("PATH", HERMETIC_PATH)
         .env("JLO_ADOPTIUM_API_URL", DEAD_URL)
         .env("JLO_RELEASE_API_URL", DEAD_URL);
     cmd
@@ -59,18 +65,27 @@ pub(crate) fn jlo_online(home: &Path) -> assert_cmd::Command {
 #[allow(dead_code)]
 pub(crate) const INTERPRETERS: &[&str] = &["/bin/bash", "zsh"];
 
-/// The bash the single-interpreter cases run, overridable with `JLO_TEST_BASH`.
+/// The bash the single-interpreter cases run: the system one, found on
+/// [`HERMETIC_PATH`]. `JLO_TEST_BASH` overrides it, as an absolute path.
 #[allow(dead_code)]
 pub(crate) fn bash_bin() -> String {
     std::env::var("JLO_TEST_BASH").unwrap_or_else(|_| "bash".to_string())
 }
 
 /// Returns true when the caller should skip this interpreter. Prints loudly: a
-/// silently skipped shell is indistinguishable from a passing one.
+/// silently skipped shell is indistinguishable from a passing one. Probed the
+/// way the tests run it, under [`hermetic`], so a shell only the host `PATH`
+/// has is skipped rather than failing to spawn.
 #[allow(dead_code)]
 #[must_use]
 pub(crate) fn skip_missing(test: &str, sh: &str) -> bool {
-    if Command::new(sh).arg("-c").arg("exit 0").output().is_ok() {
+    let home = tempfile::tempdir().unwrap();
+    if hermetic(sh, home.path())
+        .arg("-c")
+        .arg("exit 0")
+        .output()
+        .is_ok()
+    {
         return false;
     }
     eprintln!("SKIP {test}: {sh} is not installed here.");

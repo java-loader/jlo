@@ -15,7 +15,7 @@
 
 mod common;
 
-use common::{INTERPRETERS, chmod, hermetic, jlo_bin, shells, skip_missing, squote};
+use common::{HERMETIC_PATH, INTERPRETERS, chmod, hermetic, jlo_bin, shells, skip_missing, squote};
 use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -81,7 +81,7 @@ fn release_tarball(dir: &Path) -> PathBuf {
     std::fs::create_dir_all(&stage).unwrap();
     std::fs::copy(jlo_bin(), stage.join("jlo-bin")).unwrap();
     let tarball = dir.join("jlo.tar.gz");
-    let ok = Command::new("tar")
+    let ok = hermetic("tar", dir)
         .arg("-czf")
         .arg(&tarball)
         .arg("-C")
@@ -186,17 +186,11 @@ fn run_installer_over(
         std::fs::write(home.join(name), body).unwrap();
     }
 
-    let path = format!(
-        "{}:{}",
-        stubbin.display(),
-        std::env::var("PATH").unwrap_or_default()
-    );
-    let mut cmd = Command::new("/bin/sh");
+    let path = format!("{}:{HERMETIC_PATH}", stubbin.display());
+    let mut cmd = hermetic("/bin/sh", &home);
     cmd.arg(manifest().join("install.sh"))
-        .env("HOME", &home)
         .env("PATH", path)
-        .env("SHELL", shell)
-        .env_remove("JLO_HOME");
+        .env("SHELL", shell);
     if let Some(h) = jlo_home {
         cmd.env("JLO_HOME", h.replace("$HOME", &home.display().to_string()));
     }
@@ -223,11 +217,9 @@ fn printed(out: &Output) -> String {
 
 /// Sources `script` in a fresh interactive-style shell and runs `body`.
 fn source_and_run(sh: &str, home: &Path, script: &Path, body: &str) -> Output {
-    Command::new(sh)
+    hermetic(sh, home)
         .arg("-c")
         .arg(format!(". {}\n{body}", squote(script)))
-        .env("HOME", home)
-        .env_remove("JLO_HOME")
         .output()
         .unwrap()
 }
@@ -348,7 +340,11 @@ fn generated_entries_parse_under_every_supported_shell() {
             "generated_entries_parse_under_every_supported_shell",
             INTERPRETERS.iter().chain(["/bin/sh"].iter()),
         ) {
-            let out = Command::new(sh).arg("-n").arg(&script).output().unwrap();
+            let out = hermetic(sh, dir.path())
+                .arg("-n")
+                .arg(&script)
+                .output()
+                .unwrap();
             assert!(
                 out.status.success(),
                 "{name} does not parse under {sh}: {}",
@@ -475,10 +471,9 @@ fn the_printed_path_block_reaches_a_non_interactive_zsh() {
     let block = path_block(&printed(&out)).expect("installer printed no PATH heredoc");
 
     for _ in 0..2 {
-        let ran = Command::new("/bin/sh")
+        let ran = hermetic("/bin/sh", &home)
             .arg("-c")
             .arg(block.join("\n"))
-            .env("HOME", &home)
             .output()
             .unwrap();
         assert!(
@@ -488,11 +483,8 @@ fn the_printed_path_block_reaches_a_non_interactive_zsh() {
         );
     }
 
-    let probe = Command::new("zsh")
+    let probe = hermetic("zsh", &home)
         .args(["-c", r#"command -v jlo; print -r -- "PATH=$PATH""#])
-        .env_clear()
-        .env("HOME", &home)
-        .env("PATH", "/usr/bin:/bin")
         .output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&probe.stdout);
@@ -530,10 +522,9 @@ fn paste_blocks(home: &Path, blocks: &[Vec<String>]) {
         .map(|block| block.join("\n"))
         .collect::<Vec<_>>()
         .join("\n");
-    let ran = Command::new("/bin/sh")
+    let ran = hermetic("/bin/sh", home)
         .arg("-c")
         .arg(script)
-        .env("HOME", home)
         .output()
         .unwrap();
     assert!(
@@ -560,16 +551,13 @@ struct BashLoginProbe {
 }
 
 fn bash_login_probe(home: &Path, marker_var: &str) -> BashLoginProbe {
-    let out = Command::new("/bin/bash")
+    let out = hermetic("/bin/bash", home)
         .args([
             "-lc",
             &format!(
                 r#"printf 'jlo=[%s]\n' "$(type -P jlo)"; printf 'kind=[%s]\n' "$(type -t jlo)"; printf 'marker=[%s]\n' "${{{marker_var}-}}""#
             ),
         ])
-        .env_clear()
-        .env("HOME", home)
-        .env("PATH", "/usr/bin:/bin")
         .output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
@@ -875,7 +863,7 @@ fn a_jlo_home_with_shell_metacharacters_still_generates_valid_files() {
             "a_jlo_home_with_shell_metacharacters_still_generates_valid_files",
             INTERPRETERS.iter().chain(["/bin/sh"].iter()),
         ) {
-            let parsed = Command::new(sh).arg("-n").arg(&script).output().unwrap();
+            let parsed = hermetic(sh, &home).arg("-n").arg(&script).output().unwrap();
             assert!(
                 parsed.status.success(),
                 "{name} does not parse under {sh}: {}",
@@ -927,11 +915,9 @@ fn a_jlo_home_with_shell_metacharacters_still_generates_valid_files() {
         assert_ne!(appended, append, "could not redirect the printed command");
         // The heredoc body ends up in the profile verbatim, blank line
         // included; only the entry line has to load the wrapper.
-        let ran = Command::new(sh)
+        let ran = hermetic(sh, &home)
             .arg("-c")
             .arg(format!("{appended}\n. {}\ntype jlo", squote(&profile)))
-            .env("HOME", &home)
-            .env_remove("JLO_HOME")
             .output()
             .unwrap();
         let stdout = String::from_utf8_lossy(&ran.stdout);
@@ -966,11 +952,7 @@ fn a_failure_to_write_the_required_entry_fails_the_install() {
     let jlo_home = home.join("ro-jlo");
     std::fs::create_dir_all(jlo_home.join("bin")).unwrap();
 
-    let path = format!(
-        "{}:{}",
-        stubbin.display(),
-        std::env::var("PATH").unwrap_or_default()
-    );
+    let path = format!("{}:{HERMETIC_PATH}", stubbin.display());
     let script = dir.path().join("run.sh");
     std::fs::write(
         &script,
@@ -1001,9 +983,8 @@ fn a_failure_to_write_the_required_entry_fails_the_install() {
     )
     .unwrap();
 
-    let out = Command::new("/bin/sh")
+    let out = hermetic("/bin/sh", &home)
         .arg(&script)
-        .env("HOME", &home)
         .env("PATH", path)
         .env("JLO_HOME", &jlo_home)
         .output()
@@ -1056,10 +1037,8 @@ print -r -- "comps=[${{_comps[jlo]-}}]"
 print -r -- "whence=[$(whence -v _jlo 2>&1)]"
 "#
     );
-    Command::new("zsh")
+    hermetic("zsh", home)
         .args(["-f", "-c", &script])
-        .env("HOME", home)
-        .env_remove("JLO_HOME")
         .output()
         .unwrap()
 }
@@ -1182,18 +1161,9 @@ fn a_truncated_installer_does_nothing() {
         let script = dir.path().join("truncated.sh");
         std::fs::write(&script, lines[..cut].join("\n")).unwrap();
 
-        let out = Command::new("/bin/sh")
+        let out = hermetic("/bin/sh", &home)
             .arg(&script)
-            .env("HOME", &home)
-            .env(
-                "PATH",
-                format!(
-                    "{}:{}",
-                    stubbin.display(),
-                    std::env::var("PATH").unwrap_or_default()
-                ),
-            )
-            .env_remove("JLO_HOME")
+            .env("PATH", format!("{}:{HERMETIC_PATH}", stubbin.display()))
             .output()
             .unwrap();
 
@@ -1283,19 +1253,10 @@ fn an_unmanaged_jlo_on_path_is_left_untouched() {
     std::fs::create_dir_all(&local_bin).unwrap();
     std::fs::write(local_bin.join("jlo"), "#!/bin/sh\necho not ours\n").unwrap();
 
-    let out = Command::new("/bin/sh")
+    let out = hermetic("/bin/sh", &home)
         .arg(manifest().join("install.sh"))
-        .env("HOME", &home)
         .env("SHELL", "/bin/zsh")
-        .env(
-            "PATH",
-            format!(
-                "{}:{}",
-                stubbin.display(),
-                std::env::var("PATH").unwrap_or_default()
-            ),
-        )
-        .env_remove("JLO_HOME")
+        .env("PATH", format!("{}:{HERMETIC_PATH}", stubbin.display()))
         .output()
         .unwrap();
 
@@ -1321,13 +1282,10 @@ fn an_unmanaged_jlo_on_path_is_left_untouched() {
 fn source_autoload(sh: &str, home: &Path, prologue: &str, probe: &str) -> Output {
     let entry = squote(home.join(".jlo").join("jlo.sh"));
     let autoload = squote(home.join(".jlo").join("autoload.sh"));
-    Command::new(sh)
+    hermetic(sh, home)
         .arg("-c")
         .arg(format!("{prologue}\n. {entry}\n. {autoload}\n{probe}\n"))
         .current_dir(home)
-        .env("HOME", home)
-        .env_remove("JLO_HOME")
-        .env_remove("PROMPT_COMMAND")
         .output()
         .unwrap()
 }
@@ -1391,14 +1349,12 @@ fn jlo_sh_defines_a_working_jlo_under_sh() {
         "jlo_sh_defines_a_working_jlo_under_sh",
         ["/bin/sh", "/bin/dash"],
     ) {
-        let out = Command::new(sh)
+        let out = hermetic(sh, &home)
             .arg("-c")
             .arg(format!(
                 "set -eu\n. {}\njlo --version\n",
                 squote(home.join(".jlo").join("jlo.sh"))
             ))
-            .env("HOME", &home)
-            .env_remove("JLO_HOME")
             .output()
             .unwrap();
         assert!(
@@ -1641,19 +1597,10 @@ fn a_malformed_checksum_file_aborts_the_install_with(malformed: &str) {
 
     let home = dir.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
-    let out = Command::new("/bin/sh")
+    let out = hermetic("/bin/sh", &home)
         .arg(manifest().join("install.sh"))
-        .env("HOME", &home)
         .env("SHELL", "/bin/zsh")
-        .env(
-            "PATH",
-            format!(
-                "{}:{}",
-                stubbin.display(),
-                std::env::var("PATH").unwrap_or_default()
-            ),
-        )
-        .env_remove("JLO_HOME")
+        .env("PATH", format!("{}:{HERMETIC_PATH}", stubbin.display()))
         .output()
         .unwrap();
 
@@ -1723,7 +1670,7 @@ fn reload_in(sh: &str, home: &Path, jlo: &Path, enabled: &[&str]) -> Output {
 
     // `.` is shadowed *after* the opt-in sourcing above, so it only records
     // what the eval'd reload line does.
-    Command::new(sh)
+    hermetic(sh, home)
         .arg("-c")
         .arg(format!(
             "{sources}\
@@ -1732,8 +1679,6 @@ fn reload_in(sh: &str, home: &Path, jlo: &Path, enabled: &[&str]) -> Output {
              echo \"status=$?\"\n",
             squote(Path::new(&line))
         ))
-        .env("HOME", home)
-        .env_remove("JLO_HOME")
         .output()
         .unwrap()
 }
@@ -1813,7 +1758,7 @@ fn stubs_are_inert_under_set_e_when_the_target_is_missing_or_fails() {
             for stub in ["jlo.sh", "autoload.sh", "completions.sh"] {
                 // A stand-in `jlo`: without it autoload.sh is inert before it
                 // ever looks for its target.
-                let out = Command::new(sh)
+                let out = hermetic(sh, &home)
                     .arg("-e")
                     .arg("-c")
                     .arg(format!(
@@ -1821,8 +1766,6 @@ fn stubs_are_inert_under_set_e_when_the_target_is_missing_or_fails() {
                          echo \"alive markers=[${{_JLO_AUTOLOAD-}}${{_JLO_COMPLETIONS-}}]\"",
                         squote(jlo.join(stub))
                     ))
-                    .env("HOME", &home)
-                    .env_remove("JLO_HOME")
                     .output()
                     .unwrap();
                 let stdout = String::from_utf8_lossy(&out.stdout);
@@ -1881,7 +1824,7 @@ fn the_old_profile_paths_load_the_new_wrapper() {
 
     for sh in shells("the_old_profile_paths_load_the_new_wrapper", INTERPRETERS) {
         // The old block's own three lines, verbatim.
-        let out = Command::new(sh)
+        let out = hermetic(sh, &home)
             .arg("-c")
             .arg(
                 "export JLO_HOME=\"$HOME/.jlo\"\n\
@@ -1892,8 +1835,6 @@ fn the_old_profile_paths_load_the_new_wrapper() {
                  echo \"marker=[${_JLO_AUTOLOAD-}]\"\n\
                  jlo --version",
             )
-            .env("HOME", &home)
-            .env_remove("JLO_HOME")
             .output()
             .unwrap();
         let stdout = String::from_utf8_lossy(&out.stdout);
@@ -1982,14 +1923,9 @@ fn an_installer_refuses_a_jlo_home_with_a_newline() {
     let home = dir.path().join("home");
     let jlo_home = home.join("J\u{f6}rg").join(".jlo");
     std::fs::create_dir_all(&home).unwrap();
-    let path = format!(
-        "{}:{}",
-        stubbin.display(),
-        std::env::var("PATH").unwrap_or_default()
-    );
-    let out = Command::new("/bin/sh")
+    let path = format!("{}:{HERMETIC_PATH}", stubbin.display());
+    let out = hermetic("/bin/sh", &home)
         .arg(manifest().join("install.sh"))
-        .env("HOME", &home)
         .env("PATH", path)
         .env("SHELL", "/bin/zsh")
         .env("LC_ALL", "C")
@@ -2111,17 +2047,11 @@ fn install_sh_leaves_no_staging_directory_behind() {
 /// Runs the real `install.sh` a second time against the same `HOME`, reusing
 /// the stubbed `curl` and `tar` the first run was given.
 fn reinstall_with_installer(dir: &Path, home: &Path) -> Output {
-    let path = format!(
-        "{}:{}",
-        dir.join("stubbin").display(),
-        std::env::var("PATH").unwrap_or_default()
-    );
-    Command::new("/bin/sh")
+    let path = format!("{}:{HERMETIC_PATH}", dir.join("stubbin").display());
+    hermetic("/bin/sh", home)
         .arg(manifest().join("install.sh"))
-        .env("HOME", home)
         .env("PATH", path)
         .env("SHELL", "/bin/zsh")
-        .env_remove("JLO_HOME")
         .output()
         .unwrap()
 }
@@ -2155,7 +2085,7 @@ fn a_held_lock_leaves_the_installed_binary_untouched() {
 
     let lock = jlo_home.join(".selfupdate.lock");
     let ready = dir.path().join("lock-held");
-    let holder = Command::new("python3")
+    let holder = hermetic("python3", &home)
         .arg("-c")
         .arg(
             "import fcntl, pathlib, sys, time\n\
@@ -2231,17 +2161,11 @@ fn the_download_origin_is_overridable() {
     let home = dir.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
 
-    let path = format!(
-        "{}:{}",
-        stubbin.display(),
-        std::env::var("PATH").unwrap_or_default()
-    );
-    let out = Command::new("/bin/sh")
+    let path = format!("{}:{HERMETIC_PATH}", stubbin.display());
+    let out = hermetic("/bin/sh", &home)
         .arg(manifest().join("install.sh"))
-        .env("HOME", &home)
         .env("PATH", path)
         .env("SHELL", "/bin/zsh")
-        .env_remove("JLO_HOME")
         .env("JLO_INSTALL_BASE_URL", "https://example.invalid/jlo")
         .output()
         .unwrap();
@@ -2282,7 +2206,8 @@ fn the_download_origin_is_overridable() {
 /// That difference is why the published package names differ, so the test has
 /// to ask the same question the installer asks.
 fn uname_m() -> String {
-    let out = Command::new("uname").arg("-m").output().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let out = hermetic("uname", home.path()).arg("-m").output().unwrap();
     String::from_utf8_lossy(&out.stdout).trim().to_owned()
 }
 

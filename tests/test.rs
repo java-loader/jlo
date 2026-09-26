@@ -1054,7 +1054,7 @@ fn env_does_not_let_a_hostile_path_execute_when_evaluated() {
         INTERPRETERS,
     ) {
         let _ = std::fs::remove_file(&marker);
-        let out = std::process::Command::new(sh)
+        let out = hermetic(sh, home.path())
             .arg("-c")
             .arg(format!("eval {}", squote(&stdout)))
             .output()

@@ -28,7 +28,6 @@ use sha2::{Digest, Sha256};
 use std::fs::{self, File};
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::{Duration, SystemTime};
 
 /// A version no real release will ever carry, so the "is it newer?" check has
@@ -62,7 +61,7 @@ impl Install {
         // by this process leaks into any child another test thread forks at
         // that moment, and exec'ing `target` then fails with ETXTBSY until
         // that child has exec'd in turn.
-        let copied = Command::new("cp")
+        let copied = hermetic("cp", home.path())
             .arg(jlo_bin())
             .arg(&target)
             .status()
@@ -475,7 +474,7 @@ fn a_wrapped_update_reloads_the_calling_shell() {
             .unwrap();
         assert!(layout.status.success(), "{layout:?}");
 
-        let out = Command::new(sh)
+        let out = hermetic(sh, install.path())
             .arg("-c")
             .arg(
                 r#". "$JLO_HOME/jlo.sh"
@@ -486,7 +485,6 @@ fn a_wrapped_update_reloads_the_calling_shell() {
                 if typeset -f jlo | grep -q stale; then echo reloaded=no; else echo reloaded=yes; fi"#,
             )
             .env("JLO_HOME", install.path())
-            .env("HOME", install.path())
             .env("JLO_RELEASE_API_URL", release.url())
             .output()
             .unwrap();
@@ -650,7 +648,7 @@ fn a_held_lock_stops_a_second_update() {
 
     let lock = install.path().join(".selfupdate.lock");
     let ready = install.path().join("lock-held");
-    let holder = Command::new("python3")
+    let holder = hermetic("python3", install.path())
         .arg("-c")
         .arg(
             "import fcntl, pathlib, sys, time\n\
