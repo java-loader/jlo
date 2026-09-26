@@ -79,7 +79,7 @@ jobs:
       # dispatch the workflow file comes from main but the sources must not.
       - uses: actions/checkout@v7
         with:
-          ref: ${{ needs.resolve.outputs.tag_name }}
+          ref: refs/tags/${{ needs.resolve.outputs.tag_name }}
 
       - name: Install Rust (if needed)
         run: rustup update
@@ -125,8 +125,37 @@ jobs:
   upload:
     needs: [resolve, build]
     if: ${{ always() && needs.resolve.result == 'success' && needs.build.result == 'success' }}
+    # Written out in full because a job-level block replaces the workflow-wide
+    # one: the release upload needs contents: write, the attestation of
+    # install.sh an OIDC token.
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
     runs-on: ubuntu-latest
     steps:
+      # install.sh ships with the release, so the documented install line
+      # (releases/latest/download/install.sh) fetches the script and the
+      # tarball from one tag. Taken from the tagged checkout for the same reason
+      # build is: on a manual dispatch the workflow file comes from main, and
+      # the script must not.
+      - name: Check out install.sh of the tag
+        uses: actions/checkout@v7
+        with:
+          ref: refs/tags/${{ needs.resolve.outputs.tag_name }}
+          path: tagged
+          sparse-checkout: /install.sh
+          sparse-checkout-cone-mode: false
+
+      # No .sha256 beside it: a script piped into a shell is never checked
+      # against one, and it would share the script's origin anyway. Verifiable
+      # with
+      #   gh attestation verify install.sh --repo java-loader/jlo
+      - name: Attest install.sh
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: tagged/install.sh
+
       - name: Download all artifacts
         uses: actions/download-artifact@v8
         with:
@@ -140,5 +169,6 @@ jobs:
           files: |
             jlo-*.tar.gz
             jlo-*.tar.gz.sha256
+            tagged/install.sh
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
