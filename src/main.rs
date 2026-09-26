@@ -1,6 +1,6 @@
-// Linux and macOS are the whole of the supported surface: `exec`, the
-// install lock and `selfupdate`'s handover are Unix system calls, and a build
-// that compiled elsewhere would only fail at run time.
+// Linux and macOS are the whole of the supported surface: `exec` and the
+// executable bits the installers rely on are Unix, and a build that compiled
+// elsewhere would only fail at run time.
 #[cfg(not(unix))]
 compile_error!("jlo supports Linux and macOS only");
 
@@ -118,20 +118,10 @@ fn run() -> Result<(), CommandError> {
 
     // The install verb is intercepted here for the same reason, and the reason
     // is sharper still: it writes the shell layout, so it must not show up in
-    // the completions it generates. `install.sh`, `install-local.sh` and
-    // `selfupdate` are its only callers.
+    // the completions it generates. `install.sh` and `install-local.sh` are its
+    // only callers, and the updaters of 0.4.0 and 0.5.0 hand over to it.
     if first == Some(install::VERB) {
         return install::cmd_install(&argv[2..], wrapped);
-    }
-
-    // A receipt that disagrees with this binary is the known-incomplete state:
-    // the binary landed, the generated files did not. An invocation clears it
-    // rather than reporting it, which is why there is no `--repair` verb.
-    // Not a wrapped one: the cd hook calls through the wrapper on every
-    // directory change; a direct call (`list`, `home`, `current`, `--version`)
-    // still heals.
-    if !wrapped {
-        install::self_heal();
     }
 
     let api_url =
@@ -555,13 +545,11 @@ pub(crate) fn jlo_home_dir() -> anyhow::Result<PathBuf> {
     }
 
     // Checked once, here, rather than at each of the places that write it
-    // out. `install` spells this path into the generated stubs and into
-    // `install-receipt.json`, and it spells it with `display()`, which
-    // substitutes U+FFFD for bytes it cannot decode: the files would land at
-    // the real path while naming a different one, leaving a wrapper pointing
-    // at a directory that does not exist and a receipt that fails every
-    // later ownership check. There is nothing jlo can do with a home it
-    // cannot write down.
+    // out. `install` spells this path into the generated stubs with
+    // `display()`, which substitutes U+FFFD for bytes it cannot decode: the
+    // files would land at the real path while naming a different one, leaving
+    // a wrapper pointing at a directory that does not exist. There is nothing
+    // jlo can do with a home it cannot write down.
     if path.to_str().is_none() {
         return Err(anyhow!(
             "JLO_HOME is not valid UTF-8, so jlo cannot write it into the shell code it generates: '{}'",
@@ -657,10 +645,9 @@ mod tests {
 
     /// The values that cannot be a home, refused here rather than at
     /// each of the places that write the layout out. `install` spells this
-    /// path into the generated stubs, into the `~/.local/bin/jlo` symlink
-    /// target and into `install-receipt.json`, so a value that survives to
-    /// there produces an install that is wrong in a different way for each
-    /// of them.
+    /// path into the generated stubs and into the `~/.local/bin/jlo` symlink
+    /// target, so a value that survives to there produces an install that is
+    /// wrong in a different way for each of them.
     #[test]
     #[serial_test::serial]
     fn jlo_home_dir_refuses_a_value_it_could_not_write_down() {

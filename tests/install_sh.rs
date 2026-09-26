@@ -3,7 +3,7 @@
 //! `install.sh` is a bootstrap now: it downloads one file, verifies it,
 //! unpacks it and hands over to the binary, which owns everything under
 //! `$JLO_HOME` - the three entry stubs, the two wrapper dialects, the
-//! completions, the symlink and the receipt. These tests run the real
+//! completions and the symlink. These tests run the real
 //! `install.sh` against a temporary `HOME` with `curl` stubbed out, then
 //! source the generated files from real shells.
 //!
@@ -1023,10 +1023,6 @@ fn a_failure_to_write_the_required_entry_fails_the_install() {
         !said.contains("To activate"),
         "install.sh printed activation instructions for a layout it never wrote: {said}"
     );
-    assert!(
-        !jlo_home.join("install-receipt.json").is_file(),
-        "the receipt was committed although the install never finished"
-    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1213,16 +1209,12 @@ fn the_binary_writes_the_whole_layout() {
         "jlo.sh",
         "autoload.sh",
         "completions.sh",
-        "install-receipt.json",
         "bin/jlo-bin",
         "bin/jlo-init.sh",
         "bin/jlo-autoload.sh",
         "bin/jlo-completions.zsh",
         "completions/jlo.bash",
         "completions/_jlo",
-        // Kept, not unlinked: a J'Lo 0.5.0 or older publisher still races an
-        // unlink against the next `open`.
-        ".selfupdate.lock",
     ] {
         assert!(jlo.join(rel).is_file(), "install did not write {rel}");
     }
@@ -1521,109 +1513,14 @@ fn a_missing_hashing_tool_refuses_and_keeps_the_existing_install() {
     assert_existing_install_untouched(&home, binary_ino, &jlo_sh);
 }
 
-// ---------------------------------------------------------------------------
-// The receipt, and what a mismatched one heals
-// ---------------------------------------------------------------------------
-
-#[test]
-fn the_receipt_records_the_version_and_the_paths() {
-    let (dir, _) = install(None);
-    let home = dir.path().join("home");
-    let receipt = std::fs::read_to_string(home.join(".jlo").join("install-receipt.json")).unwrap();
-    for expected in [
-        "\"version\"",
-        "\"method\": \"installer\"",
-        &format!(
-            "\"binary\": \"{}\"",
-            home.join(".jlo/bin/jlo-bin").display()
-        ),
-        &format!("\"symlink\": \"{}\"", home.join(".local/bin/jlo").display()),
-    ] {
-        assert!(
-            receipt.contains(expected),
-            "receipt is missing {expected}:\n{receipt}"
-        );
-    }
-}
-
-/// A receipt whose version does not match the binary is the known-incomplete
-/// state - the binary landed, the generated files did not. There is
-/// deliberately no `--repair` verb and no version guard in the wrapper: any
-/// invocation regenerates the files, with no network and nothing for the user
-/// to learn.
-#[test]
-fn a_stale_receipt_makes_the_next_invocation_rewrite_the_files() {
-    let (dir, _) = install(None);
-    let home = dir.path().join("home");
-    let jlo = home.join(".jlo");
-    let receipt = jlo.join("install-receipt.json");
-
-    // An interrupted publish: the receipt is from an older version and the
-    // generated files never landed.
-    let body = std::fs::read_to_string(&receipt).unwrap();
-    let stale = body.replacen(
-        &format!("\"version\": \"{}\"", env!("CARGO_PKG_VERSION")),
-        "\"version\": \"0.0.1-stale\"",
-        1,
-    );
-    assert_ne!(stale, body, "could not make the receipt stale");
-    std::fs::write(&receipt, stale).unwrap();
-    std::fs::remove_file(jlo.join("jlo.sh")).unwrap();
-    std::fs::remove_file(jlo.join("bin").join("jlo-init.sh")).unwrap();
-
-    // Any command at all, and one that needs no network.
-    let out = hermetic(jlo.join("bin").join("jlo-bin"), &home)
-        .arg("--version")
-        .env("JLO_HOME", &jlo)
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-
-    assert!(jlo.join("jlo.sh").is_file(), "jlo.sh was not regenerated");
-    assert!(
-        jlo.join("bin").join("jlo-init.sh").is_file(),
-        "the wrapper was not regenerated"
-    );
-    assert!(
-        std::fs::read_to_string(&receipt)
-            .unwrap()
-            .contains(&format!("\"version\": \"{}\"", env!("CARGO_PKG_VERSION"))),
-        "the receipt still disagrees with the binary"
-    );
-}
-
-/// An optional stub that cannot be written is a warning, not a failure, and
-/// the receipt is still written afterwards.
-///
-/// That is the one thing the receipt deliberately does not promise.
-/// Suppressing it here would overload the state that already means something
-/// else (a missing receipt is an install from before receipts existed, not a
-/// broken one), and would put every later invocation, including the one the cd
-/// hook makes, into a rewrite for as long as the underlying write kept
-/// failing. What the user gets instead is the warning, by name, and the
-/// repair.
+/// An optional stub that cannot be written is a warning, not a failure: a
+/// convenience lost is not a broken install. The user gets the warning, by
+/// name, and the repair.
 #[test]
 fn an_optional_stub_that_cannot_be_written_warns_and_names_the_repair() {
     let (dir, _) = install(None);
     let home = dir.path().join("home");
     let jlo = home.join(".jlo");
-    let receipt = jlo.join("install-receipt.json");
-    // Start from a receipt that does *not* match the binary, so the assertion
-    // below is that the receipt advanced - not merely that one still exists.
-    let before = std::fs::read_to_string(&receipt).unwrap();
-    std::fs::write(
-        &receipt,
-        before.replacen(
-            &format!("\"version\": \"{}\"", env!("CARGO_PKG_VERSION")),
-            "\"version\": \"0.0.1-stale\"",
-            1,
-        ),
-    )
-    .unwrap();
     // A directory where a file belongs: the rename onto it cannot succeed.
     std::fs::remove_file(jlo.join("autoload.sh")).unwrap();
     std::fs::create_dir(jlo.join("autoload.sh")).unwrap();
@@ -1643,12 +1540,6 @@ fn an_optional_stub_that_cannot_be_written_warns_and_names_the_repair() {
         printed(&out).contains("Re-run the installer"),
         "the warning did not say how to recover: {}",
         printed(&out)
-    );
-    assert!(
-        std::fs::read_to_string(&receipt)
-            .unwrap()
-            .contains(&format!("\"version\": \"{}\"", env!("CARGO_PKG_VERSION"))),
-        "a required file landed but the receipt still names the old version"
     );
 }
 
@@ -2047,10 +1938,8 @@ fn an_installer_refuses_a_jlo_home_with_a_newline() {
 /// The installer must not write `bin/jlo-bin` itself.
 ///
 /// It unpacks into a staging directory beside the destination and hands the
-/// staged binary to the install verb, which renames it into place *under the
-/// publication lock*. Writing it directly is how two publishers fail to
-/// serialise: only one of them is inside the gate, and on Linux overwriting a
-/// running executable is `ETXTBSY` besides.
+/// staged binary to the install verb, which renames it into place. On Linux
+/// overwriting a running executable is `ETXTBSY`.
 ///
 /// Beside the destination, not under `$TMPDIR`: `rename` is atomic only
 /// within one filesystem.
@@ -2104,7 +1993,7 @@ fn publish_self_renames_the_staged_binary_into_the_layout() {
     );
 }
 
-/// `install-local.sh` and the self-heal both run the binary that is *already*
+/// `install-local.sh` and a re-run both run the binary that is *already*
 /// published. Renaming it onto itself would be a no-op at best, so the verb
 /// has to recognise that case rather than trip over it.
 #[test]
@@ -2157,94 +2046,40 @@ fn reinstall_with_installer(dir: &Path, home: &Path) -> Output {
         .unwrap()
 }
 
-/// The binary must not be replaced outside the publication lock.
-///
-/// `install.sh` used to unpack straight over `$JLO_HOME/bin/jlo-bin` and only
-/// then hand over to the install verb, which is where the lock is first taken.
-/// The one file every other part of the layout is generated *from* was
-/// therefore written by a publisher standing outside the gate: a concurrent
-/// `selfupdate` holding the lock could have the executable swapped under it.
-///
-/// With the lock held by somebody else, a correct installer changes nothing at
-/// the destination.
-///
-/// The holder is a `python3` one-liner rather than `flock(1)`, which is a
-/// util-linux tool and absent on macOS - a test that silently skips on the
-/// developer's own machine is not a test.
+/// A refused publish is cleaned up by the process that was refused: the
+/// installer `exec`d it and has no line left to run. The trigger is a rejected
+/// option, which is read *after* the staging guard is armed - otherwise every
+/// such refusal leaves a copy of J'Lo in `bin/`.
 #[test]
-fn a_held_lock_leaves_the_installed_binary_untouched() {
+fn a_rejected_option_leaves_the_binary_and_no_staging() {
     let (dir, _) = install(None);
     let home = dir.path().join("home");
     let jlo_home = home.join(".jlo");
     let binary = jlo_home.join("bin").join("jlo-bin");
-
-    // A sentinel rather than the real binary: anything that reaches the
-    // destination while the lock is held overwrites it, and that is the whole
-    // assertion.
-    let sentinel = b"held by somebody else\n";
+    let sentinel = b"the installed binary\n";
     std::fs::write(&binary, sentinel).unwrap();
 
-    let lock = jlo_home.join(".selfupdate.lock");
-    let ready = dir.path().join("lock-held");
-    let holder = hermetic("python3", &home)
-        .arg("-c")
-        .arg(
-            "import fcntl, pathlib, sys, time\n\
-             f = open(sys.argv[1], 'w')\n\
-             fcntl.flock(f, fcntl.LOCK_EX)\n\
-             pathlib.Path(sys.argv[2]).write_text('held')\n\
-             time.sleep(30)\n",
-        )
-        .arg(&lock)
-        .arg(&ready)
-        .spawn();
-    let Ok(mut holder) = holder else {
-        eprintln!(
-            "SKIP a_held_lock_leaves_the_installed_binary_untouched: python3 is not installed here."
-        );
-        return;
-    };
+    let stage = jlo_home.join("bin").join(".jlo-install-test");
+    std::fs::create_dir_all(&stage).unwrap();
+    std::fs::copy(jlo_bin(), stage.join("jlo-bin")).unwrap();
 
-    let mut held = false;
-    for _ in 0..100 {
-        if ready.exists() {
-            held = true;
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
-
-    let out = held.then(|| reinstall_with_installer(dir.path(), &home));
-    let _ = holder.kill();
-    let _ = holder.wait();
-    assert!(held, "the holder never took the lock");
-
-    let out = out.unwrap();
-    assert!(
-        !out.status.success(),
-        "the installer ignored the lock: {}",
-        String::from_utf8_lossy(&out.stderr)
+    let out = run_staged(
+        hermetic(stage.join("jlo-bin"), &home)
+            .args(["__install", "--publish-self", "--no-such-option"])
+            .env("JLO_HOME", &jlo_home)
+            .env("SHELL", "/bin/zsh"),
     );
-    // Compared as a boolean: a mismatch here means the real binary landed,
-    // and printing a few megabytes of Mach-O helps nobody.
+    assert_eq!(out.status.code(), Some(1), "{}", printed(&out));
+    assert!(
+        printed(&out).contains("unknown option"),
+        "{}",
+        printed(&out)
+    );
     assert!(
         std::fs::read(&binary).unwrap() == sentinel,
-        "{binary:?} was replaced although another publisher held the lock"
+        "{binary:?} was replaced by a refused publish"
     );
-
-    // The installer `exec`s the staged binary and has no line left to run, so
-    // a refused publish can only be cleaned up by the process that was
-    // refused. Otherwise every failed install leaves a copy of J'Lo in `bin/`.
-    let bin = jlo_home.join("bin");
-    let leftovers: Vec<_> = std::fs::read_dir(&bin)
-        .unwrap()
-        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-        .filter(|name| name.starts_with(".jlo-install"))
-        .collect();
-    assert!(
-        leftovers.is_empty(),
-        "the refused install left staging directories in {bin:?}: {leftovers:?}"
-    );
+    assert!(!stage.exists(), "the refused publish left {stage:?} behind");
 }
 
 /// The download origin is injectable, the way `JLO_ADOPTIUM_API_URL` and

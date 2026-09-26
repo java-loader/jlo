@@ -12,44 +12,31 @@
 //! `clap_complete` still emits hidden subcommands into generated completion
 //! scripts, and clap's "did you mean" engine still offers it for typos.
 //!
-//! Publication is ordered: the generated scripts first, the receipt last, so
-//! the receipt is the commit marker. `self_heal` below reads it and rewrites
-//! the scripts when it names a different version than this binary, with no
-//! network and no command for the user to learn. Every file goes down as a
-//! temp file plus a `rename` *in its own directory*, so an interruption leaves
-//! a stale script rather than a truncated one.
-//!
-//! What that covers is exactly one state, and the bound is worth stating: an
-//! *upgrade* interrupted between the binary and the scripts. A first install
-//! interrupted before its first receipt is indistinguishable from an install
-//! that predates receipts, and neither is healed - re-running the installer is
-//! the documented repair for both, and for anything else the receipt does not
-//! speak to.
+//! Every file goes down as a temp file plus a `rename` *in its own
+//! directory*, so an interruption leaves a stale script rather than a
+//! truncated one. A binary published without its scripts - an upgrade cut
+//! off between the two - is repaired by `jlo selfupdate`, which rewrites
+//! the layout when J'Lo is already current, or by the installer.
 
 use crate::CommandError;
 use crate::store::same_path;
 use crate::ui;
 use anyhow::{Context, Result, anyhow};
-use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 /// The argv token that selects this verb. Underscore-prefixed because it is
-/// not part of the CLI contract: `install.sh`, `install-local.sh` and (from
-/// 0.4.0) `selfupdate` call it, users do not.
+/// not part of the CLI contract: `install.sh` and `install-local.sh` call it,
+/// and the updaters of 0.4.0 and 0.5.0 hand over to it; users do not.
 pub(crate) const VERB: &str = "__install";
-
-/// Where the install came from. Recorded in the receipt so a later
-/// `selfupdate` can tell an install it owns from one a package manager placed.
-const DEFAULT_METHOD: &str = "installer";
 
 /// The published binary's file name, which the installers also give the file
 /// they stage - so the staging sweep knows exactly which file was its own.
 const BINARY_NAME: &str = "jlo-bin";
 
-/// What `install.sh`, `install-local.sh` and `selfupdate` name the directory
-/// they unpack into, beside the binary they are about to publish. Matched
+/// What `install.sh` and `install-local.sh` name the directory they unpack
+/// into, beside the binary they are about to publish. Matched
 /// rather than reconstructed: the pid in the real name belongs to whoever
 /// staged it, usually a shell, not to us.
 const STAGING_PREFIX: &str = ".jlo-install";
@@ -94,10 +81,6 @@ impl Layout {
         }
     }
 
-    fn receipt(&self) -> PathBuf {
-        self.home.join("install-receipt.json")
-    }
-
     pub(crate) fn home(&self) -> &Path {
         &self.home
     }
@@ -108,7 +91,7 @@ impl Layout {
 
     /// Remove staging directories an earlier run abandoned; see
     /// [`crate::store::sweep_stale_staging`] for why that is judged by age.
-    pub(crate) fn sweep_stale_staging(&self) {
+    fn sweep_stale_staging(&self) {
         crate::store::sweep_stale_staging(&self.bin, STAGING_PREFIX);
     }
 
@@ -122,122 +105,6 @@ impl Layout {
     }
 }
 
-/// `$JLO_HOME/install-receipt.json` - the uv/cargo-dist model.
-///
-/// Written last, so it is the commit marker for the whole publication. A
-/// receipt whose `version` disagrees with the running binary is the
-/// known-incomplete state; see [`self_heal`].
-#[derive(Debug, Serialize, Deserialize)]
-pub(crate) struct Receipt {
-    pub(crate) version: String,
-    pub(crate) method: String,
-    pub(crate) jlo_home: String,
-    pub(crate) binary: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    symlink: Option<String>,
-}
-
-// ---------------------------------------------------------------------------
-// The publication lock
-// ---------------------------------------------------------------------------
-
-/// Where the lock file sits. Under `$JLO_HOME`, beside the layout it guards.
-///
-/// It stays on disk between runs: the `flock` on it is the whole lock, so an
-/// unlocked leftover is not a stale lock and needs no cleaning up.
-const LOCK_FILE: &str = ".selfupdate.lock";
-
-/// An exclusive `flock` under `$JLO_HOME`, held for as long as somebody is
-/// writing the layout.
-///
-/// It lives here rather than in `selfupdate` because *this* is the only code
-/// that publishes: `install.sh`, `install-local.sh`, `selfupdate` and the
-/// self-heal all end up in [`write_layout`] + [`write_receipt`], and a lock
-/// only one of them takes guards nothing. The binary, the generated scripts
-/// and the receipt are separate filesystem writes, and no `rename` makes them
-/// one transaction.
-#[derive(Debug)]
-pub(crate) struct Lock {
-    /// Never read: the lock lives on the open file description, so holding
-    /// this alive *is* the whole behaviour. Underscore-prefixed so that stays
-    /// legible rather than looking like an oversight.
-    ///
-    /// `None` for the lock inherited across `selfupdate`'s `exec`: the fd is
-    /// open in this process, but no `File` here owns it.
-    _file: Option<fs::File>,
-}
-
-impl Lock {
-    /// `None` when somebody else holds it. Fails only when the lock file
-    /// itself cannot be opened or locked.
-    pub(crate) fn try_acquire(home: &Path) -> Result<Option<Self>> {
-        use std::os::unix::fs::MetadataExt as _;
-
-        fs::create_dir_all(home).with_context(|| format!("could not create {home:?}"))?;
-        let path = home.join(LOCK_FILE);
-
-        // Transition guard: a J'Lo 0.5.0 or older publisher still unlinks the
-        // file on exit, so a process that opened the path while such a binary
-        // held the lock can end up locking an unlinked inode - the `nlink == 0`
-        // check below - and must open the path again. Once no such binary can
-        // be running, this loop and that check can go.
-        for _ in 0..3 {
-            let file = fs::OpenOptions::new()
-                .create(true)
-                .write(true)
-                .truncate(false)
-                .open(&path)
-                .with_context(|| format!("could not open the update lock {path:?}"))?;
-
-            // The lock lives on the open file description, not on the fd
-            // number, so it survives `exec` - but only if the fd does. std
-            // opens every file `O_CLOEXEC`, which would drop the lock at
-            // exactly the moment `selfupdate` hands over: the staged binary
-            // would then publish itself, its scripts and its receipt with
-            // nothing holding anyone else off. Silently, with no error to
-            // report.
-            rustix::io::fcntl_setfd(&file, rustix::io::FdFlags::empty())
-                .with_context(|| format!("could not keep {path:?} open across exec"))?;
-
-            match rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
-                Ok(()) => {}
-                // Non-blocking on purpose: an unbounded wait on a lock nobody
-                // can see is worse than a message, and the self-heal below has
-                // somewhere better to go than waiting.
-                Err(rustix::io::Errno::WOULDBLOCK) => return Ok(None),
-                Err(e) => return Err(anyhow!("could not lock {path:?}: {e}")),
-            }
-
-            if file.metadata().is_ok_and(|m| m.nlink() == 0) {
-                continue;
-            }
-
-            return Ok(Some(Self { _file: Some(file) }));
-        }
-        Ok(None)
-    }
-
-    /// The lock this process inherited across `selfupdate`'s `exec`.
-    ///
-    /// The fd, and the `flock` on it, came across with the process image, so
-    /// there is nothing to take here - and taking it again from a second open
-    /// file description would deadlock us against ourselves.
-    pub(crate) fn inherited() -> Self {
-        Self { _file: None }
-    }
-
-    /// The same lock, where contention is an error rather than a fork in the
-    /// road: two processes must not publish at once.
-    pub(crate) fn acquire(home: &Path) -> Result<Self> {
-        Self::try_acquire(home)?.ok_or_else(|| {
-            anyhow!(
-                "another J'Lo install or update is already running (lock file {:?}).",
-                home.join(LOCK_FILE)
-            )
-        })
-    }
-}
-
 // ---------------------------------------------------------------------------
 // The verb
 // ---------------------------------------------------------------------------
@@ -245,51 +112,35 @@ impl Lock {
 /// Run the install verb. `args` is the raw argv *after* the verb token;
 /// `wrapped` is whether the `jlo` shell function evaluates the reload lines.
 pub(crate) fn cmd_install(args: &[String], wrapped: bool) -> Result<(), CommandError> {
-    let mut method = DEFAULT_METHOD.to_string();
+    let layout = Layout::new(crate::jlo_home_dir()?);
+    // Armed before the options are read: the installer that `exec`d us has no
+    // line left to run, so a run that ends early - a rejected option included -
+    // is the last chance to clear the directory we came out of. Dropping it
+    // removes the directory on every path, including the successful one, where
+    // the rename has already emptied it.
+    let _staging = Staging::around(&layout, args.iter().any(|arg| arg == "--publish-self"));
     let mut reload = false;
-    let mut locked = false;
     let mut publish_self = false;
-    let mut rest = args.iter();
-    while let Some(arg) = rest.next() {
+    for arg in args {
         match arg.as_str() {
-            "--method" => {
-                method.clone_from(
-                    rest.next()
-                        .ok_or_else(|| anyhow!("--method needs a value"))?,
-                );
-            }
             "--reload" => reload = true,
-            "--locked" => locked = true,
             "--publish-self" => publish_self = true,
+            // Passed by the updaters of 0.4.0 and 0.5.0, which held a lock
+            // across their `exec` of this verb. Nothing takes that lock now.
+            "--locked" => {}
             other => return Err(anyhow!("unknown option {other:?} for {VERB}").into()),
         }
     }
-
-    let layout = Layout::new(crate::jlo_home_dir()?);
-    // Armed before the lock, because a lock we do not get is the likeliest
-    // reason this run ends early - and the installer that `exec`d us has no
-    // line left to run, so nothing else can clear the directory we came out
-    // of. Dropping it removes the directory on every path, including the
-    // successful one, where the rename has already emptied it.
-    let _staging = Staging::around(&layout, publish_self);
-    // `selfupdate` `exec`s this verb while already holding the lock, and the
-    // fd came across the exec with it. Taking it again from a second open file
-    // description would deadlock against ourselves, so the caller says so.
-    let _lock = if locked {
-        Lock::inherited()
-    } else {
-        Lock::acquire(layout.home())?
-    };
     // An installer killed after unpacking leaves its staging directory, and
     // every run has a new pid, so nothing else ever comes back for it.
     layout.sweep_stale_staging();
-    // Read before writing: what `report` prints turns on whether a receipt
-    // was already there, and the new one is about to replace it.
-    let had_receipt = read_receipt(&layout).is_some();
+    // Read before writing: a first install gets the activation block, a
+    // reinstall one line.
+    let reinstall = layout.home.join("jlo.sh").exists();
 
     if publish_self {
-        // Nothing under `$JLO_HOME` has been written yet, for `install.sh`
-        // and `selfupdate` alike: whatever was installed before is intact.
+        // Nothing under `$JLO_HOME` has been written yet: whatever was
+        // installed before is intact.
         publish_binary(&layout).map_err(|e| {
             CommandError::with_hint(
                 e,
@@ -299,9 +150,8 @@ pub(crate) fn cmd_install(args: &[String], wrapped: bool) -> Result<(), CommandE
     }
     write_layout(&layout)?;
     let symlink = ensure_symlink(&layout);
-    write_receipt(&layout, &method, symlink.as_deref())?;
 
-    report(&layout, had_receipt, symlink.as_deref());
+    report(&layout, reinstall, symlink.as_deref());
     if reload {
         print_reload(&layout, wrapped)?;
     }
@@ -310,15 +160,11 @@ pub(crate) fn cmd_install(args: &[String], wrapped: bool) -> Result<(), CommandE
 
 /// Move the running executable to its published path.
 ///
-/// The installers and `selfupdate` unpack into a staging directory *beside* the
-/// destination and run the staged binary from there, so that this - the write that replaces
-/// `bin/jlo-bin` - happens under the lock with every other part of the
-/// publication, rather than before the lock exists, and only once the new
-/// binary has proved it can start. An installer that wrote the binary itself
-/// would be a second publisher standing outside the gate: it
-/// could swap the executable out from under a `selfupdate` that holds the
-/// lock, and on Linux it would hit `ETXTBSY` trying to overwrite a binary that
-/// is still running.
+/// The installers unpack into a staging directory *beside* the destination
+/// and run the staged binary from there, so that this - the write that
+/// replaces `bin/jlo-bin` - happens only once the new binary has proved it can
+/// start. An installer that wrote the binary itself would, on Linux, hit
+/// `ETXTBSY` trying to overwrite a binary that is still running.
 ///
 /// Beside the destination, and not under `$TMPDIR`, because `rename` is atomic
 /// only within one filesystem and fails outright across two.
@@ -328,8 +174,8 @@ pub(crate) fn cmd_install(args: &[String], wrapped: bool) -> Result<(), CommandE
 /// same run to go on and write the layout from its own `include_str!`
 /// templates. There is no second `exec`.
 ///
-/// A binary that is already at the published path - `install-local.sh`, a
-/// re-run, the self-heal - is left alone rather than renamed onto itself.
+/// A binary already at the published path - `install-local.sh`, a re-run -
+/// is left alone rather than renamed onto itself.
 fn publish_binary(layout: &Layout) -> Result<()> {
     let exe = std::env::current_exe().context("could not find the running J'Lo binary")?;
     let target = layout.binary();
@@ -340,28 +186,36 @@ fn publish_binary(layout: &Layout) -> Result<()> {
     fs::create_dir_all(layout.bin_dir())
         .with_context(|| format!("could not create {:?}", layout.bin_dir()))?;
     // The staged file's *contents* first. The installers wrote it with `tar`
-    // or `cp`, `selfupdate` with its own unpack, and none of them flushed it, so a crash just after the rename could
-    // leave a durable directory entry - and a receipt vouching for it - in
-    // front of a binary that is still only in the page cache. `sync_dir`
-    // below flushes the entry, not the data behind it.
+    // or `cp`, and neither flushed it, so a crash just after the rename could
+    // leave a durable directory entry - and the layout written next vouching
+    // for it - in front of a binary that is still only in the page cache.
+    // `sync_dir` below flushes the entry, not the data behind it.
     File::open(&exe)
         .and_then(|handle| handle.sync_all())
         .with_context(|| format!("could not flush {exe:?} to disk"))?;
     fs::rename(&exe, &target)
         .with_context(|| format!("could not publish {exe:?} to {target:?}"))?;
-    // The rename is only durable once the directory entry is, and the receipt
-    // written at the end of this run vouches for the binary published here.
+    // The rename is only durable once the directory entry is, and the layout
+    // written next is generated by the binary published here.
     sync_dir(layout.bin_dir());
 
     Ok(())
 }
 
+pub(crate) fn is_current_exe(path: &Path) -> bool {
+    let Ok(exe) = std::env::current_exe() else {
+        return false;
+    };
+    same_path(&exe, path)
+}
+
 /// The installer's staging directory, swept when this value is dropped.
 ///
-/// `install.sh` and `selfupdate` unpack into `bin/.jlo-install-<pid>/` and
-/// `exec` the binary from there, so from that moment the staged process is the
-/// only one that can still tidy up: a refused publish would otherwise leave a whole copy of J'Lo
-/// in `bin/` for every failed install.
+/// `install.sh` and `install-local.sh` unpack into `bin/.jlo-install-<pid>/`
+/// and run the binary from there. `install.sh` `exec`s it, so from that moment
+/// the staged process is the only one that can still tidy up: a refused
+/// publish would otherwise leave a whole copy of J'Lo in `bin/` for every
+/// failed install.
 ///
 /// What it removes is the file it knows was staged, and then the directory
 /// *only if that emptied it*. Never a recursive delete: this runs on a path
@@ -375,11 +229,11 @@ impl Staging {
     ///
     /// Three things have to hold, and the name is the weakest of them: the
     /// caller must have asked to publish, the executable must not already be
-    /// the published binary - `install-local.sh`, a re-run, the self-heal -
-    /// and the directory it sits in must be a child of *this* install's
-    /// `bin/`. Without that last test a binary parked in any directory whose
-    /// name happens to start with `.jlo-install` would be swept while the verb
-    /// was pointed at an unrelated `$JLO_HOME`.
+    /// the published binary - `install-local.sh`, a re-run - and the
+    /// directory it sits in must be a child of *this* install's `bin/`.
+    /// Without that last test a binary parked in any directory whose name
+    /// happens to start with `.jlo-install` would be swept while the verb was
+    /// pointed at an unrelated `$JLO_HOME`.
     fn around(layout: &Layout, publish_self: bool) -> Self {
         if !publish_self {
             return Self(None);
@@ -419,9 +273,9 @@ impl Drop for Staging {
 /// freshly generated wrapper in place of its resident one.
 ///
 /// `selfupdate` calls this directly; `--reload` is for the updaters of J'Lo
-/// 0.4.0 and 0.5.0, which hand over to this verb. `install.sh` must not: its
-/// stdout is not evaluated by anything, and the line would be noise there -
-/// the activation block `report` prints is what a bootstrap needs.
+/// 0.4.0 and 0.5.0, which hand over to this verb. `install.sh` does not pass
+/// it: its stdout is not evaluated by anything, and the line would be noise
+/// there - the activation block `report` prints is what a bootstrap needs.
 ///
 /// The two optional lines re-source only what this shell had *already*
 /// enabled, never more. The signal is the marker each stub sets after it
@@ -446,20 +300,12 @@ pub(crate) fn print_reload(layout: &Layout, wrapped: bool) -> Result<()> {
     )
 }
 
-/// Everything under `$JLO_HOME` except the binary, the symlink and the receipt.
+/// Everything under `$JLO_HOME` except the binary and the symlink.
 ///
-/// Shared with [`self_heal`], which is the whole reason there is no `--repair`
-/// verb: the recovery path and the install path are the same code.
-///
-/// The two optional stubs and the completion scripts warn rather than fail,
-/// and the receipt is still written afterwards. That is deliberate, and it is
-/// the narrow thing the receipt does *not* promise: it marks which binary
-/// published this layout, not that every optional convenience beside it
-/// landed. Withholding it instead would overload the one state that already
-/// has a meaning - a missing receipt is an install that predates receipts, not
-/// a broken one - and would put every later invocation into a rewrite for as
-/// long as the underlying write keeps failing. The user gets a warning naming
-/// the file, and re-running the installer is the documented repair.
+/// Shared with `jlo selfupdate`'s repair, through [`refresh_layout`]. The two
+/// optional stubs and the completion scripts warn rather than fail: a
+/// convenience lost is not a broken install, and the user gets a warning
+/// naming the file and the repair.
 fn write_layout(layout: &Layout) -> Result<()> {
     fs::create_dir_all(&layout.bin)
         .with_context(|| format!("could not create {:?}", layout.bin))?;
@@ -684,173 +530,6 @@ fn ensure_symlink(layout: &Layout) -> Option<PathBuf> {
 }
 
 // ---------------------------------------------------------------------------
-// Receipt
-// ---------------------------------------------------------------------------
-
-/// The reading `selfupdate` needs, where the two failures are *not* the same
-/// thing: a missing receipt is an install that predates them and may be
-/// updated, a malformed one is an error that stops the update and names the
-/// file, because guessing is how a package-manager install gets clobbered.
-pub(crate) fn load_receipt(layout: &Layout) -> Result<Option<Receipt>> {
-    let path = layout.receipt();
-    let raw = match fs::read_to_string(&path) {
-        Ok(raw) => raw,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(anyhow!("could not read {path:?}: {e}.")),
-    };
-    serde_json::from_str(&raw)
-        .map(Some)
-        .map_err(|e| anyhow!("{path:?} is not a valid install receipt: {e}."))
-}
-
-/// `None` for both a missing and a malformed receipt.
-///
-/// The two are distinguished where it matters - `selfupdate` stops on a
-/// malformed one rather than guessing - but neither is a reason for an
-/// ordinary command to refuse to run.
-fn read_receipt(layout: &Layout) -> Option<Receipt> {
-    load_receipt(layout).ok().flatten()
-}
-
-fn write_receipt(layout: &Layout, method: &str, symlink: Option<&Path>) -> Result<()> {
-    Receipt {
-        version: VERSION.to_string(),
-        method: method.to_string(),
-        jlo_home: display(&layout.home),
-        binary: display(&layout.binary()),
-        symlink: symlink.map(display),
-    }
-    .write(layout)
-}
-
-impl Receipt {
-    fn write(&self, layout: &Layout) -> Result<()> {
-        let mut json = serde_json::to_string_pretty(self)
-            .context("could not serialise the install receipt")?;
-        json.push('\n');
-        write_atomic(&layout.receipt(), json.as_bytes())
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Self-healing
-// ---------------------------------------------------------------------------
-
-/// Rewrite the generated files when the receipt disagrees with this binary.
-///
-/// That disagreement is the known-incomplete state: the binary landed, the
-/// scripts or the receipt did not. Rather than report it and hand the user a
-/// `--repair` command to type, the next direct invocation clears it - a few
-/// idempotent writes, no network.
-///
-/// Three guards keep this from running where it would be wrong. A missing
-/// receipt is an install that predates them, not a broken one. A receipt
-/// naming a *different* binary means this executable is not the install it
-/// describes - a build in `target/release`, say. And a receipt describing a
-/// *different* `$JLO_HOME` than the one we resolved means the two do not
-/// belong together however the binary path lines up, so a copied install
-/// cannot rewrite the original's scripts.
-pub(crate) fn self_heal() {
-    let Ok(home) = crate::jlo_home_dir() else {
-        return;
-    };
-    let layout = Layout::new(home);
-    // Cheap first, so the common case - a receipt that already agrees - costs
-    // a single read and never touches the lock.
-    if stale_receipt(&layout).is_none() {
-        return;
-    }
-
-    // Somebody else is publishing. They will leave a consistent layout behind,
-    // so there is nothing here worth waiting - or racing - for.
-    let Ok(Some(_lock)) = Lock::try_acquire(&layout.home) else {
-        return;
-    };
-
-    // Asked again, now that nobody else can be writing. Between the check
-    // above and this line a publisher can have finished a *newer* version in
-    // full and released the lock; the receipt then names a version this binary
-    // does not have, which reads exactly like the incomplete upgrade this
-    // function repairs. Healing it would write this binary's older scripts and
-    // stamp its own version over the newer one - the heal causing the
-    // disagreement it exists to clear.
-    let Some(receipt) = stale_receipt(&layout) else {
-        return;
-    };
-
-    if let Err(e) = write_layout(&layout).and_then(|()| {
-        write_receipt(
-            &layout,
-            &receipt.method,
-            receipt.symlink.as_deref().map(Path::new),
-        )
-    }) {
-        ui::warning!("could not refresh the generated shell files: {e:#}");
-        ui::hint!("Re-run the installer to repair this install.");
-    }
-}
-
-/// The receipt this binary would heal, or `None` when there is nothing to do.
-///
-/// Separated out because the answer has to be obtained twice - see the call
-/// sites in [`self_heal`] - and two spellings of it would be two chances to
-/// diverge.
-fn stale_receipt(layout: &Layout) -> Option<Receipt> {
-    let receipt = read_receipt(layout)?;
-    // Older than this binary, not merely different. The receipt is written
-    // last, so an interrupted upgrade leaves one describing the version that
-    // came *before* the binary now running - that is the state worth
-    // repairing. A receipt that is newer means the opposite: a publication
-    // finished while this executable was already running, and this process is
-    // the previous binary rather than the published one. Rewriting the layout
-    // then downgrades it, which is what the two path-based guards below cannot
-    // detect, because a new binary is published at the very path the old one
-    // was running from.
-    //
-    // A version neither side can parse is not a guess worth making.
-    //
-    // The bound this draws, stated because it is a real one: a publication
-    // that moved *downwards* - an older build put in place over a newer
-    // receipt, then cut off before the receipt was rewritten - is not healed
-    // either. From the version alone it looks exactly like the case above,
-    // because both leave a receipt newer than the running binary.
-    //
-    // They could be told apart, and the means is not exotic: under the lock,
-    // run `layout.binary() --version` and see whether the published file is
-    // this build or another one - the same probe `selfupdate` already performs
-    // on a staged binary. It is left out on purpose. That puts a subprocess
-    // spawn in a path every single command passes through, and the child's own
-    // self-heal is kept from recursing only by the lock this process is
-    // holding, which is a coupling that would have to be maintained as
-    // carefully as the lock itself. The states below are not worth it.
-    //
-    // How they are reached: not by anything that moves on its own.
-    // `selfupdate` refuses to put a name on an older build, and `install.sh`
-    // defaults to the latest release - though it compares no versions, so an
-    // older one it is *pointed* at (a pinned JLO_INSTALL_BASE_URL, a cached
-    // installer, a local build) publishes without complaint. Re-running the
-    // installer repairs it, as it already does for every other state the
-    // receipt does not speak to.
-    if std::cmp::Ordering::Less != crate::version::compare(&receipt.version, VERSION).ok()? {
-        return None;
-    }
-    if !same_path(Path::new(&receipt.jlo_home), &layout.home) {
-        return None;
-    }
-    if !is_current_exe(Path::new(&receipt.binary)) {
-        return None;
-    }
-    Some(receipt)
-}
-
-pub(crate) fn is_current_exe(path: &Path) -> bool {
-    let Ok(exe) = std::env::current_exe() else {
-        return false;
-    };
-    same_path(&exe, path)
-}
-
-// ---------------------------------------------------------------------------
 // Reporting
 // ---------------------------------------------------------------------------
 
@@ -864,9 +543,9 @@ pub(crate) fn is_current_exe(path: &Path) -> bool {
 /// non-invasive rather than merely convenient: nothing writes to their profile
 /// but them.
 ///
-/// Everything here goes to stderr. stdout is the environment channel, and from
-/// 0.4.0 `selfupdate` prints a `. jlo.sh` line there for the wrapper to eval.
-fn report(layout: &Layout, had_receipt: bool, symlink: Option<&Path>) {
+/// Everything here goes to stderr. stdout is the environment channel, and
+/// `--reload` prints the reload lines there for the wrapper to eval.
+fn report(layout: &Layout, reinstall: bool, symlink: Option<&Path>) {
     let home_dir = std::env::home_dir();
     let home = home_dir.as_deref();
 
@@ -887,7 +566,7 @@ fn report(layout: &Layout, had_receipt: bool, symlink: Option<&Path>) {
     // set up: no text scan can prove a source line actually runs, and a false
     // "yes" withholds the one line that would fix a broken setup. The line is
     // printed, and the user is the one who knows.
-    if had_receipt {
+    if reinstall {
         eprintln!(
             "\n{}",
             ui::footnote("Already in your profile? Nothing to do. Otherwise add:")
@@ -896,7 +575,7 @@ fn report(layout: &Layout, had_receipt: bool, symlink: Option<&Path>) {
     }
 
     let Some(home) = home else {
-        if !had_receipt {
+        if !reinstall {
             // No home directory: there is no profile to name and no portable
             // line to print. The absolute paths in the layout still work.
             ui::hint!(
@@ -909,7 +588,7 @@ fn report(layout: &Layout, had_receipt: bool, symlink: Option<&Path>) {
     let shell = login_shell_name();
     let bash_login = bash_login_target(home);
 
-    if !had_receipt {
+    if !reinstall {
         let profile = login_shell_profile(&shell, home, bash_login.as_deref());
         eprintln!(
             "\n{}\n",
@@ -1194,10 +873,10 @@ fn write_atomic(path: &Path, contents: &[u8]) -> Result<()> {
 /// file's contents.
 ///
 /// Without it the ordering this module relies on is not a crash guarantee at
-/// all: the receipt is the commit marker, and a crash could leave it on disk
-/// while the script it vouches for is still only in the page cache. Best
-/// effort, because some filesystems refuse an `fsync` on a directory and that
-/// is not a reason to fail an install that otherwise succeeded.
+/// all: a crash could otherwise leave the new directory entry durable in front
+/// of contents still only in the page cache. Best effort, because some
+/// filesystems refuse an `fsync` on a directory and that is not a reason to
+/// fail an install that otherwise succeeded.
 fn sync_dir(dir: &Path) {
     if let Ok(handle) = fs::File::open(dir) {
         let _ = handle.sync_all();
@@ -1210,134 +889,6 @@ mod tests {
 
     fn layout_at(home: &Path) -> Layout {
         Layout::new(home.to_path_buf())
-    }
-
-    /// Writes a receipt naming this executable and `home`, at `version`.
-    fn receipt_at(layout: &Layout, version: &str) -> Receipt {
-        let receipt = Receipt {
-            version: version.to_string(),
-            method: DEFAULT_METHOD.to_string(),
-            jlo_home: display(layout.home()),
-            binary: display(&std::env::current_exe().unwrap()),
-            symlink: None,
-        };
-        fs::create_dir_all(layout.home()).unwrap();
-        receipt.write(layout).unwrap();
-        receipt
-    }
-
-    #[test]
-    fn a_receipt_that_matches_this_binary_is_not_stale() {
-        let dir = tempfile::tempdir().unwrap();
-        let layout = layout_at(dir.path());
-        receipt_at(&layout, VERSION);
-        assert!(
-            stale_receipt(&layout).is_none(),
-            "a receipt naming this very version asked to be healed"
-        );
-    }
-
-    /// The interleaving the self-heal must not join in with: this binary is
-    /// the *old* one, still running, while a newer one has already been
-    /// published in full at the same path. The receipt disagrees with
-    /// `VERSION` exactly as an interrupted upgrade would, and the binary path
-    /// it names is this one - so neither of those tests can tell the two
-    /// apart. Only the direction can: an interrupted upgrade leaves a receipt
-    /// *older* than the running binary, because the receipt is written last.
-    ///
-    /// Healing here would write this binary's older scripts beside the newer
-    /// binary and stamp its own version over the newer receipt - a downgrade
-    /// performed by the function that exists to repair downgrades.
-    #[test]
-    fn a_receipt_naming_a_newer_version_is_not_stale() {
-        let dir = tempfile::tempdir().unwrap();
-        let layout = layout_at(dir.path());
-        receipt_at(&layout, "999.0.0");
-        assert!(
-            stale_receipt(&layout).is_none(),
-            "a receipt from a newer publication was treated as an interrupted upgrade"
-        );
-    }
-
-    #[test]
-    fn a_receipt_whose_version_cannot_be_compared_is_not_stale() {
-        let dir = tempfile::tempdir().unwrap();
-        let layout = layout_at(dir.path());
-        receipt_at(&layout, "not-a-version");
-        assert!(
-            stale_receipt(&layout).is_none(),
-            "an unreadable receipt version was healed on a guess"
-        );
-    }
-
-    #[test]
-    fn a_receipt_naming_an_older_version_is_stale() {
-        let dir = tempfile::tempdir().unwrap();
-        let layout = layout_at(dir.path());
-        receipt_at(&layout, "0.0.1-not-this-build");
-        assert!(
-            stale_receipt(&layout).is_some(),
-            "the incomplete-upgrade state went unnoticed"
-        );
-    }
-
-    #[test]
-    fn a_receipt_describing_another_jlo_home_is_not_stale() {
-        let dir = tempfile::tempdir().unwrap();
-        let layout = layout_at(dir.path());
-        receipt_at(&layout, "0.0.1-not-this-build");
-
-        let elsewhere = layout_at(&dir.path().join("copied"));
-        fs::create_dir_all(elsewhere.home()).unwrap();
-        fs::copy(layout.receipt(), elsewhere.receipt()).unwrap();
-        assert!(
-            stale_receipt(&elsewhere).is_none(),
-            "a receipt carried over from another install was treated as ours"
-        );
-    }
-
-    #[test]
-    fn a_receipt_naming_another_binary_is_not_stale() {
-        let dir = tempfile::tempdir().unwrap();
-        let layout = layout_at(dir.path());
-        let mut receipt = receipt_at(&layout, "0.0.1-not-this-build");
-        receipt.binary = display(&dir.path().join("somewhere-else").join("jlo-bin"));
-        receipt.write(&layout).unwrap();
-        assert!(
-            stale_receipt(&layout).is_none(),
-            "a receipt describing a different executable was treated as ours"
-        );
-    }
-
-    /// ADR-0006: the lock lives on the open file description, so it survives
-    /// `selfupdate`'s `exec` - but only if the fd does. std opens every file
-    /// `O_CLOEXEC`, and nothing in the type system undoes that, so a refactor
-    /// that drops the `fcntl_setfd` call compiles, passes every other test,
-    /// and silently releases the lock at exactly the moment `selfupdate` hands
-    /// over to the staged binary, which then publishes unguarded.
-    ///
-    /// `tests/selfupdate.rs` proves an *externally* held lock blocks a second
-    /// update. This is the other half: that ours is still held after the
-    /// `exec`, which is a property of the descriptor rather than of anything
-    /// observable from outside.
-    #[test]
-    // The underscore says "nothing reads this in production", which is still
-    // true; this test reads it precisely because the field's whole purpose is
-    // the fd underneath it.
-    #[allow(clippy::used_underscore_binding)]
-    fn the_lock_fd_survives_an_exec() {
-        let home = tempfile::tempdir().unwrap();
-        let lock = Lock::acquire(home.path()).expect("nothing else holds it");
-        let file = lock
-            ._file
-            .as_ref()
-            .expect("acquire opens the lock file itself");
-
-        let flags = rustix::io::fcntl_getfd(file).unwrap();
-        assert!(
-            !flags.contains(rustix::io::FdFlags::CLOEXEC),
-            "the lock fd carries FD_CLOEXEC and would be closed by selfupdate's exec"
-        );
     }
 
     #[test]
@@ -1439,29 +990,5 @@ mod tests {
             leftovers.is_empty(),
             "temp files left behind: {leftovers:?}"
         );
-    }
-
-    #[test]
-    fn a_receipt_round_trips() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let layout = layout_at(dir.path());
-        write_receipt(
-            &layout,
-            "installer",
-            Some(Path::new("/home/u/.local/bin/jlo")),
-        )
-        .expect("write receipt");
-        let back = read_receipt(&layout).expect("receipt");
-        assert_eq!(back.version, VERSION);
-        assert_eq!(back.method, "installer");
-        assert_eq!(back.symlink.as_deref(), Some("/home/u/.local/bin/jlo"));
-    }
-
-    #[test]
-    fn a_malformed_receipt_reads_as_absent() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let layout = layout_at(dir.path());
-        fs::write(layout.receipt(), "{ not json").expect("write");
-        assert!(read_receipt(&layout).is_none());
     }
 }

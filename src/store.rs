@@ -1058,15 +1058,15 @@ fn staging_dir(store: &JdkStore) -> anyhow::Result<tempfile::TempDir> {
 const STAGING_PREFIX: &str = ".tmp";
 
 /// Delete the directories under `base` whose name starts with `prefix` that
-/// an earlier, interrupted install left behind. Shared with `selfupdate`,
-/// which stages its download the same way under `$JLO_HOME/bin`.
+/// an earlier, interrupted install left behind. Shared with the install verb,
+/// which sweeps what an installer staged under `$JLO_HOME/bin`.
 ///
 /// Best effort in both directions: a failure is not worth a word (the install
 /// that follows is what the user asked for, and this is housekeeping), and a
 /// staging directory belonging to an install running *right now* is left
 /// alone - it is in use, so removing its contents would break a command that
-/// is working. Holding a lock does not settle that, because not every stager
-/// takes one (`install.sh` unpacks before it hands over to the locked verb),
+/// is working. Nothing marks a staging directory as in use - no stager takes
+/// a lock, and `install.sh` unpacks before it hands over to the install verb -
 /// so "in use" is read as "modified in the last hour", which is far longer
 /// than any install takes.
 ///
