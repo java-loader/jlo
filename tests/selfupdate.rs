@@ -546,206 +546,103 @@ fn selfupdate_reloads_the_calling_shell_whether_it_upgrades_or_repairs() {
 }
 
 // ---------------------------------------------------------------------------
-// The released updaters' hand-over
+// The reload line
 // ---------------------------------------------------------------------------
 
-/// J'Lo 0.4.0's resident wrapper (zsh dialect), comments dropped: it evaluates
-/// whatever stdout a successful `selfupdate` prints, marker or not.
-const WRAPPER_0_4_0: &str = r#"
-jlo() {
-  local J arg out
-  J="${JLO_HOME-}/bin/jlo-bin"
-  case "$1" in
-    env|use|selfupdate)
-      for arg in "$@"; do
-        case "$arg" in
-          -h|--help|-V|--version)
-            "$J" "$@"
-            return
-            ;;
-        esac
-      done
-      out="$("$J" "$@")" || return
-      eval "$out"
-      ;;
-    *)
-      "$J" "$@"
-      ;;
-  esac
-}
-"#;
+/// The reload line `jlo selfupdate` prints, evaluated in a shell that sourced
+/// exactly `enabled` of the optional stubs. Reports which of the three files
+/// the eval actually re-sourced.
+///
+/// Sourcing is observed by shadowing `.` once the opt-in sourcing is done, so
+/// each file the eval'd line sources is echoed rather than run.
+fn reload_in(sh: &str, install: &Install, release_url: &str, enabled: &[&str]) -> Output {
+    let mut sources = String::new();
+    for name in std::iter::once("jlo.sh").chain(enabled.iter().copied()) {
+        sources.push_str(". ");
+        sources.push_str(&squote(install.path().join(name)));
+        sources.push('\n');
+    }
+    let reload = install.selfupdate(release_url);
+    assert!(reload.status.success(), "{reload:?}");
+    let line = String::from_utf8_lossy(&reload.stdout).into_owned();
 
-/// J'Lo 0.5.0's resident wrapper (zsh dialect), comments dropped: it
-/// evaluates stdout only when it ends in the marker.
-const WRAPPER_0_5_0: &str = r##"
-jlo() {
-  local J out rc=0
-  J="${JLO_HOME-}/bin/jlo-bin"
-  case "${1-}" in
-    env|use|selfupdate|install|update)
-      if ! ( JAVA_HOME='' PATH='' ) 2>/dev/null; then
-        echo "jlo: JAVA_HOME or PATH is read-only" >&2
-        return 1
-      fi
-      out="$("$J" __wrapped "$@")" || rc=$?
-      case "$out" in
-        *"# jlo'end") eval "${out%"# jlo'end"}" || [ "$rc" -ne 0 ] || rc=1 ;;
-        *) [ "$rc" -ne 0 ] || printf '%s\n' "$out" >&1 || rc=1 ;;
-      esac
-      return "$rc"
-      ;;
-    *)
-      "$J" "$@"
-      ;;
-  esac
-}
-"##;
-
-/// Runs `jlo selfupdate` through a released `wrapper`, with `updater` - a
-/// stand-in for that release's binary, from the point its download verified -
-/// at `bin/jlo-bin`. Reports the status and whether the calling shell now has
-/// the current wrapper, which alone says "neither `JLO_HOME` nor HOME".
-fn released_hand_over(install: &Install, wrapper: &str, updater: &str) -> Output {
-    install.write_layout();
-    // Written by this process to a file that is never exec'd, then copied by
-    // a child `cp` onto a fresh inode and renamed into place: a write fd this
-    // process held on the exec'd inode itself could leak into another test
-    // thread's fork and fail the exec with ETXTBSY (see `Install::new`).
-    let source = install.path().join("updater.src");
-    fs::write(&source, updater).unwrap();
-    let fresh = install.path().join("bin").join(".jlo-bin.standin");
-    let placed = hermetic("/bin/sh", install.path())
-        .arg("-c")
-        .arg("cp \"$1\" \"$2\" && chmod 755 \"$2\" && mv \"$2\" \"$3\"")
-        .arg("sh")
-        .arg(&source)
-        .arg(&fresh)
-        .arg(install.binary())
-        .status()
-        .unwrap();
-    assert!(placed.success());
-
-    hermetic("zsh", install.path())
+    // `.` is shadowed *after* the opt-in sourcing above, so it only records
+    // what the eval'd reload line does.
+    hermetic(sh, install.path())
         .arg("-c")
         .arg(format!(
-            r#". "$JLO_HOME/jlo.sh"
-            {wrapper}
-            jlo selfupdate
-            echo "status=$?"
-            if typeset -f jlo | grep -q 'neither JLO_HOME nor HOME'; then echo reloaded=yes; else echo reloaded=no; fi"#
+            "{sources}\
+             . () {{ echo \"sourced=$1\"; }}\n\
+             eval {}\n\
+             echo \"status=$?\"\n",
+            squote(Path::new(&line))
         ))
-        .env("JLO_HOME", install.path())
         .output()
         .unwrap()
 }
 
-/// Both released updaters probed the staged binary with `--version` and
-/// refused the hand-over unless the output's last word was the tag's version.
-/// The stand-ins below do the same, so a change to the version output that
-/// the released updaters would refuse fails here.
-fn version_probe(staged: &str) -> String {
-    format!(
-        "v=$({staged} --version) || exit 71\n\
-         [ \"${{v##* }}\" = '{VERSION}' ] || {{ echo \"probe refused: $v\" >&2; exit 73; }}\n"
+/// The reload always re-sources `jlo.sh` - that is the resident wrapper being
+/// replaced - and never enables an optional stub the user had not enabled.
+#[test]
+fn the_reload_line_re_sources_only_what_this_shell_had_enabled() {
+    let install = Install::new();
+    install.write_layout();
+    let interpreters = shells(
+        "the_reload_line_re_sources_only_what_this_shell_had_enabled",
+        INTERPRETERS,
     )
-}
+    .collect::<Vec<_>>();
+    let release = Release::at(&current_tag(), 2 * interpreters.len());
 
-/// 0.4.0 staged and probed the new binary, renamed it into place itself, then
-/// ran it as `__install --reload --locked`, unwrapped: the reload lines arrive
-/// without the marker, and 0.4.0's wrapper evaluates them.
-#[test]
-fn the_0_4_0_updater_hands_over_and_reloads() {
-    if common::skip_missing("the_0_4_0_updater_hands_over_and_reloads", "zsh") {
-        return;
+    for sh in interpreters {
+        let bare = reload_in(sh, &install, &release.url(), &[]);
+        let stdout = String::from_utf8_lossy(&bare.stdout);
+        assert!(
+            stdout.contains("sourced=") && stdout.contains("jlo.sh"),
+            "{sh}: the reload did not re-source jlo.sh: {stdout:?}"
+        );
+        assert!(
+            !stdout.contains("autoload.sh") && !stdout.contains("completions.sh"),
+            "{sh}: the reload enabled a stub the user had not: {stdout:?}"
+        );
+        // A false `[ -n ... ]` must not become the status of the whole eval.
+        assert!(
+            stdout.contains("status=0"),
+            "{sh}: a successful reload reported failure: {stdout:?}"
+        );
+
+        let opted_in = reload_in(
+            sh,
+            &install,
+            &release.url(),
+            &["autoload.sh", "completions.sh"],
+        );
+        let stdout = String::from_utf8_lossy(&opted_in.stdout);
+        for name in ["jlo.sh", "autoload.sh", "completions.sh"] {
+            assert!(
+                stdout.contains(name),
+                "{sh}: the reload skipped {name} although this shell had it: {stdout:?}"
+            );
+        }
+        assert!(
+            stdout.contains("status=0"),
+            "{sh}: a successful reload reported failure: {stdout:?}"
+        );
     }
-    let install = Install::new();
-    let updater = format!(
-        "#!/bin/sh\n\
-         [ \"$1\" = selfupdate ] || exit 64\n\
-         stage=\"$JLO_HOME/bin/.jlo-install-$$\"\n\
-         mkdir \"$stage\" && cp {real} \"$stage/jlo-bin\" || exit 70\n\
-         {probe}\
-         mv \"$stage/jlo-bin\" \"$JLO_HOME/bin/jlo-bin\" && rmdir \"$stage\" || exit 70\n\
-         exec \"$JLO_HOME/bin/jlo-bin\" __install --reload --locked\n",
-        real = squote(jlo_bin()),
-        probe = version_probe("\"$stage/jlo-bin\""),
-    );
-    let out = released_hand_over(&install, WRAPPER_0_4_0, &updater);
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let ctx = format!("{stdout:?} {:?}", String::from_utf8_lossy(&out.stderr));
-    assert!(stdout.contains("status=0"), "{ctx}");
-    assert!(stdout.contains("reloaded=yes"), "{ctx}");
-
-    let direct = install.run(&["__install", "--reload", "--locked"], "http://127.0.0.1:1");
-    assert!(direct.status.success());
-    assert_reload_lines(
-        &String::from_utf8_lossy(&direct.stdout),
-        install.path(),
-        false,
-    );
+    release.assert();
 }
 
-/// 0.5.0 staged the new binary, probed it with `--version` - which must leave
-/// it in place - then ran `__wrapped __install --publish-self --reload
-/// --locked`: the staged file is published by rename, the reload carries the
-/// marker 0.5.0's wrapper needs, and the staging directory goes.
+/// The install verb never puts shell code on stdout: `install.sh`'s stdout
+/// is evaluated by nothing, and only `selfupdate` hands the wrapper a reload.
 #[test]
-fn the_0_5_0_updater_hands_over_and_reloads() {
-    if common::skip_missing("the_0_5_0_updater_hands_over_and_reloads", "zsh") {
-        return;
-    }
+fn the_install_verb_writes_nothing_to_stdout() {
     let install = Install::new();
-    let updater = format!(
-        "#!/bin/sh\n\
-         [ \"$1 $2\" = \"__wrapped selfupdate\" ] || exit 64\n\
-         stage=\"$JLO_HOME/bin/.jlo-install-$$\"\n\
-         mkdir \"$stage\" && cp {real} \"$stage/jlo-bin\" || exit 70\n\
-         {probe}\
-         [ -x \"$stage/jlo-bin\" ] || exit 72\n\
-         set -- $(ls -i \"$stage/jlo-bin\")\n\
-         echo \"staged-inode=$1\" >&2\n\
-         exec \"$stage/jlo-bin\" __wrapped __install --publish-self --reload --locked\n",
-        real = squote(jlo_bin()),
-        probe = version_probe("\"$stage/jlo-bin\""),
-    );
-    let out = released_hand_over(&install, WRAPPER_0_5_0, &updater);
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    let ctx = format!("{stdout:?} {stderr:?}");
-    assert!(stdout.contains("status=0"), "{ctx}");
-    assert!(stdout.contains("reloaded=yes"), "{ctx}");
-
-    let staged = stderr
-        .lines()
-        .find_map(|line| line.strip_prefix("staged-inode="))
-        .unwrap_or_else(|| panic!("the staged binary never ran: {ctx}"));
+    let out = install.run(&["__install"], "http://127.0.0.1:1");
+    assert!(out.status.success());
     assert_eq!(
-        staged,
-        fs::metadata(install.binary()).unwrap().ino().to_string()
-    );
-    assert!(staging_leftovers(&install).is_empty(), "{ctx}");
-}
-
-/// `--reload` is the only thing that puts shell code on the install verb's
-/// stdout.
-#[test]
-fn the_install_verb_prints_the_reload_line_only_with_reload() {
-    let install = Install::new();
-
-    let quiet = install.run(&["__install"], "http://127.0.0.1:1");
-    assert!(quiet.status.success());
-    assert_eq!(
-        String::from_utf8_lossy(&quiet.stdout),
+        String::from_utf8_lossy(&out.stdout),
         "",
         "the bootstrap install wrote to the environment channel"
-    );
-
-    let loud = install.run(&["__install", "--reload"], "http://127.0.0.1:1");
-    assert!(loud.status.success());
-    assert_reload_lines(
-        &String::from_utf8_lossy(&loud.stdout),
-        install.path(),
-        false,
     );
 }
 

@@ -12,16 +12,6 @@ use std::env;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
-/// The ownership marker jlo *used* to write, inside the JDK directory.
-///
-/// Still honoured, never written. By construction it can only appear on an
-/// install made before the macOS bundle was kept, so it is only ever found on
-/// a flat directory - where a file costs nothing. Dropping the fallback would
-/// silently orphan those installs: no marker means `jlo remove` declines, and
-/// declining is the failure mode the user cannot see until they ask for a
-/// deletion that does not happen.
-const LEGACY_MARKER_FILE: &str = ".jlo-managed";
-
 /// The ownership marker jlo writes, *beside* the JDK directory rather than in
 /// it.
 ///
@@ -321,38 +311,6 @@ impl JdkStore {
             .into_iter()
             .find(|jdk| jdk.request == request)
             .map(|jdk| java_home_in(&self.base.join(jdk.version)))
-    }
-
-    /// The version name when `java_home` is one of ours still in the
-    /// pre-bundle macOS layout, and `None` otherwise.
-    ///
-    /// Such an install works in every way jlo cares about - it resolves, it
-    /// runs - but `/usr/libexec/java_home` cannot see it, which is the whole
-    /// of what keeping the bundle bought. There is no migration (see
-    /// [`java_home_in`]), so without a word from jlo the user would never
-    /// learn that a JDK they already have is the one still missing out.
-    ///
-    /// The test is the shape, not the name: a bundle's java home is
-    /// `<entry>/Contents/Home`, whose parent is `Contents`, so only a flat
-    /// install has the store itself as its parent. Unmanaged installs are
-    /// excluded deliberately - jlo did not put them there and cannot offer
-    /// `jlo remove` as the fix.
-    ///
-    /// Returns the install, whose name is what `jlo install` takes in the
-    /// advice line - read off the install rather than reparsed from the
-    /// directory name, which has already been parsed once to get here. The
-    /// whole name, not the major: under a flat early-access install a
-    /// major-only hint would advise installing the released stream.
-    pub(crate) fn legacy_layout(&self, java_home: &Path) -> Option<InstalledJdk> {
-        if env::consts::OS != "macos" || java_home.parent() != Some(self.base.as_path()) {
-            return None;
-        }
-
-        let name = java_home.file_name()?.to_str()?;
-        self.list()
-            .ok()?
-            .into_iter()
-            .find(|jdk| jdk.version == name && jdk.managed)
     }
 
     /// The name of the newest *released* JDK in the store, or `None` when
@@ -704,8 +662,7 @@ impl JdkStore {
                 // within reach of `jlo remove`.
                 let managed = name
                     .as_deref()
-                    .is_some_and(|name| sibling_marker(&self.base, name).is_file())
-                    || path.join(LEGACY_MARKER_FILE).is_file();
+                    .is_some_and(|name| sibling_marker(&self.base, name).is_file());
                 Candidate {
                     path,
                     name,
@@ -1219,9 +1176,6 @@ fn remove_recorded(
 /// A directory outliving its marker is the safe half: the install reads as
 /// unmanaged, jlo declines to touch it, and the user removes it by hand. An
 /// orphan the user can delete beats a trap that deletes for them.
-///
-/// A legacy in-directory marker needs no attention: it goes with the
-/// directory it lives in.
 fn remove_install(base: &Path, version: &str) -> std::io::Result<()> {
     match std::fs::remove_file(sibling_marker(base, version)) {
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
@@ -1368,73 +1322,7 @@ mod tests {
         source.join(release)
     }
 
-    // -- legacy_layout --
-
-    /// The platform guard, which is load-bearing in a way the expression does
-    /// not show. On Linux *every* install is flat and its parent *is* the
-    /// store, so the second condition never rejects anything: drop or reorder
-    /// the `macos` check and every Linux user gets the warning on every `jlo
-    /// home`, for a layout that is correct there. Asserted per platform rather
-    /// than on a `cfg!` constant - the behaviour is what must not change.
-    #[test]
-    fn only_macos_calls_a_flat_install_a_legacy_layout() {
-        let dir = tempdir().unwrap();
-        create_jdk_dir(dir.path(), "21.0.3+9", true);
-        let store = JdkStore::at(dir.path());
-
-        let verdict = store
-            .legacy_layout(&dir.path().join("21.0.3+9"))
-            .map(|jdk| (jdk.version.clone(), jdk.request));
-
-        if cfg!(target_os = "macos") {
-            assert_eq!(verdict, Some(("21.0.3+9".to_string(), request("21"))));
-        } else {
-            assert_eq!(verdict, None, "a flat install is the norm off macOS");
-        }
-    }
-
-    /// An install jlo did not make is not one jlo can offer to reinstall, so
-    /// it is left alone.
-    #[test]
-    fn an_unmanaged_flat_install_is_not_warned_about() {
-        let dir = tempdir().unwrap();
-        create_jdk_dir(dir.path(), "21.0.3+9", false);
-
-        let verdict = JdkStore::at(dir.path()).legacy_layout(&dir.path().join("21.0.3+9"));
-        assert!(verdict.is_none());
-    }
-
-    /// A bundle is the current layout, so it is never the thing being warned
-    /// about - its java home is one level in, and the guard turns on exactly
-    /// that difference.
-    #[test]
-    fn a_bundle_is_not_a_legacy_layout() {
-        let dir = tempdir().unwrap();
-        let java_home = create_bundle_jdk_dir(dir.path(), "21.0.3+9", true);
-
-        assert!(JdkStore::at(dir.path()).legacy_layout(&java_home).is_none());
-    }
-
-    // -- the two marker spellings --
-
-    /// An install made before the marker moved out of the JDK directory is
-    /// still jlo's. Dropping this fallback would not break loudly: the
-    /// install would simply read as unmanaged and `jlo remove` would decline
-    /// to touch it, which the user finds out only when a deletion silently
-    /// does nothing.
-    #[test]
-    fn a_legacy_in_directory_marker_still_means_managed() {
-        let dir = tempdir().unwrap();
-        create_jdk_dir(dir.path(), "21.0.3+9", false);
-        fs::File::create(dir.path().join("21.0.3+9").join(LEGACY_MARKER_FILE)).unwrap();
-
-        let installed = JdkStore::at(dir.path()).list().unwrap();
-        // The count and the name are asserted too: "every listed JDK is
-        // managed" is vacuously true of a listing that dropped the fixture.
-        assert_eq!(installed.len(), 1);
-        assert_eq!(installed[0].version, "21.0.3+9");
-        assert!(installed[0].managed, "legacy marker ignored");
-    }
+    // -- the marker --
 
     /// The marker is a file, and `scan` walks directories, so it must not be
     /// mistaken for an install of its own - which would put a phantom row in
@@ -2459,6 +2347,26 @@ mod tests {
         );
     }
 
+    /// Before the marker moved beside the install, jlo wrote `.jlo-managed`
+    /// *inside* it. That file no longer confers ownership: such an install is
+    /// still listed, but as unmanaged, and `remove` leaves it where it is.
+    #[test]
+    fn an_in_directory_marker_is_not_ownership() {
+        let dir = tempdir().unwrap();
+        create_jdk_dir(dir.path(), "17.0.2+8", false);
+        fs::File::create(dir.path().join("17.0.2+8").join(".jlo-managed")).unwrap();
+        let store = JdkStore::at(dir.path());
+
+        let installed = store.list().unwrap();
+        assert_eq!(installed.len(), 1);
+        assert_eq!(installed[0].version, "17.0.2+8");
+        assert!(!installed[0].managed);
+
+        let err = store.remove(&targets(&["17"]), None).unwrap_err();
+        assert!(matches!(err, RemoveError::Unmanaged(_)), "{err}");
+        assert!(dir.path().join("17.0.2+8").join("bin").is_dir());
+    }
+
     /// A managed match alongside an unmanaged one is not a refusal: the
     /// managed install goes, and the one left behind is reported by name so
     /// the user is not left wondering why a version never goes away.
@@ -2714,7 +2622,7 @@ mod tests {
         let (entry, java_home) = install_mock_jdk(dest_parent.path());
 
         assert!(sibling_marker(dest_parent.path(), "21.0.3+9").exists());
-        assert!(!entry.join(LEGACY_MARKER_FILE).exists());
+        assert!(!entry.join(".jlo-managed").exists());
         assert!(java_home.join("bin").join("java").exists());
     }
 

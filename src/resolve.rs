@@ -15,9 +15,7 @@ use anyhow::{Context, anyhow};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-/// The command asking, where the answer differs by who asked: the verb an
-/// offline miss tells the reader to re-run, and whether the legacy-layout
-/// warning may be printed at all.
+/// The command asking: the verb an offline miss tells the reader to re-run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Verb {
     Env,
@@ -205,27 +203,7 @@ fn offline_java_home(
         )
     })?;
 
-    // `env --offline` is how the autoload hook runs, on every new shell and
-    // every `cd`, so it stays silent - a line here would print forever.
-    // `home --offline` is a person asking a question and gets the warning.
-    // This is the only place that distinction exists.
-    if verb != Verb::Env {
-        warn_legacy_layout(store, &java_home);
-    }
-
     Ok(java_home)
-}
-
-/// Say so when the JDK just resolved is one `/usr/libexec/java_home` cannot
-/// see, which is every macOS install made before jlo kept the bundle.
-///
-/// At the two resolution funnels rather than in each command, so a verb added
-/// later cannot forget it. Only ever a warning: the install works, and the fix
-/// costs a download, so it is the user's to make.
-fn warn_legacy_layout(store: &JdkStore, java_home: &Path) {
-    if let Some(jdk) = store.legacy_layout(java_home) {
-        ui::legacy_layout(&jdk.version, jdk.request);
-    }
 }
 
 /// The version names an explicit run should download: the list given, or the version
@@ -282,7 +260,6 @@ fn resolve_java_home(
     request: Request,
 ) -> anyhow::Result<PathBuf> {
     if let Some(path) = store.find_matching(request) {
-        warn_legacy_layout(store, &path);
         Ok(path)
     } else {
         let metadata = client

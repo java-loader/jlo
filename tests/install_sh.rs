@@ -1461,89 +1461,8 @@ fn an_already_correct_symlink_is_not_recreated() {
 }
 
 // ---------------------------------------------------------------------------
-// The post-update reload line
+// Stubs
 // ---------------------------------------------------------------------------
-
-/// The reload line `jlo selfupdate` prints, evaluated in a shell that sourced
-/// exactly `enabled` of the optional stubs. Reports which of the three files
-/// the eval actually re-sourced.
-///
-/// Sourcing is observed by re-defining the files' own effects rather than by
-/// spying on `.`: each stub is marked by having the shell record it in a
-/// variable the moment it runs.
-fn reload_in(sh: &str, home: &Path, jlo: &Path, enabled: &[&str]) -> Output {
-    let mut sources = String::new();
-    for name in std::iter::once("jlo.sh").chain(enabled.iter().copied()) {
-        sources.push('.');
-        sources.push(' ');
-        sources.push_str(&squote(jlo.join(name)));
-        sources.push('\n');
-    }
-    let reload = hermetic(jlo.join("bin").join("jlo-bin"), home)
-        .args(["__install", "--reload"])
-        .env("JLO_HOME", jlo)
-        .output()
-        .unwrap();
-    assert!(reload.status.success());
-    let line = String::from_utf8_lossy(&reload.stdout).into_owned();
-
-    // `.` is shadowed *after* the opt-in sourcing above, so it only records
-    // what the eval'd reload line does.
-    hermetic(sh, home)
-        .arg("-c")
-        .arg(format!(
-            "{sources}\
-             . () {{ echo \"sourced=$1\"; }}\n\
-             eval {}\n\
-             echo \"status=$?\"\n",
-            squote(Path::new(&line))
-        ))
-        .output()
-        .unwrap()
-}
-
-/// The reload always re-sources `jlo.sh` - that is the resident wrapper being
-/// replaced - and never enables an optional stub the user had not enabled.
-#[test]
-fn the_reload_line_re_sources_only_what_this_shell_had_enabled() {
-    let (dir, _) = install(None);
-    let home = dir.path().join("home");
-    let jlo = home.join(".jlo");
-
-    for sh in shells(
-        "the_reload_line_re_sources_only_what_this_shell_had_enabled",
-        INTERPRETERS,
-    ) {
-        let bare = reload_in(sh, &home, &jlo, &[]);
-        let stdout = String::from_utf8_lossy(&bare.stdout);
-        assert!(
-            stdout.contains("sourced=") && stdout.contains("jlo.sh"),
-            "{sh}: the reload did not re-source jlo.sh: {stdout:?}"
-        );
-        assert!(
-            !stdout.contains("autoload.sh") && !stdout.contains("completions.sh"),
-            "{sh}: the reload enabled a stub the user had not: {stdout:?}"
-        );
-        // A false `[ -n ... ]` must not become the status of the whole eval.
-        assert!(
-            stdout.contains("status=0"),
-            "{sh}: a successful reload reported failure: {stdout:?}"
-        );
-
-        let opted_in = reload_in(sh, &home, &jlo, &["autoload.sh", "completions.sh"]);
-        let stdout = String::from_utf8_lossy(&opted_in.stdout);
-        for name in ["jlo.sh", "autoload.sh", "completions.sh"] {
-            assert!(
-                stdout.contains(name),
-                "{sh}: the reload skipped {name} although this shell had it: {stdout:?}"
-            );
-        }
-        assert!(
-            stdout.contains("status=0"),
-            "{sh}: a successful reload reported failure: {stdout:?}"
-        );
-    }
-}
 
 /// A stub whose target is gone, or fails to load, returns 0 without setting
 /// its marker: the install that failed to write the target already reported
@@ -1606,7 +1525,7 @@ fn stubs_are_inert_under_set_e_when_the_target_is_missing_or_fails() {
 
 /// The migration path from every version that was ever released.
 ///
-/// 0.2.0 and 0.3.0 are the only tags there are, and both print a profile block
+/// 0.2.0 and 0.3.0 both print a profile block
 /// that sources `bin/jlo-init.sh` and `bin/jlo-autoload.sh` directly - the
 /// generated entry files landed after 0.3.0 was tagged, so no released
 /// installer knows `jlo.sh` exists. Leaving those two paths alone left every
@@ -1686,6 +1605,112 @@ fn the_old_profile_paths_load_the_new_wrapper() {
             "{sh}: the loaded wrapper did not reach the binary: {stdout:?}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// What 0.4.0 and 0.5.0 left behind
+// ---------------------------------------------------------------------------
+
+/// The dialect files 0.4.0 and 0.5.0 wrote, by their path under `$JLO_HOME`.
+const RETIRED_DIALECTS: [&str; 4] = [
+    "bin/jlo-init.bash",
+    "bin/jlo-init.zsh",
+    "bin/jlo-autoload.bash",
+    "bin/jlo-autoload.zsh",
+];
+
+/// Lays down what 0.5.0 left under `jlo`: its receipt, its dialect files and
+/// the empty lock file.
+fn leave_0_5_0_files(jlo: &Path) {
+    std::fs::write(
+        jlo.join("install-receipt.json"),
+        format!(
+            "{{\n  \"version\": \"0.5.0\",\n  \"method\": \"installer\",\n  \
+             \"jlo_home\": \"{home}\",\n  \"binary\": \"{home}/bin/jlo-bin\",\n  \
+             \"symlink\": \"/nowhere/.local/bin/jlo\"\n}}\n",
+            home = jlo.display()
+        ),
+    )
+    .unwrap();
+    for name in RETIRED_DIALECTS {
+        std::fs::write(
+            jlo.join(name),
+            "# Generated by J'Lo - do not edit. Rewritten on every install and update.\n\
+             #\n# a dialect\n",
+        )
+        .unwrap();
+    }
+    std::fs::write(jlo.join(".selfupdate.lock"), "").unwrap();
+}
+
+/// What 0.5.0 wrote and nothing reads any more goes on reinstall. The empty
+/// lock file proves nothing about who made it, so it stays.
+#[test]
+fn a_reinstall_removes_what_earlier_releases_left_behind() {
+    let (dir, _) = install(None);
+    let home = dir.path().join("home");
+    let jlo = home.join(".jlo");
+    leave_0_5_0_files(&jlo);
+
+    let out = reinstall_over(&home);
+    assert!(out.status.success(), "{}", printed(&out));
+    for name in RETIRED_DIALECTS.iter().chain(&["install-receipt.json"]) {
+        assert!(!jlo.join(name).exists(), "{name} survived the reinstall");
+    }
+    assert!(jlo.join(".selfupdate.lock").is_file());
+}
+
+/// `$JLO_HOME` can be a directory the user already kept things in, so a file
+/// with a retired name but not J'Lo's contents is theirs: kept, and not
+/// mentioned.
+#[test]
+fn a_foreign_file_with_a_retired_name_survives() {
+    let (dir, _) = install(None);
+    let home = dir.path().join("home");
+    let jlo = home.join(".jlo");
+    let names: Vec<&str> = RETIRED_DIALECTS
+        .iter()
+        .copied()
+        .chain(["install-receipt.json"])
+        .collect();
+    for name in &names {
+        std::fs::write(jlo.join(name), "{\"mine\": true}\n").unwrap();
+    }
+
+    let out = reinstall_over(&home);
+    assert!(out.status.success(), "{}", printed(&out));
+    for name in &names {
+        assert!(jlo.join(name).is_file(), "{name} was not J'Lo's to remove");
+    }
+    assert!(
+        !printed(&out).contains("no longer uses"),
+        "{}",
+        printed(&out)
+    );
+}
+
+/// An `autoload.sh` this run could not replace is still 0.5.0's, and sources
+/// the dialect files - so they stay until it is replaced. The receipt is read
+/// by no stub, so it goes regardless.
+#[test]
+fn an_old_stub_that_was_not_replaced_keeps_its_targets() {
+    let (dir, _) = install(None);
+    let home = dir.path().join("home");
+    let jlo = home.join(".jlo");
+    leave_0_5_0_files(&jlo);
+    std::fs::remove_file(jlo.join("autoload.sh")).unwrap();
+    std::fs::create_dir(jlo.join("autoload.sh")).unwrap();
+
+    let out = reinstall_over(&home);
+    assert!(out.status.success(), "{}", printed(&out));
+    assert!(printed(&out).contains("autoload.sh"), "{}", printed(&out));
+    for name in RETIRED_DIALECTS {
+        assert!(
+            jlo.join(name).is_file(),
+            "{name} went while a stub needs it"
+        );
+    }
+    assert!(!jlo.join("install-receipt.json").exists());
 }
 
 /// A newline in `JLO_HOME` would split a printed profile line, or end a

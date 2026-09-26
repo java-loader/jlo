@@ -172,7 +172,11 @@ pub(crate) fn install_fake_jdk(home: &Path, version: &str) -> PathBuf {
     let jdk = jdk_store_in(home).join(version);
     std::fs::create_dir_all(jdk.join("bin")).unwrap();
     std::fs::write(jdk.join("bin").join("java"), "").unwrap();
-    std::fs::write(jdk.join(".jlo-managed"), "").unwrap();
+    std::fs::write(
+        jdk_store_in(home).join(format!("{version}.jlo-managed")),
+        "",
+    )
+    .unwrap();
     jdk
 }
 

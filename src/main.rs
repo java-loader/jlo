@@ -119,9 +119,9 @@ fn run() -> Result<(), CommandError> {
     // The install verb is intercepted here for the same reason, and the reason
     // is sharper still: it writes the shell layout, so it must not show up in
     // the completions it generates. `install.sh` and `install-local.sh` are its
-    // only callers, and the updaters of 0.4.0 and 0.5.0 hand over to it.
+    // only callers.
     if first == Some(install::VERB) {
-        return install::cmd_install(&argv[2..], wrapped);
+        return install::cmd_install(&argv[2..]);
     }
 
     let api_url =
