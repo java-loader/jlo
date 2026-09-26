@@ -64,7 +64,7 @@ export JAVA_HOME="$(jlo home 25)"        # just the path
 ```
 
 Outside your interactive profile the plain binary still needs `~/.local/bin` on `PATH`; when it is missing, the
-installer prints the block that adds it.
+installer prints the line that adds it.
 
 J'Lo puts no `java` of its own on your `PATH`. Outside a shell where `jlo env` ran — by hand or through autoload —
 `java` is whatever it was before.

@@ -573,9 +573,9 @@ pub(crate) fn jlo_home_dir() -> anyhow::Result<PathBuf> {
         ));
     }
 
-    // `install` spells this path into a heredoc the user pastes and into
-    // generated shell files, where a newline would end the heredoc or a
-    // comment early. No quoting survives that, so the value is refused.
+    // `install` spells this path into the profile lines the user copies and
+    // into generated shell files, where a newline would split a copied line
+    // or end a comment early. No quoting survives that, so the value is refused.
     if path.to_string_lossy().chars().any(char::is_control) {
         return Err(anyhow!(
             "JLO_HOME must not contain control characters (a newline, say): '{}'",
@@ -689,7 +689,7 @@ mod tests {
         let err = with_jlo_home(&undecodable, jlo_home_dir).expect_err("refused");
         assert!(err.to_string().contains("not valid UTF-8"), "{err}");
 
-        // A newline: ends the pasted heredoc, or a generated comment, early.
+        // A newline: splits a copied profile line, or ends a generated comment early.
         let newline = with_jlo_home(&OsString::from("/tmp/jlo\nx"), jlo_home_dir)
             .expect_err("a newline is refused");
         assert!(

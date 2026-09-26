@@ -538,15 +538,20 @@ fn ensure_symlink(layout: &Layout) -> Option<PathBuf> {
 // Reporting
 // ---------------------------------------------------------------------------
 
-/// What the installer prints. Runnable commands, not prose to act on: one line
-/// makes jlo permanent, the next makes it effective in the shell the user is
-/// sitting in.
+/// What the installer prints: the lines that make jlo permanent, and the one
+/// that makes it effective in the shell the user is sitting in.
 ///
 /// The installer cannot do that second part itself - it runs in a subshell
 /// under `curl | bash` and cannot mutate its parent (ADR-0001, the same reason
 /// `jlo env` exists at all). That the *user* runs it is what keeps this
 /// non-invasive rather than merely convenient: nothing writes to their profile
 /// but them.
+///
+/// The text is the same whatever the user's shell and dotfiles. It names the
+/// usual files and leaves the choice to the user, instead of reading `$SHELL`
+/// and probing login files to print a command for one of them: a wrong guess
+/// there is a file the shell never reads, or - bash - a new login file that
+/// switches off the one the user relies on.
 ///
 /// Everything here goes to stderr. stdout is the environment channel, and
 /// `--reload` prints the reload lines there for the wrapper to eval.
@@ -577,37 +582,27 @@ fn report(layout: &Layout, reinstall: bool, symlink: Option<&Path>) {
             ui::footnote("Already in your profile? Nothing to do. Otherwise add:")
         );
         eprintln!("{}", ui::command(&source_line(&main)));
-    }
-
-    let Some(home) = home else {
-        if !reinstall {
-            // No home directory: there is no profile to name and no portable
-            // line to print. The absolute paths in the layout still work.
-            ui::hint!(
-                "Source {:?} from your shell profile.",
-                layout.home.join("jlo.sh")
-            );
-        }
-        return;
-    };
-    let shell = login_shell_name();
-    let bash_login = bash_login_target(home);
-
-    if !reinstall {
-        let profile = login_shell_profile(&shell, home, bash_login.as_deref());
+    } else {
         eprintln!(
             "\n{}\n",
-            ui::heading("To activate — run this, then the line below it:")
+            ui::heading("To activate, add these lines to ~/.zshrc or ~/.bashrc:")
         );
-        for line in heredoc(layout, Some(home), &profile_target(&profile, Some(home))) {
-            eprintln!("{}", ui::command(&line));
+        for name in ["jlo.sh", "autoload.sh", "completions.sh"] {
+            eprintln!(
+                "{}",
+                ui::command(&source_line(&snippet(layout, home, name)))
+            );
         }
+        // The bash trap: macOS terminals start login shells, which never read
+        // `.bashrc`, and read only the first login file that exists - so
+        // creating `.bash_profile` beside a `.profile` switches that off.
         eprintln!(
             "\n{}",
-            ui::footnote(
-                "The last two lines are optional: switch JDK on cd, and tab completion.\n\
-                 Delete them before pasting if you do not want them."
-            )
+            ui::footnote(&format!(
+                "The last two are optional: switch JDK on cd, and tab completion.\n\
+                 A login bash (what macOS terminals start) skips ~/.bashrc: there, use the\n\
+                 first of {BASH_LOGIN_FILES} that exists, else ~/.bash_profile."
+            ))
         );
         eprintln!("\n{}\n", ui::heading("Then load it into this shell:"));
         eprintln!("{}", ui::command(&format!(". {main}")));
@@ -616,19 +611,20 @@ fn report(layout: &Layout, reinstall: bool, symlink: Option<&Path>) {
             ui::footnote("These lines never change: upgrades regenerate the files they point at.")
         );
     }
-    path_nudge(
-        symlink,
-        home,
-        &path_profile(&shell, home, bash_login.as_deref()),
-    );
+    path_nudge(symlink, home);
 }
+
+/// The files `bash -l` looks for, in the order it looks. It reads only the
+/// first one that exists.
+const BASH_LOGIN_FILES: &str = "~/.bash_profile, ~/.bash_login, ~/.profile";
 
 /// Only nudge about PATH when the symlink was actually created and
 /// `~/.local/bin` is not already on PATH - usually the case on macOS, rarely
-/// on Linux. The hint is a block to paste, naming the file, because the
-/// natural place to put a bare `export` - beside the activation lines in
-/// `~/.zshrc` - is the one file the shells it is for never read.
-fn path_nudge(symlink: Option<&Path>, home: &Path, file: &Path) {
+/// on Linux. The line names its files, because the natural place to put a
+/// bare `export` - beside the activation lines in `~/.zshrc` - is the one file
+/// the shells it is for never read: zsh reads `~/.zshenv` for `-c` and `-lc`
+/// alike, and bash has no such file at all, so a login file is the closest.
+fn path_nudge(symlink: Option<&Path>, home: Option<&Path>) {
     let Some(link) = symlink else { return };
     let Some(dir) = link.parent() else { return };
     let on_path = std::env::var_os("PATH")
@@ -644,106 +640,25 @@ fn path_nudge(symlink: Option<&Path>, home: &Path, file: &Path) {
         ui::footnote(&format!(
             "'jlo' also wants {} on PATH - for non-interactive shells\n\
              (CI, scripts, AI agents) and for 'jlo home'.",
-            tilde(dir, Some(home))
+            tilde(dir, home)
         ))
     );
-    eprintln!("{}\n", ui::heading("Add it to your PATH:"));
-    for line in append_block(
-        &profile_target(file, Some(home)),
-        vec![PATH_LINE.to_string()],
-    ) {
-        eprintln!("{}", ui::command(&line));
-    }
+    eprintln!(
+        "{}\n",
+        ui::heading(&format!(
+            "Add this line to ~/.zshenv, or for bash to the first of\n\
+             {BASH_LOGIN_FILES} that exists, else ~/.bash_profile:"
+        ))
+    );
+    eprintln!("{}", ui::command(PATH_LINE));
 }
 
-/// The basename of `$SHELL`: the user's login shell, the one their profiles
-/// are written for.
-fn login_shell_name() -> String {
-    let shell = std::env::var("SHELL").unwrap_or_default();
-    Path::new(&shell)
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default()
-}
-
-/// The profile the *login* shell reads.
-///
-/// `$SHELL` is the right signal here - unlike in the dialect dispatch, where
-/// the *running* shell is what matters and `$SHELL` would be wrong. The trap
-/// is bash: macOS's Terminal.app starts login shells, which never read
-/// `.bashrc` and read only the first of their three files that exists. Naming
-/// `.bash_profile` to someone whose setup lives in `.profile` would have them
-/// create the file that switches theirs off, so the first existing one is
-/// named, and `.bash_profile` only when there is none.
-///
-/// A wrong guess is harmless by construction: the path stays visible in the
-/// printed command, so correcting it is a one-word edit rather than a line
-/// silently appended to the wrong file.
-fn login_shell_profile(shell: &str, home: &Path, bash_login: Option<&Path>) -> PathBuf {
-    match shell {
-        "zsh" => home.join(".zshrc"),
-        "bash" if cfg!(target_os = "macos") => {
-            bash_login.map_or_else(|| home.join(".bash_profile"), Path::to_path_buf)
-        }
-        "bash" => home.join(".bashrc"),
-        // Neither, or no $SHELL at all: ~/.profile is what a POSIX login shell
-        // reads.
-        _ => home.join(".profile"),
-    }
-}
-
-/// The line the PATH hint appends. It runs in every nested shell, so it adds
+/// The line the PATH hint prints. It runs in every nested shell, so it adds
 /// `~/.local/bin` only once, leaves no stray colon on an empty PATH and reads
 /// PATH nounset-safely. It *appends*: J'Lo only needs `jlo` to be found, and
 /// prepending would change which of the user's other tools in that directory
 /// win.
 const PATH_LINE: &str = r#"case ":${PATH-}:" in *":$HOME/.local/bin:"*) ;; *) export PATH="${PATH:+$PATH:}$HOME/.local/bin" ;; esac"#;
-
-/// The startup file a shell reads *without* the interactive profile - where
-/// `~/.local/bin` has to be put on PATH for scripts and agents to find `jlo`.
-///
-/// zsh reads `~/.zshenv` for `-c` and `-lc` alike. `ZDOTDIR` is ignored, as in
-/// [`login_shell_profile`]: it is usually set inside `~/.zshenv` itself, where
-/// an exported value would name a file a fresh zsh never reads, and the
-/// printed path is one word to correct.
-///
-/// bash has no such file: `bash -c` reads nothing, `bash -l` only the first
-/// existing of `.bash_profile`, `.bash_login` and `.profile` - `bash_login`,
-/// from [`bash_login_target`]. With none of them, `.profile`, which every
-/// POSIX login shell reads.
-fn path_profile(shell: &str, home: &Path, bash_login: Option<&Path>) -> PathBuf {
-    match (shell, bash_login) {
-        ("zsh", _) => home.join(".zshenv"),
-        ("bash", Some(found)) => found.to_path_buf(),
-        _ => home.join(".profile"),
-    }
-}
-
-/// The login file `bash -l` stops at: the first of the three that exists.
-/// Only a missing one is skipped, a dangling symlink included; a directory or
-/// an unreadable file is an error to bash, not a reason to read on, so it is
-/// named rather than the file behind it that would never be read.
-fn bash_login_file(home: &Path) -> Option<PathBuf> {
-    [".bash_profile", ".bash_login", ".profile"]
-        .map(|name| home.join(name))
-        .into_iter()
-        .find(|file| file.exists())
-}
-
-/// The login file `bash -l` reads once the printed blocks have been pasted.
-/// Resolved once so the activation block and the PATH block name the same
-/// file: on macOS the activation block targets it and creates `.bash_profile`
-/// when none exists, and a PATH line put in `.profile` behind that new file
-/// would never be read. On Linux the activation block goes to `.bashrc`,
-/// which `bash -l` never reads, so only the files already there count.
-fn bash_login_target(home: &Path) -> Option<PathBuf> {
-    let found = bash_login_file(home);
-    if cfg!(target_os = "macos") {
-        Some(found.unwrap_or_else(|| home.join(".bash_profile")))
-    } else {
-        found
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Rendering helpers
@@ -763,61 +678,6 @@ fn snippet(layout: &Layout, home: Option<&Path>, name: &str) -> String {
 
 fn source_line(path: &str) -> String {
     format!("[ -s {path} ] && . {path}")
-}
-
-/// The one command that puts J'Lo in the user's profile.
-fn heredoc(layout: &Layout, home: Option<&Path>, target: &str) -> Vec<String> {
-    let body = ["jlo.sh", "autoload.sh", "completions.sh"]
-        .into_iter()
-        .map(|name| source_line(&snippet(layout, home, name)))
-        .collect();
-    append_block(target, body)
-}
-
-/// The one command that appends `body` to `target`, as a heredoc.
-///
-/// Three `printf '%s\n' '...' >> ~/.zshrc` lines came before this, and the
-/// quoting was most of what the reader saw. A heredoc shows the *content*
-/// instead: what the user copies is what ends up in their file, and one paste
-/// replaces three.
-///
-/// **The delimiter is quoted** - `<<'EOF'`, not `<<EOF`. An unquoted delimiter
-/// expands `$HOME` while the heredoc is being written, which would bake this
-/// machine's absolute path into a profile that is meant to stay portable. It
-/// also ends the `echo`-versus-`printf` problem the old form existed to dodge:
-/// a quoted heredoc is literal, so a backslash in a custom `JLO_HOME` arrives
-/// as a backslash under every shell.
-///
-/// The **blank first line** is not decoration either. `>>` appends at the
-/// exact end of the file, and a profile whose last line has no trailing
-/// newline would otherwise have jlo's first line welded onto it.
-///
-/// A fixed `EOF` is safe: `JLO_HOME` cannot contain a newline (refused in
-/// `jlo_home_dir`), so no body line can be a bare `EOF`.
-fn append_block(target: &str, body: Vec<String>) -> Vec<String> {
-    let mut lines = vec![format!("cat >> {target} <<'EOF'"), String::new()];
-    lines.extend(body);
-    lines.push("EOF".to_string());
-    lines
-}
-
-/// The `>>` target. `~` is left unquoted so the shell expands it; a `$HOME`
-/// with anything unusual in it falls back to a quoted absolute path, which is
-/// less readable but correct.
-fn profile_target(profile: &Path, home: Option<&Path>) -> String {
-    let simple = |rest: &str| {
-        !rest.is_empty()
-            && rest
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/'))
-    };
-    if let Some(rest) = home.and_then(|h| profile.strip_prefix(h).ok()) {
-        let rest = display(rest);
-        if simple(&rest) {
-            return format!("~/{rest}");
-        }
-    }
-    sq(&display(profile))
 }
 
 /// POSIX single-quoting, as the one implementation of it.
@@ -903,72 +763,6 @@ mod tests {
         let home = Path::new("/home/u");
         let layout = layout_at(Path::new("/opt/jlo"));
         assert_eq!(snippet(&layout, Some(home), "jlo.sh"), "'/opt/jlo/jlo.sh'");
-    }
-
-    #[test]
-    fn profile_target_uses_tilde_for_a_plain_path() {
-        let home = Path::new("/home/u");
-        assert_eq!(profile_target(&home.join(".zshrc"), Some(home)), "~/.zshrc");
-    }
-
-    /// `~` is the shell's own expansion of `$HOME`, so an apostrophe in the
-    /// home directory is not the printed line's problem - it stays readable,
-    /// and correct, exactly where a baked absolute path would need escaping.
-    #[test]
-    fn profile_target_keeps_the_tilde_over_an_unusual_home() {
-        let home = Path::new("/home/o'brien");
-        assert_eq!(profile_target(&home.join(".zshrc"), Some(home)), "~/.zshrc");
-    }
-
-    /// What the quoting is actually for: a name `~/` cannot stand in for.
-    #[test]
-    fn profile_target_quotes_a_name_the_tilde_cannot_carry() {
-        let home = Path::new("/home/u");
-        let odd = home.join("my profile").join(".zshrc");
-        assert_eq!(
-            profile_target(&odd, Some(home)),
-            "'/home/u/my profile/.zshrc'"
-        );
-        assert_eq!(
-            profile_target(Path::new("/etc/zshrc"), Some(home)),
-            "'/etc/zshrc'"
-        );
-    }
-
-    /// bash reads no startup file for `bash -c` and only the *first* existing
-    /// login file for `bash -l`, so the PATH line has to go into that one.
-    /// Naming a later file would be ignored; creating an earlier one would
-    /// switch off the file the user relies on.
-    #[test]
-    fn path_profile_follows_bash_login_precedence() {
-        let dir = tempfile::tempdir().unwrap();
-        let home = dir.path();
-        let path_file = |home: &Path| path_profile("bash", home, bash_login_file(home).as_deref());
-
-        assert_eq!(path_file(home), home.join(".profile"));
-        // The login file the activation block is about to create is named ...
-        let bash_profile = home.join(".bash_profile");
-        assert_eq!(
-            path_profile("bash", home, Some(&bash_profile)),
-            bash_profile
-        );
-        // ... and with bash's own none at all, `.profile`.
-        assert_eq!(path_profile("bash", home, None), home.join(".profile"));
-
-        fs::write(home.join(".profile"), "").unwrap();
-        assert_eq!(path_file(home), home.join(".profile"));
-        fs::write(home.join(".bash_login"), "").unwrap();
-        assert_eq!(path_file(home), home.join(".bash_login"));
-        fs::write(&bash_profile, "").unwrap();
-        assert_eq!(path_file(home), bash_profile);
-
-        // bash stops at anything there, and a directory is an error, not a
-        // reason to read on - naming the file behind it would go unread.
-        let dir = tempfile::tempdir().unwrap();
-        let home = dir.path();
-        fs::write(home.join(".profile"), "").unwrap();
-        fs::create_dir(home.join(".bash_profile")).unwrap();
-        assert_eq!(path_file(home), home.join(".bash_profile"));
     }
 
     #[test]

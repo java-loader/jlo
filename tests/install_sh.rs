@@ -161,28 +161,7 @@ fn stub_curl(dir: &Path, tarball: &Path, checksum: Checksum) -> PathBuf {
 /// Runs the real installer against a throwaway `HOME`, without judging the
 /// outcome. `jlo_home` overrides the install directory the way a user
 /// exporting `JLO_HOME` would.
-///
-/// `SHELL` is pinned to `shell` so the profile the installer names is
-/// deterministic - it reads the *login* shell from there, which is the right
-/// signal for a file the user will edit, and the wrong one for the dialect
-/// dispatch.
-fn run_installer(
-    jlo_home: Option<&str>,
-    checksum: Checksum,
-    shell: &str,
-) -> (tempfile::TempDir, Output) {
-    run_installer_over(&[], jlo_home, checksum, shell)
-}
-
-/// [`run_installer`] over a home that already holds `dotfiles`, as a real
-/// user's does: which profile file the installer names depends on which ones
-/// exist when it runs.
-fn run_installer_over(
-    dotfiles: &[(&str, &str)],
-    jlo_home: Option<&str>,
-    checksum: Checksum,
-    shell: &str,
-) -> (tempfile::TempDir, Output) {
+fn run_installer(jlo_home: Option<&str>, checksum: Checksum) -> (tempfile::TempDir, Output) {
     let dir = tempfile::tempdir().unwrap();
     let tarball = release_tarball(dir.path());
     let stubbin = stub_curl(dir.path(), &tarball, checksum);
@@ -191,15 +170,10 @@ fn run_installer_over(
     stub_gnu_tar(&stubbin);
     let home = dir.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
-    for (name, body) in dotfiles {
-        std::fs::write(home.join(name), body).unwrap();
-    }
 
     let path = format!("{}:{HERMETIC_PATH}", stubbin.display());
     let mut cmd = hermetic("/bin/sh", &home);
-    cmd.arg(manifest().join("install.sh"))
-        .env("PATH", path)
-        .env("SHELL", shell);
+    cmd.arg(manifest().join("install.sh")).env("PATH", path);
     if let Some(h) = jlo_home {
         cmd.env("JLO_HOME", h.replace("$HOME", &home.display().to_string()));
     }
@@ -208,7 +182,7 @@ fn run_installer_over(
 }
 
 fn install(jlo_home: Option<&str>) -> (tempfile::TempDir, Output) {
-    let (dir, out) = run_installer(jlo_home, Checksum::Correct, "/bin/zsh");
+    let (dir, out) = run_installer(jlo_home, Checksum::Correct);
     assert!(
         out.status.success(),
         "install.sh failed: {}",
@@ -363,11 +337,11 @@ fn generated_entries_parse_under_every_supported_shell() {
     }
 }
 
-/// The printed instructions are the whole manual step: one heredoc the user
-/// pastes, and one line that loads jlo into the shell they are sitting in. If
-/// that shape grows, the regression is user-visible.
+/// The printed instructions are the whole manual step: three lines the user
+/// adds to their profile, and one that loads jlo into the shell they are
+/// sitting in. If that shape grows, the regression is user-visible.
 #[test]
-fn the_printed_snippet_is_one_heredoc_and_one_source_line() {
+fn the_printed_snippet_is_three_profile_lines_and_one_source_line() {
     let (dir, out) = install(None);
     let home = dir.path().join("home");
     let printed = printed(&out);
@@ -384,38 +358,10 @@ fn the_printed_snippet_is_one_heredoc_and_one_source_line() {
         !printed.contains(&format!("{}/jlo.sh", home.join(".jlo").display())),
         "installer hardcoded the expanded home path: {printed}"
     );
-    let block = heredoc_block(&printed).expect("installer printed no heredoc");
-    // The delimiter must be quoted, or `$HOME` is expanded into the profile
-    // and the portable form above is defeated at the moment it is written.
-    assert!(
-        block[0].contains("<<'EOF'"),
-        "the heredoc delimiter is not quoted: {:?}",
-        block[0]
-    );
     assert_eq!(
-        block.last().map(String::as_str),
-        Some("EOF"),
-        "the heredoc does not end with a bare EOF: {block:#?}"
-    );
-    // A blank line first: `>>` appends at the exact end of the file, and a
-    // profile whose last line has no newline would otherwise get jlo's first
-    // line welded onto it.
-    assert_eq!(
-        block[1], "",
-        "the heredoc does not open with a blank line: {block:#?}"
-    );
-    let body: Vec<&String> = block[2..block.len() - 1].iter().collect();
-    assert_eq!(body.len(), 3, "expected three profile lines: {block:#?}");
-    // The PATH hint is a second heredoc when it fires; the activation block
-    // itself must still be printed exactly once.
-    assert_eq!(
-        printed
-            .lines()
-            .map(visible)
-            .filter(|l| l.starts_with("cat >>") && !l.contains(".zshenv"))
-            .count(),
-        1,
-        "expected exactly one activation heredoc:\n{printed}"
+        profile_lines(&printed).len(),
+        3,
+        "expected three profile lines:\n{printed}"
     );
     // The second half of the manual step, and the only other command: the
     // installer runs in a subshell and cannot load jlo into the parent itself.
@@ -430,70 +376,54 @@ fn the_printed_snippet_is_one_heredoc_and_one_source_line() {
     );
 }
 
-/// The heredoc as the user would select it: from `cat >>` to the closing `EOF`,
-/// with the escape bytes stripped so the lines are the ones that reach the
-/// profile.
-fn heredoc_block(printed: &str) -> Option<Vec<String>> {
-    let lines: Vec<String> = printed.lines().map(visible).collect();
-    let start = lines.iter().position(|l| l.starts_with("cat >>"))?;
-    let quoted = lines[start].rsplit_once("<<'")?.1;
-    let delimiter = quoted.strip_suffix('\'')?.to_string();
-    let end = start + 1 + lines[start + 1..].iter().position(|l| *l == delimiter)?;
-    Some(lines[start..=end].to_vec())
+/// The lines the installer offers for the profile, as the user would copy
+/// them: the escape bytes stripped, so they are what reaches the file.
+fn profile_lines(printed: &str) -> Vec<String> {
+    printed
+        .lines()
+        .map(visible)
+        .filter(|l| l.starts_with("[ -s "))
+        .collect()
 }
 
-/// The heredoc that puts `~/.local/bin` on PATH, as the user would select it.
-/// Told apart from the activation block by its body, not by position.
-fn path_block(printed: &str) -> Option<Vec<String>> {
-    let lines: Vec<String> = printed.lines().map(visible).collect();
-    lines
-        .iter()
-        .enumerate()
-        .filter(|(_, l)| l.starts_with("cat >>"))
-        .find_map(|(start, opener)| {
-            let delimiter = opener.rsplit_once("<<'")?.1.strip_suffix('\'')?.to_string();
-            let end = start + 1 + lines[start + 1..].iter().position(|l| *l == delimiter)?;
-            let block = lines[start..=end].to_vec();
-            block
-                .iter()
-                .any(|l| l.contains("$HOME/.local/bin"))
-                .then_some(block)
-        })
+/// The line that puts `~/.local/bin` on PATH, as the user would copy it.
+fn path_line(printed: &str) -> Option<String> {
+    printed
+        .lines()
+        .map(visible)
+        .find(|l| l.starts_with("case "))
+}
+
+/// Appends `lines` to `file` under `home`, the way a user adds them in an
+/// editor.
+fn add_to(home: &Path, file: &str, lines: &[String]) {
+    let path = home.join(file);
+    let mut body = std::fs::read_to_string(&path).unwrap_or_default();
+    for line in lines {
+        body.push_str(line);
+        body.push('\n');
+    }
+    std::fs::write(path, body).unwrap();
 }
 
 /// The PATH hint exists for shells that never read the interactive profile.
-/// Its block, run as pasted - twice, as nested shells would - has to put `jlo`
-/// on PATH for a clean `zsh -c`, exactly once, and it must *append*: the old
-/// hint prepended, so a revert to that shape is plausible and has to fail
-/// this test - hence checking that `~/.local/bin` lands last, not merely that
-/// it is present.
+/// Its line, added to `~/.zshenv` as printed, has to put `jlo` on PATH for a
+/// clean `zsh -c` - and for one nested in it, exactly once - and it must
+/// *append*: the old hint prepended, so a revert to that shape is plausible
+/// and has to fail this test - hence checking that `~/.local/bin` lands last,
+/// not merely that it is present.
 #[test]
-fn the_printed_path_block_reaches_a_non_interactive_zsh() {
-    if skip_missing(
-        "the_printed_path_block_reaches_a_non_interactive_zsh",
-        "zsh",
-    ) {
+fn the_printed_path_line_reaches_a_non_interactive_zsh() {
+    if skip_missing("the_printed_path_line_reaches_a_non_interactive_zsh", "zsh") {
         return;
     }
     let (dir, out) = install(None);
     let home = dir.path().join("home");
-    let block = path_block(&printed(&out)).expect("installer printed no PATH heredoc");
-
-    for _ in 0..2 {
-        let ran = hermetic("/bin/sh", &home)
-            .arg("-c")
-            .arg(block.join("\n"))
-            .output()
-            .unwrap();
-        assert!(
-            ran.status.success(),
-            "the printed PATH block did not run: {}",
-            String::from_utf8_lossy(&ran.stderr)
-        );
-    }
+    let line = path_line(&printed(&out)).expect("installer printed no PATH line");
+    add_to(&home, ".zshenv", &[line]);
 
     let probe = hermetic("zsh", &home)
-        .args(["-c", r#"command -v jlo; print -r -- "PATH=$PATH""#])
+        .args(["-c", r#"zsh -c 'command -v jlo; print -r -- "PATH=$PATH"'"#])
         .output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&probe.stdout);
@@ -502,7 +432,8 @@ fn the_printed_path_block_reaches_a_non_interactive_zsh() {
         stdout
             .lines()
             .any(|l| l == local_bin.join("jlo").display().to_string()),
-        "a clean zsh -c does not find jlo: {stdout}"
+        "a clean zsh -c does not find jlo: {stdout} {}",
+        String::from_utf8_lossy(&probe.stderr)
     );
     let path = stdout
         .lines()
@@ -520,26 +451,6 @@ fn the_printed_path_block_reaches_a_non_interactive_zsh() {
         entries.last(),
         Some(&local_bin),
         "~/.local/bin was not appended to PATH: {path}"
-    );
-}
-
-/// Pastes each printed block, in order, as one script - exactly the shape a
-/// user copying them one after another produces.
-fn paste_blocks(home: &Path, blocks: &[Vec<String>]) {
-    let script = blocks
-        .iter()
-        .map(|block| block.join("\n"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let ran = hermetic("/bin/sh", home)
-        .arg("-c")
-        .arg(script)
-        .output()
-        .unwrap();
-    assert!(
-        ran.status.success(),
-        "pasting the printed blocks failed: {}",
-        String::from_utf8_lossy(&ran.stderr)
     );
 }
 
@@ -587,93 +498,56 @@ fn bash_login_probe(home: &Path, marker_var: &str) -> BashLoginProbe {
     }
 }
 
-/// The only end-to-end coverage of the *bash* half of the two printed blocks.
-///
-/// `bash -l` reads only the first existing of `~/.bash_profile`,
-/// `~/.bash_login` and `~/.profile`. On macOS, where Terminal.app starts
-/// login shells and the activation block therefore targets one of those
-/// files, a wrong choice fails silently: a file the login bash never reads,
-/// such as `~/.bashrc`, leaves it without the `jlo` function (both cases); a
-/// PATH line in `~/.profile` behind a new `~/.bash_profile` is never read
-/// (case 1); creating `~/.bash_profile` in front of an existing `~/.profile`
-/// switches the user's file off (case 2).
-///
-/// On Linux the activation block targets `~/.bashrc`, which is no login file,
-/// so it can shadow nothing - and a login bash does not read it, so only
-/// macOS is expected to have the `jlo` function after the login files ran.
+/// The only end-to-end coverage of the printed lines under a *login* bash -
+/// what macOS terminals start, which never reads `~/.bashrc`. The printed
+/// text sends a login bash to the first existing of `~/.bash_profile`,
+/// `~/.bash_login` and `~/.profile`; the profile lines and the PATH line have
+/// to work from either end of that list, `~/.profile` included, which
+/// `sh -l` reads too - and leave the user's own lines in it working.
 #[test]
-fn a_login_bash_finds_jlo_after_pasting_both_printed_blocks() {
+fn a_login_bash_finds_jlo_after_adding_the_printed_lines() {
     if skip_missing(
-        "a_login_bash_finds_jlo_after_pasting_both_printed_blocks",
+        "a_login_bash_finds_jlo_after_adding_the_printed_lines",
         "/bin/bash",
     ) {
         return;
     }
-
-    // Case 1: a completely fresh HOME, nothing but what the installer itself
-    // is about to write.
-    let (dir, out) = run_installer(None, Checksum::Correct, "/bin/bash");
-    assert!(out.status.success(), "install.sh failed: {}", printed(&out));
+    let (dir, out) = install(None);
     let home = dir.path().join("home");
     let printed_out = printed(&out);
-    let activation = heredoc_block(&printed_out).expect("installer printed no activation heredoc");
-    let path_hint = path_block(&printed_out).expect("installer printed no PATH heredoc");
-    paste_blocks(&home, &[activation, path_hint]);
-
+    let mut lines = profile_lines(&printed_out);
+    lines.push(path_line(&printed_out).expect("installer printed no PATH line"));
     let local_bin_jlo = home.join(".local").join("bin").join("jlo");
-    let probe = bash_login_probe(&home, "JLO_TEST_MARKER");
-    assert_eq!(
-        probe.jlo.as_deref(),
-        Some(local_bin_jlo.display().to_string().as_str()),
-        "a login bash does not find jlo after pasting both printed blocks: {probe:?}"
-    );
-    if cfg!(target_os = "macos") {
+
+    let check = |file: &str, marker: Option<&str>| {
+        let probe = bash_login_probe(&home, "JLO_TEST_MARKER");
+        assert_eq!(
+            probe.jlo.as_deref(),
+            Some(local_bin_jlo.display().to_string().as_str()),
+            "{file}: a login bash does not find jlo on PATH: {probe:?}"
+        );
         assert_eq!(
             probe.kind.as_deref(),
             Some("function"),
-            "a login bash did not load J'Lo from the printed activation block: {probe:?}"
+            "{file}: a login bash did not load J'Lo from the printed lines: {probe:?}"
         );
-    }
-
-    // Case 2: the user's login setup lives in ~/.profile, there before J'Lo
-    // is, exporting a marker only they put there.
-    let (dir2, out2) = run_installer_over(
-        &[(".profile", "export JLO_TEST_MARKER=1\n")],
-        None,
-        Checksum::Correct,
-        "/bin/bash",
-    );
-    assert!(
-        out2.status.success(),
-        "install.sh failed: {}",
-        printed(&out2)
-    );
-    let home2 = dir2.path().join("home");
-    let printed_out2 = printed(&out2);
-    let activation2 =
-        heredoc_block(&printed_out2).expect("installer printed no activation heredoc");
-    let path_hint2 = path_block(&printed_out2).expect("installer printed no PATH heredoc");
-    paste_blocks(&home2, &[activation2, path_hint2]);
-
-    let local_bin_jlo2 = home2.join(".local").join("bin").join("jlo");
-    let probe2 = bash_login_probe(&home2, "JLO_TEST_MARKER");
-    assert_eq!(
-        probe2.jlo.as_deref(),
-        Some(local_bin_jlo2.display().to_string().as_str()),
-        "a login bash with a pre-existing ~/.profile does not find jlo: {probe2:?}"
-    );
-    assert_eq!(
-        probe2.marker.as_deref(),
-        Some("1"),
-        "pasting the printed blocks switched off the user's existing ~/.profile: {probe2:?}"
-    );
-    if cfg!(target_os = "macos") {
         assert_eq!(
-            probe2.kind.as_deref(),
-            Some("function"),
-            "a login bash did not load J'Lo from the printed activation block: {probe2:?}"
+            probe.marker.as_deref(),
+            marker,
+            "{file}: the printed lines broke the user's own: {probe:?}"
         );
-    }
+    };
+
+    // The user's login setup lives in ~/.profile, exporting a marker only
+    // they put there; the printed lines go after it.
+    std::fs::write(home.join(".profile"), "export JLO_TEST_MARKER=1\n").unwrap();
+    add_to(&home, ".profile", &lines);
+    check(".profile", Some("1"));
+
+    // No login file at all: the fallback the printed text names.
+    std::fs::remove_file(home.join(".profile")).unwrap();
+    add_to(&home, ".bash_profile", &lines);
+    check(".bash_profile", None);
 }
 
 /// The half of the output that makes the difference between "installed" and
@@ -705,12 +579,11 @@ fn the_installer_prints_a_line_that_activates_the_current_shell() {
 fn no_copyable_line_is_indented() {
     let (dir, out) = install(None);
     let home = dir.path().join("home");
-    assert_no_indented_commands(&printed(&out), 4, "fresh install");
+    assert_no_indented_commands(&printed(&out), 5, "fresh install");
 
     let coloured = hermetic(home.join(".jlo").join("bin").join("jlo-bin"), &home)
         .arg("__install")
         .env("JLO_HOME", home.join(".jlo"))
-        .env("SHELL", "/bin/zsh")
         .env("CLICOLOR_FORCE", "1")
         .output()
         .unwrap();
@@ -719,9 +592,8 @@ fn no_copyable_line_is_indented() {
         painted.contains('\u{1b}'),
         "CLICOLOR_FORCE produced no escapes, so this run proves nothing: {painted}"
     );
-    // The short form's one source line, and the PATH block's `cat >>` and
-    // `EOF`.
-    assert_no_indented_commands(&painted, 3, "coloured re-install");
+    // The short form's one source line, and the PATH line.
+    assert_no_indented_commands(&painted, 2, "coloured re-install");
 }
 
 /// Strip SGR escapes so the check sees the line the *user* sees. `trim_start`
@@ -753,13 +625,12 @@ fn visible(line: &str) -> String {
 fn assert_no_indented_commands(printed: &str, expected: usize, what: &str) {
     let runnable = |l: &str| {
         let t = l.trim_start();
-        t.starts_with("cat >> ")
-            || t.starts_with(". \"")
+        t.starts_with(". \"")
             || t.starts_with(". '")
+            || t.starts_with("case ")
             || t.starts_with("export ")
             || t.starts_with("[ -s ")
             || t.starts_with("ln -s ")
-            || t.trim_end() == "EOF"
     };
     let commands: Vec<String> = printed
         .lines()
@@ -782,22 +653,6 @@ fn assert_no_indented_commands(printed: &str, expected: usize, what: &str) {
     );
 }
 
-/// The profile file is chosen from `$SHELL` - the login shell, which is what
-/// the user will actually edit - and stays *visible* in the printed command,
-/// so a wrong guess is a one-word fix rather than a line written silently into
-/// the wrong file.
-#[test]
-fn the_profile_path_follows_the_login_shell() {
-    let (dir, out) = run_installer(None, Checksum::Correct, "/bin/zsh");
-    assert!(out.status.success());
-    drop(dir);
-    assert!(
-        printed(&out).contains(">> ~/.zshrc"),
-        "installer did not name the zsh profile: {}",
-        printed(&out)
-    );
-}
-
 /// A reinstall cannot know whether the profile sources jlo.sh - a text scan
 /// cannot prove a line runs - so it prints the same short form whatever the
 /// profile holds: one footnote and the one line, never the first-install block.
@@ -805,8 +660,9 @@ fn the_profile_path_follows_the_login_shell() {
 fn a_reinstall_prints_the_short_form() {
     let (dir, first) = install(None);
     let home = dir.path().join("home");
-    assert!(
-        printed(&first).contains("To activate"),
+    assert_eq!(
+        profile_lines(&printed(&first)).len(),
+        3,
         "the first install withheld the instructions"
     );
     let line = "[ -s \"$HOME/.jlo/jlo.sh\" ] && . \"$HOME/.jlo/jlo.sh\"";
@@ -831,10 +687,6 @@ fn a_reinstall_prints_the_short_form() {
             .filter(|l| l.starts_with("[ -s ") || l.starts_with(". "))
             .collect();
         assert_eq!(sources, [line], "{profile:?}: {printed}");
-        assert!(
-            !printed.contains("To activate") && !printed.contains(">> ~/.zshrc"),
-            "{profile:?}: the upgrade repeated the first-install block: {printed}"
-        );
     }
 }
 
@@ -844,7 +696,6 @@ fn reinstall_over(home: &Path) -> Output {
     hermetic(home.join(".jlo").join("bin").join("jlo-bin"), home)
         .arg("__install")
         .env("JLO_HOME", home.join(".jlo"))
-        .env("SHELL", "/bin/zsh")
         .output()
         .unwrap()
 }
@@ -853,12 +704,8 @@ fn reinstall_over(home: &Path) -> Output {
 /// that ends a quoted string early turns every one of them into a syntax error,
 /// which the user discovers only when their profile breaks. An apostrophe is the
 /// one that actually closes the quote; `$` and a backtick must survive as data
-/// rather than being expanded when the file is sourced.
-///
-/// The backslash is in here for the *printed* half rather than the generated
-/// one: `echo` expands `\n` in zsh, in dash and in any bash built with
-/// `xpg_echo`, so the append command the user is told to run would have written
-/// a line break into their profile and split the line in two.
+/// rather than being expanded when the file is sourced. The printed profile
+/// lines carry the same path, and are checked the same way.
 #[test]
 fn a_jlo_home_with_shell_metacharacters_still_generates_valid_files() {
     let (dir, out) = install(Some("$HOME/o'brien $x `id` a\\nb"));
@@ -901,46 +748,29 @@ fn a_jlo_home_with_shell_metacharacters_still_generates_valid_files() {
         );
     }
 
-    // What the installer prints is a command the *user* runs, so the path is
-    // quoted twice over: once inside the profile line, and once by the shell
-    // reading the heredoc. Rather than inspect either, run the block the
-    // installer printed and then source what it produced.
-    let printed = printed(&out);
-    let block = heredoc_block(&printed).expect("installer printed no heredoc");
-    let append = block.join("\n");
-    // Under both shells. A quoted heredoc is literal everywhere, which is the
-    // property being asserted: the backslash in this JLO_HOME must arrive in
-    // the profile unchanged.
+    // What the installer prints is what the *user* puts in their profile:
+    // added as printed, it has to load the wrapper under both shells.
+    let lines = profile_lines(&printed(&out));
+    assert_eq!(lines.len(), 3, "expected three profile lines: {lines:#?}");
     for (i, sh) in shells(
         "a_jlo_home_with_shell_metacharacters_still_generates_valid_files",
         INTERPRETERS,
     )
     .enumerate()
     {
-        // A profile of its own per shell, so the second run appends to an
-        // empty file rather than to the first run's line.
-        let profile = home.join(format!(".profile{i}"));
-        let appended = append.replacen(">> ~/.zshrc", &format!(">> {}", squote(&profile)), 1);
-        assert_ne!(appended, append, "could not redirect the printed command");
-        // The heredoc body ends up in the profile verbatim, blank line
-        // included; only the entry line has to load the wrapper.
+        let profile = format!(".profile{i}");
+        add_to(&home, &profile, &lines);
         let ran = hermetic(sh, &home)
             .arg("-c")
-            .arg(format!("{appended}\n. {}\ntype jlo", squote(&profile)))
+            .arg(format!(". {}\ntype jlo", squote(home.join(&profile))))
             .output()
             .unwrap();
         let stdout = String::from_utf8_lossy(&ran.stdout);
         assert!(
             stdout.contains("function"),
-            "{sh}: the printed command did not produce a profile line that loads \
-             the wrapper: {stdout:?} line={appended:?} stderr={:?}",
+            "{sh}: the printed profile lines do not load the wrapper: {stdout:?} \
+             lines={lines:?} stderr={:?}",
             String::from_utf8_lossy(&ran.stderr)
-        );
-        let written = std::fs::read_to_string(&profile).unwrap();
-        assert_eq!(
-            written.lines().filter(|l| !l.trim().is_empty()).count(),
-            3,
-            "{sh}: the heredoc wrote {written:?} into the profile"
         );
     }
 }
@@ -1256,7 +1086,6 @@ fn an_unmanaged_jlo_on_path_is_left_untouched() {
 
     let out = hermetic("/bin/sh", &home)
         .arg(manifest().join("install.sh"))
-        .env("SHELL", "/bin/zsh")
         .env("PATH", format!("{}:{HERMETIC_PATH}", stubbin.display()))
         .output()
         .unwrap();
@@ -1378,7 +1207,7 @@ fn jlo_sh_defines_a_working_jlo_under_sh() {
 /// A checksum that is present and wrong is fatal, and nothing is installed.
 #[test]
 fn a_checksum_mismatch_aborts_the_install() {
-    let (dir, out) = run_installer(None, Checksum::Wrong, "/bin/zsh");
+    let (dir, out) = run_installer(None, Checksum::Wrong);
     let home = dir.path().join("home");
     assert!(
         !out.status.success(),
@@ -1496,7 +1325,6 @@ fn a_missing_hashing_tool_refuses_and_keeps_the_existing_install() {
                 tools.display()
             ),
         )
-        .env("SHELL", "/bin/zsh")
         .output()
         .unwrap();
 
@@ -1591,7 +1419,6 @@ fn a_malformed_checksum_file_aborts_the_install_with(malformed: &str) {
     std::fs::create_dir_all(&home).unwrap();
     let out = hermetic("/bin/sh", &home)
         .arg(manifest().join("install.sh"))
-        .env("SHELL", "/bin/zsh")
         .env("PATH", format!("{}:{HERMETIC_PATH}", stubbin.display()))
         .output()
         .unwrap();
@@ -1861,14 +1688,14 @@ fn the_old_profile_paths_load_the_new_wrapper() {
     }
 }
 
-/// A newline in `JLO_HOME` would end the pasted heredoc, or a comment in a
-/// generated file, early, so it is refused. The installer checks before its
+/// A newline in `JLO_HOME` would split a printed profile line, or end a
+/// comment in a generated file early, so it is refused. The installer checks before its
 /// first `mkdir`: the binary would refuse too, but only after the installer
 /// had created `$JLO_HOME` and unpacked a staged copy into it, which a refusal
 /// at that point leaves behind.
 #[test]
 fn an_installer_refuses_a_jlo_home_with_a_newline() {
-    let (dir, out) = run_installer(Some("$HOME/jlo\nhome"), Checksum::Correct, "/bin/zsh");
+    let (dir, out) = run_installer(Some("$HOME/jlo\nhome"), Checksum::Correct);
     let home = dir.path().join("home");
     let jlo_home = home.join("jlo\nhome");
     assert_eq!(out.status.code(), Some(1), "{}", printed(&out));
@@ -1895,7 +1722,6 @@ fn an_installer_refuses_a_jlo_home_with_a_newline() {
     let direct = hermetic(jlo_bin(), &home)
         .arg("__install")
         .env("JLO_HOME", &jlo_home)
-        .env("SHELL", "/bin/zsh")
         .output()
         .unwrap();
     assert_eq!(direct.status.code(), Some(1), "{}", printed(&direct));
@@ -1919,7 +1745,6 @@ fn an_installer_refuses_a_jlo_home_with_a_newline() {
     let out = hermetic("/bin/sh", &home)
         .arg(manifest().join("install.sh"))
         .env("PATH", path)
-        .env("SHELL", "/bin/zsh")
         .env("LC_ALL", "C")
         .env("JLO_HOME", &jlo_home)
         .output()
@@ -1966,8 +1791,7 @@ fn publish_self_renames_the_staged_binary_into_the_layout() {
     let out = run_staged(
         hermetic(&staged, &home)
             .args(["__install", "--publish-self"])
-            .env("JLO_HOME", &jlo_home)
-            .env("SHELL", "/bin/zsh"),
+            .env("JLO_HOME", &jlo_home),
     );
     assert!(
         out.status.success(),
@@ -2006,8 +1830,7 @@ fn publish_self_is_a_no_op_when_the_binary_is_already_in_place() {
     let out = run_staged(
         hermetic(&binary, &home)
             .args(["__install", "--publish-self"])
-            .env("JLO_HOME", &jlo_home)
-            .env("SHELL", "/bin/zsh"),
+            .env("JLO_HOME", &jlo_home),
     );
     assert!(
         out.status.success(),
@@ -2041,7 +1864,6 @@ fn reinstall_with_installer(dir: &Path, home: &Path) -> Output {
     hermetic("/bin/sh", home)
         .arg(manifest().join("install.sh"))
         .env("PATH", path)
-        .env("SHELL", "/bin/zsh")
         .output()
         .unwrap()
 }
@@ -2066,8 +1888,7 @@ fn a_rejected_option_leaves_the_binary_and_no_staging() {
     let out = run_staged(
         hermetic(stage.join("jlo-bin"), &home)
             .args(["__install", "--publish-self", "--no-such-option"])
-            .env("JLO_HOME", &jlo_home)
-            .env("SHELL", "/bin/zsh"),
+            .env("JLO_HOME", &jlo_home),
     );
     assert_eq!(out.status.code(), Some(1), "{}", printed(&out));
     assert!(
@@ -2101,7 +1922,6 @@ fn the_download_origin_is_overridable() {
     let out = hermetic("/bin/sh", &home)
         .arg(manifest().join("install.sh"))
         .env("PATH", path)
-        .env("SHELL", "/bin/zsh")
         .env("JLO_INSTALL_BASE_URL", "https://example.invalid/jlo")
         .output()
         .unwrap();
@@ -2173,8 +1993,7 @@ fn a_staging_name_outside_the_install_directory_is_left_alone() {
     let out = run_staged(
         hermetic(impostor.join("jlo-bin"), &home)
             .args(["__install", "--publish-self"])
-            .env("JLO_HOME", &elsewhere)
-            .env("SHELL", "/bin/zsh"),
+            .env("JLO_HOME", &elsewhere),
     );
     assert!(
         out.status.success(),
@@ -2207,8 +2026,7 @@ fn staging_cleanup_stops_at_anything_it_did_not_put_there() {
     let out = run_staged(
         hermetic(stage.join("jlo-bin"), &home)
             .args(["__install", "--publish-self"])
-            .env("JLO_HOME", &jlo_home)
-            .env("SHELL", "/bin/zsh"),
+            .env("JLO_HOME", &jlo_home),
     );
     assert!(
         out.status.success(),
@@ -2284,8 +2102,7 @@ fn the_sweep_spares_the_staging_directory_the_running_binary_came_from() {
     let out = run_staged(
         hermetic(&staged, &home)
             .args(["__install", "--publish-self"])
-            .env("JLO_HOME", &jlo_home)
-            .env("SHELL", "/bin/zsh"),
+            .env("JLO_HOME", &jlo_home),
     );
     assert!(
         out.status.success(),
