@@ -36,6 +36,10 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// What a user runs when `selfupdate` cannot finish the job.
 const INSTALL_LINE: &str = "/bin/bash -c \"$(curl -fsSL https://github.com/java-loader/jlo/releases/latest/download/install.sh)\"";
 
+/// How long `jlo update` waits for the tag. The hint is a courtesy on a command
+/// that has already done its work; a slow release host must not hold the prompt.
+const HINT_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// The one contact with the GitHub release host, the way `AdoptiumClient` is
 /// for Adoptium: one type per remote, each with an injectable base URL.
 pub(crate) struct ReleaseClient {
@@ -63,6 +67,11 @@ impl ReleaseClient {
 
     fn from_env() -> Self {
         Self::new(std::env::var("JLO_RELEASE_API_URL").unwrap_or_else(|_| RELEASES_URL.to_string()))
+    }
+
+    fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = Some(timeout);
+        self
     }
 
     /// The tag of the latest release, read from the `Location` header of
@@ -181,6 +190,34 @@ pub(crate) fn cmd_selfupdate(wrapped: bool) -> Result<(), CommandError> {
         ui::created!("{} is already the latest version.", ui::jlo_mark(VERSION));
     }
     Ok(install::print_reload(&layout, wrapped)?)
+}
+
+/// The one line `jlo update` adds when a newer J'Lo is out and `jlo
+/// selfupdate` could install it.
+///
+/// Silent on every failure: this runs after the update has done its work, and
+/// an error here would read as that work failing. Asked only for the J'Lo
+/// `selfupdate` may replace, so Homebrew's and a local build never make the
+/// request.
+pub(crate) fn announce_newer_release() {
+    let Ok(home) = crate::jlo_home_dir() else {
+        return;
+    };
+    if !install::is_current_exe(&Layout::new(home).binary()) {
+        return;
+    }
+    let Ok(tag) = ReleaseClient::from_env()
+        .with_timeout(HINT_TIMEOUT)
+        .latest_tag()
+    else {
+        return;
+    };
+    let Ok(latest) = version_from_tag(&tag) else {
+        return;
+    };
+    if is_newer(latest, VERSION).unwrap_or(false) {
+        ui::hint!("{}", ui::newer_jlo_hint(latest));
+    }
 }
 
 /// Whether this is the J'Lo `selfupdate` may replace: the binary at

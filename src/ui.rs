@@ -699,6 +699,11 @@ pub(crate) fn unsourced_env_hint(java_version: &str) -> String {
     )
 }
 
+/// Under `jlo update`'s report when a newer J'Lo is out.
+pub(crate) fn newer_jlo_hint(latest: &str) -> String {
+    format!("J'Lo {latest} is available. Run 'jlo selfupdate' to install it.")
+}
+
 /// The line `jlo install` and `jlo update` end on when a superseded build is
 /// still on disk after an install. Both delete what their own downloads
 /// supersede, so this is only ever a leftover - a name this run did not move,

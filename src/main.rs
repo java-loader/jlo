@@ -441,6 +441,22 @@ fn cmd_install(
     install_names(client, &store, requests, wrapped)
 }
 
+/// `jlo update`, and then the one question about J'Lo itself.
+///
+/// Asked after the update whatever its outcome - a failed one included, since
+/// a newer J'Lo may be the fix - and before `main` reports that outcome, so
+/// the payload already written stays the update's own. Not in
+/// `install_names`, which `install` shares: `update` is the one verb that asks.
+fn cmd_update(
+    client: &AdoptiumClient,
+    versions: Vec<String>,
+    wrapped: bool,
+) -> Result<(), CommandError> {
+    let result = update_jdks(client, versions, wrapped);
+    selfupdate::announce_newer_release();
+    result
+}
+
 /// `jlo update`: the names given, or every installed name.
 ///
 /// The same operation as `install` - see [`install_names`]. Without an
@@ -452,7 +468,7 @@ fn cmd_install(
 /// Someone who installed `28-ea` wants it current, and the stream's weekly
 /// builds are replaced rather than piling up, so following it costs a
 /// download, not the disk.
-fn cmd_update(
+fn update_jdks(
     client: &AdoptiumClient,
     versions: Vec<String>,
     wrapped: bool,
