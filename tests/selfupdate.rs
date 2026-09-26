@@ -858,8 +858,6 @@ fn a_hanging_lookup_is_cut_off() {
 #[test]
 fn an_early_failure_keeps_its_status_and_single_error() {
     let install = Install::new();
-    // An empty store: a missing one is a different failure.
-    fs::create_dir_all(jdk_store_in(install.path())).unwrap();
     let release = Release::at(TAG, 1);
 
     let out = install.run(&["update"], &release.url());

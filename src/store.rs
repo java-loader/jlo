@@ -269,11 +269,7 @@ impl JdkStore {
     /// first. A missing base directory is not an error - it just means nothing
     /// has been installed yet.
     pub(crate) fn list(&self) -> anyhow::Result<Vec<InstalledJdk>> {
-        let candidates = match self.scan() {
-            Ok(candidates) => candidates,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(e) => return Err(e).with_context(|| self.read_failure()),
-        };
+        let candidates = self.scan_existing()?;
 
         // Filtered before sorting: a name that does not parse compares equal
         // to everything, which is no total order to sort by.
@@ -375,10 +371,11 @@ impl JdkStore {
 
     /// The version names present in the store, in `jlo list`'s order. A
     /// major with a build of each stream installed contributes both of its
-    /// names.
+    /// names. A missing base directory is an empty store, so a bare
+    /// `jlo update` before the first install says there is nothing to update.
     pub(crate) fn installed_requests(&self) -> anyhow::Result<Vec<Request>> {
         let requests: HashSet<Request> = self
-            .scan_required()?
+            .scan_existing()?
             .into_iter()
             .filter_map(|candidate| candidate.request)
             .collect();
@@ -717,6 +714,16 @@ impl JdkStore {
                 }
             })
             .collect())
+    }
+
+    /// [`Self::scan`] for the callers that read an absent base directory as
+    /// an empty store - nothing has been installed yet - but still fail on
+    /// one that exists and cannot be read.
+    fn scan_existing(&self) -> anyhow::Result<Vec<Candidate>> {
+        match self.scan() {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+            result => result.with_context(|| self.read_failure()),
+        }
     }
 
     /// [`Self::scan`] for the callers that treat an unreadable - or absent -
@@ -1301,6 +1308,7 @@ mod tests {
     use super::*;
     use crate::request::request;
     use std::fs;
+    use std::os::unix::fs::PermissionsExt;
     use tempfile::tempdir;
 
     fn create_jdk_dir(base: &Path, version: &str, managed: bool) {
@@ -1782,14 +1790,30 @@ mod tests {
         );
     }
 
-    /// A bare `jlo update` reports an unreadable install directory rather than
-    /// quietly finding nothing to update.
+    /// Before the first install there is no base directory, and a bare
+    /// `jlo update` then has nothing to update rather than an I/O error.
     #[test]
-    fn installed_requests_missing_base_dir_is_an_error() {
+    fn installed_requests_missing_base_dir_is_empty() {
         let dir = tempdir().unwrap();
         let missing = dir.path().join("nothing-installed-here");
 
-        let err = JdkStore::at(&missing).installed_requests().unwrap_err();
+        let requests = JdkStore::at(&missing).installed_requests().unwrap();
+        assert!(requests.is_empty(), "{requests:?}");
+    }
+
+    /// Only absence reads as empty: a base directory that exists but cannot
+    /// be read is reported rather than quietly finding nothing to update.
+    #[test]
+    fn installed_requests_unreadable_base_dir_is_an_error() {
+        let dir = tempdir().unwrap();
+        let base = dir.path().join("store");
+        std::fs::create_dir(&base).unwrap();
+        std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let result = JdkStore::at(&base).installed_requests();
+        std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let err = result.unwrap_err();
         assert!(
             format!("{err:#}").contains("could not read JDK base directory"),
             "{err:#}"

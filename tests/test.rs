@@ -1471,6 +1471,24 @@ fn a_bare_update_asks_about_every_installed_name() {
     asked_28_ea.assert();
 }
 
+/// A fresh machine has no store directory until the first install creates it.
+/// A bare `update` there has nothing to update - not an I/O error about a
+/// directory the user never made.
+#[test]
+fn a_bare_update_without_a_store_has_nothing_to_update() {
+    let home = tempfile::tempdir().unwrap();
+    assert!(!jdk_store_in(home.path()).exists());
+
+    jlo(home.path())
+        .arg("update")
+        .assert()
+        .failure()
+        .code(1)
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("no installed JDKs to update"))
+        .stderr(predicate::str::contains("could not read JDK base directory").not());
+}
+
 // -- remove --
 
 /// A deletion that could not be made must not exit 0. Both selectors printed
