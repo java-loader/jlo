@@ -371,14 +371,19 @@ fn exec_help_still_shows_after_an_explicit_version() {
 
 #[test]
 fn exec_passes_hyphen_args_through_to_the_child() {
-    // `--help` after `--` belongs to the child, not to jlo. `true` ignores it
-    // and prints nothing; jlo's own help would print its usage.
+    // `--help` after `--` belongs to the child, not to jlo. The child echoes
+    // its argument back verbatim; jlo's own help would print its usage. Not
+    // `true` or `echo`: GNU coreutils answers `--help` on both.
     let (home, project) = store_fixture(&["21.0.5+11"]);
 
-    fixture_cmd(home.path(), &project, &["exec", "--", "true", "--help"])
-        .assert()
-        .success()
-        .stdout(predicate::str::is_empty());
+    fixture_cmd(
+        home.path(),
+        &project,
+        &["exec", "--", "sh", "-c", "printf %s \"$1\"", "sh", "--help"],
+    )
+    .assert()
+    .success()
+    .stdout("--help");
 }
 
 #[test]
