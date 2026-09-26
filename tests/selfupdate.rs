@@ -334,6 +334,10 @@ fn an_http_error_on_the_installer_runs_nothing() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(1), "{stderr:?}");
     assert!(stderr.contains("HTTP 404"), "{stderr:?}");
+    assert!(
+        stderr.contains("Run the installer directly"),
+        "no way out named: {stderr:?}"
+    );
     assert_eq!(String::from_utf8_lossy(&out.stdout), "");
     release.assert();
 }

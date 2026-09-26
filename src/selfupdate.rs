@@ -245,7 +245,9 @@ fn check_owned(layout: &Layout) -> Result<(), CommandError> {
 fn run_installer(client: &ReleaseClient, layout: &Layout, tag: &str) -> Result<(), CommandError> {
     let mut script =
         tempfile::NamedTempFile::new().context("could not create a file for the installer")?;
-    client.fetch_installer(tag, script.as_file_mut())?;
+    client
+        .fetch_installer(tag, script.as_file_mut())
+        .map_err(|e| CommandError::with_hint(e, installer_hint()))?;
     let status = Command::new("sh")
         .arg(script.path())
         .env("JLO_INSTALL_BASE_URL", client.download_base(tag))
@@ -256,10 +258,14 @@ fn run_installer(client: &ReleaseClient, layout: &Layout, tag: &str) -> Result<(
     if !status.success() {
         return Err(CommandError::with_hint(
             anyhow!("the installer of {tag} failed ({status})."),
-            format!("Run the installer directly: {INSTALL_LINE}"),
+            installer_hint(),
         ));
     }
     Ok(())
+}
+
+fn installer_hint() -> String {
+    format!("Run the installer directly: {INSTALL_LINE}")
 }
 
 #[cfg(test)]
