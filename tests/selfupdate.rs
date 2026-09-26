@@ -23,7 +23,7 @@
 
 mod common;
 
-use common::{INTERPRETERS, shells};
+use common::{INTERPRETERS, hermetic, jlo_bin, shells};
 use sha2::{Digest, Sha256};
 use std::fs::{self, File};
 use std::os::unix::fs::PermissionsExt as _;
@@ -63,7 +63,7 @@ impl Install {
         // that moment, and exec'ing `target` then fails with ETXTBSY until
         // that child has exec'd in turn.
         let copied = Command::new("cp")
-            .arg(assert_cmd::cargo::cargo_bin("jlo-bin"))
+            .arg(jlo_bin())
             .arg(&target)
             .status()
             .unwrap();
@@ -90,7 +90,8 @@ impl Install {
     /// The version of the binary under test, read from the binary itself so
     /// the fixtures never drift from `Cargo.toml`.
     fn version() -> String {
-        let out = Command::new(assert_cmd::cargo::cargo_bin("jlo-bin"))
+        let home = tempfile::tempdir().unwrap();
+        let out = hermetic(jlo_bin(), home.path())
             .arg("--version")
             .output()
             .unwrap();
@@ -128,12 +129,10 @@ impl Install {
     }
 
     fn run(&self, args: &[&str], base_url: &str) -> std::process::Output {
-        Command::new(self.binary())
+        hermetic(self.binary(), self.home.path())
             .args(args)
             .env("JLO_HOME", self.home.path())
             .env("JLO_RELEASE_API_URL", base_url)
-            // Keep the symlink logic out of the developer's real ~/.local/bin.
-            .env("HOME", self.home.path())
             .output()
             .unwrap()
     }
@@ -161,7 +160,7 @@ impl Install {
 /// file `O_CLOEXEC`, so without the explicit `fcntl` the lock would be gone
 /// here - silently, and exactly while this process publishes.
 fn fake_release_binary(version: &str) -> String {
-    let real = assert_cmd::cargo::cargo_bin("jlo-bin");
+    let real = jlo_bin();
     format!(
         "#!/bin/sh\n\
          case \"$1\" in\n\
@@ -469,10 +468,9 @@ fn a_wrapped_update_reloads_the_calling_shell() {
     for sh in shells("a_wrapped_update_reloads_the_calling_shell", INTERPRETERS) {
         let install = Install::new("installer");
         let release = Release::good(TAG, NEWER);
-        let layout = Command::new(install.binary())
+        let layout = hermetic(install.binary(), install.path())
             .arg("__install")
             .env("JLO_HOME", install.path())
-            .env("HOME", install.path())
             .output()
             .unwrap();
         assert!(layout.status.success(), "{layout:?}");
@@ -698,10 +696,9 @@ fn a_held_lock_stops_a_second_update() {
 fn the_install_verb_prints_the_reload_line_only_with_reload() {
     let install = Install::new("installer");
 
-    let quiet = Command::new(install.binary())
+    let quiet = hermetic(install.binary(), install.path())
         .arg("__install")
         .env("JLO_HOME", install.path())
-        .env("HOME", install.path())
         .output()
         .unwrap();
     assert!(quiet.status.success());
@@ -711,10 +708,9 @@ fn the_install_verb_prints_the_reload_line_only_with_reload() {
         "the bootstrap install wrote to the environment channel"
     );
 
-    let loud = Command::new(install.binary())
+    let loud = hermetic(install.binary(), install.path())
         .args(["__install", "--reload"])
         .env("JLO_HOME", install.path())
-        .env("HOME", install.path())
         .output()
         .unwrap();
     assert!(loud.status.success());

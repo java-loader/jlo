@@ -20,7 +20,7 @@
 
 mod common;
 
-use common::{bash_bin, skip_missing};
+use common::{bash_bin, hermetic, jlo_bin, skip_missing};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -39,9 +39,8 @@ fn autoload_script() -> String {
         let home = Path::new(env!("CARGO_TARGET_TMPDIR")).join("autoload");
         let _ = std::fs::remove_dir_all(&home);
         std::fs::create_dir_all(&home).unwrap();
-        let out = Command::new(env!("CARGO_BIN_EXE_jlo-bin"))
+        let out = hermetic(jlo_bin(), &home)
             .arg("__install")
-            .env("HOME", &home)
             .env("JLO_HOME", home.join(".jlo"))
             .output()
             .unwrap();

@@ -5,8 +5,8 @@ mod common;
 
 use assert_cmd::Command;
 use common::{
-    INTERPRETERS, chmod, fake_jdk_archive, install_fake_jdk, jdk_store_in, latest, offer, shells,
-    squote,
+    INTERPRETERS, chmod, fake_jdk_archive, hermetic, install_fake_jdk, jdk_store_in, jlo, jlo_bin,
+    jlo_online, latest, offer, shells, squote,
 };
 use predicates::prelude::*;
 use serial_test::serial;
@@ -31,13 +31,10 @@ fn store_fixture(versions: &[&str]) -> (tempfile::TempDir, std::path::PathBuf) {
 /// so "nothing configured" is genuinely nothing, and the network is wired to
 /// fail.
 fn fixture_cmd(home: &std::path::Path, project: &std::path::Path, args: &[&str]) -> Command {
-    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
+    let mut cmd = jlo(home);
     cmd.args(args)
         .current_dir(project)
-        .env("HOME", home)
-        .env("JLO_HOME", home.join(".jlo"))
-        .env("JLO_ADOPTIUM_API_URL", "http://127.0.0.1:1")
-        .env_remove("JAVA_HOME");
+        .env("JLO_HOME", home.join(".jlo"));
     cmd
 }
 
@@ -70,23 +67,18 @@ fn removed_and_hidden_names_are_nowhere_to_be_found() {
             .not()
     }
 
-    let bash = Command::cargo_bin("jlo-bin")
-        .unwrap()
+    let home = tempfile::tempdir().unwrap();
+    let bash = jlo(home.path())
         .args(["completions", "bash"])
         .assert()
         .success();
     let bash = String::from_utf8(bash.get_output().stdout.clone()).unwrap();
-    let zsh = Command::cargo_bin("jlo-bin")
-        .unwrap()
+    let zsh = jlo(home.path())
         .args(["completions", "zsh"])
         .assert()
         .success();
     let zsh = String::from_utf8(zsh.get_output().stdout.clone()).unwrap();
-    let help = Command::cargo_bin("jlo-bin")
-        .unwrap()
-        .arg("--help")
-        .assert()
-        .success();
+    let help = jlo(home.path()).arg("--help").assert().success();
     let help = String::from_utf8(help.get_output().stdout.clone()).unwrap();
 
     for name in ["clean", "prune", "default", "version", "sing", "__install"] {
@@ -131,8 +123,7 @@ fn removed_and_hidden_names_are_nowhere_to_be_found() {
         ("prnue", "prune"),
         ("__instal", "__install"),
     ] {
-        Command::cargo_bin("jlo-bin")
-            .unwrap()
+        jlo(home.path())
             .arg(typo)
             .assert()
             .failure()
@@ -141,16 +132,11 @@ fn removed_and_hidden_names_are_nowhere_to_be_found() {
 
     // Removed means gone, not hidden-but-working.
     for name in ["clean", "prune", "default", "version"] {
-        Command::cargo_bin("jlo-bin")
-            .unwrap()
-            .arg(name)
-            .assert()
-            .failure();
+        jlo(home.path()).arg(name).assert().failure();
     }
 
     // The easter egg is hidden, not removed.
-    Command::cargo_bin("jlo-bin")
-        .unwrap()
+    jlo(home.path())
         .arg("sing")
         .assert()
         .success()
@@ -160,13 +146,7 @@ fn removed_and_hidden_names_are_nowhere_to_be_found() {
     // `env --verbose` and `update --all` went the same way, and have no
     // subcommand entry to check. `--all` became what a bare `update` means.
     for args in [["env", "--verbose"], ["update", "--all"]] {
-        Command::cargo_bin("jlo-bin")
-            .unwrap()
-            .args(args)
-            .env("JLO_ADOPTIUM_API_URL", "http://127.0.0.1:1")
-            .assert()
-            .failure()
-            .code(2);
+        jlo(home.path()).args(args).assert().failure().code(2);
     }
 }
 
@@ -183,11 +163,10 @@ fn removed_and_hidden_names_are_nowhere_to_be_found() {
 /// emitted none.
 #[test]
 fn offline_fails_without_touching_the_network() {
+    let home = tempfile::tempdir().unwrap();
     for verb in ["home", "env"] {
-        Command::cargo_bin("jlo-bin")
-            .unwrap()
+        jlo(home.path())
             .args([verb, "--offline", "99"])
-            .env("JLO_ADOPTIUM_API_URL", "http://127.0.0.1:1")
             .assert()
             .failure()
             .code(1)
@@ -206,9 +185,9 @@ fn remove_names_every_version_that_missed_in_one_message() {
     // All three have to be named at once: since the rule is that none of
     // them ran, reporting only the first would send the user through one
     // rerun per typo.
-    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let mut cmd = jlo(home.path());
     cmd.args(["remove", "97", "98", "99"])
-        .env("JLO_ADOPTIUM_API_URL", "http://127.0.0.1:1")
         .assert()
         .failure()
         .code(1)
@@ -222,7 +201,8 @@ fn remove_names_every_version_that_missed_in_one_message() {
 #[test]
 fn remove_requires_at_least_one_version() {
     // A bare `jlo remove` must be a usage error, not a no-op that exits 0.
-    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let mut cmd = jlo(home.path());
     cmd.arg("remove")
         .assert()
         .failure()
@@ -249,12 +229,8 @@ fn remove_superseded_deletes_only_the_older_managed_builds() {
     let vendor = jdk_store_in(home.path()).join("temurin-21.0.1");
     std::fs::create_dir_all(vendor.join("bin")).unwrap();
 
-    Command::cargo_bin("jlo-bin")
-        .unwrap()
+    jlo(home.path())
         .args(["remove", "--superseded"])
-        .env("HOME", home.path())
-        .env("JLO_ADOPTIUM_API_URL", "http://127.0.0.1:1")
-        .env_remove("JAVA_HOME")
         .assert()
         .success()
         // ADR-0001: deletion is not the environment channel.
@@ -276,7 +252,8 @@ fn remove_superseded_deletes_only_the_older_managed_builds() {
 /// 21s", which is not what it would do.
 #[test]
 fn remove_superseded_refuses_a_version_alongside_it() {
-    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let mut cmd = jlo(home.path());
     cmd.args(["remove", "--superseded", "21"])
         .assert()
         .failure()
@@ -288,9 +265,9 @@ fn remove_superseded_refuses_a_version_alongside_it() {
 /// fails before the network, hence the unreachable API address.
 #[test]
 fn install_rejects_an_invalid_version_without_writing_to_stdout() {
-    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let mut cmd = jlo(home.path());
     cmd.args(["install", "abc"])
-        .env("JLO_ADOPTIUM_API_URL", "http://127.0.0.1:1")
         .assert()
         .failure()
         .code(1)
@@ -305,8 +282,7 @@ fn init_global_writes_the_default_config() {
     let home = tempfile::tempdir().unwrap();
     let cwd = tempfile::tempdir().unwrap();
 
-    Command::cargo_bin("jlo-bin")
-        .unwrap()
+    jlo(home.path())
         .args(["init", "--global", "21"])
         .current_dir(cwd.path())
         .env("JLO_HOME", home.path())
@@ -329,8 +305,7 @@ fn init_force_overwrites_an_existing_config() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join(".jlorc"), "17\n").unwrap();
 
-    Command::cargo_bin("jlo-bin")
-        .unwrap()
+    jlo(dir.path())
         .args(["init", "--force", "21"])
         .current_dir(dir.path())
         .assert()
@@ -348,8 +323,7 @@ fn init_without_force_hints_at_force() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join(".jlorc"), "17\n").unwrap();
 
-    Command::cargo_bin("jlo-bin")
-        .unwrap()
+    jlo(dir.path())
         .args(["init", "21"])
         .current_dir(dir.path())
         .assert()
@@ -368,7 +342,8 @@ fn init_without_force_hints_at_force() {
 fn exec_help_still_shows_after_an_explicit_version() {
     // clap never parses `exec`'s tokens, so `cmd_exec` recognises the help
     // flag itself - after a version as much as before one.
-    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let mut cmd = jlo(home.path());
     cmd.args(["exec", "21", "--help"])
         .assert()
         .success()
@@ -399,14 +374,11 @@ fn bare_invocation_matches_help_flag_byte_for_byte() {
     // only the exit-code handling in `main` differs. A stray extra
     // `println!()` in either `cli::print_help` call site would desync them by
     // one trailing newline.
-    let bare = Command::cargo_bin("jlo-bin").unwrap().assert().success();
+    let home = tempfile::tempdir().unwrap();
+    let bare = jlo(home.path()).assert().success();
     let bare_stdout = bare.get_output().stdout.clone();
 
-    let help = Command::cargo_bin("jlo-bin")
-        .unwrap()
-        .arg("-h")
-        .assert()
-        .success();
+    let help = jlo(home.path()).arg("-h").assert().success();
     let help_stdout = help.get_output().stdout.clone();
 
     assert_eq!(bare_stdout, help_stdout);
@@ -417,9 +389,9 @@ fn piped_help_carries_no_escape_codes() {
     // The help text jlo adds is styled unconditionally and relies on clap to
     // strip the escape codes when stdout is not a terminal. Styling it with
     // anything that decides on its own would leak them into a pipe.
+    let home = tempfile::tempdir().unwrap();
     for flag in ["-h", "--help"] {
-        Command::cargo_bin("jlo-bin")
-            .unwrap()
+        jlo(home.path())
             .arg(flag)
             .assert()
             .success()
@@ -435,11 +407,8 @@ fn list_offline_succeeds_without_network() {
     // outcome depend on what happens to be on the machine.
     let home = tempfile::tempdir().unwrap();
 
-    Command::cargo_bin("jlo-bin")
-        .unwrap()
+    jlo(home.path())
         .args(["list", "--offline"])
-        .env("HOME", home.path())
-        .env("JLO_ADOPTIUM_API_URL", "http://127.0.0.1:1")
         .assert()
         .success()
         .code(0)
@@ -459,12 +428,9 @@ fn list_remote_shows_available_versions() {
         .create();
     let home = tempfile::tempdir().unwrap();
 
-    Command::cargo_bin("jlo-bin")
-        .unwrap()
+    jlo(home.path())
         .arg("list")
-        .env("HOME", home.path())
         .env("JLO_ADOPTIUM_API_URL", server.url())
-        .env_remove("JAVA_HOME")
         .assert()
         .success()
         // Nothing is installed, so 21 is only named in the available line -
@@ -494,10 +460,8 @@ fn list_remote_gives_a_superseded_build_its_own_line() {
     install_fake_jdk(home.path(), "21.0.9+10.0.LTS");
     let active = jdk_store_in(home.path()).join("21.0.9+10.0.LTS");
 
-    Command::cargo_bin("jlo-bin")
-        .unwrap()
+    jlo(home.path())
         .arg("list")
-        .env("HOME", home.path())
         .env("JAVA_HOME", &active)
         .env("JLO_ADOPTIUM_API_URL", server.url())
         .assert()
@@ -511,10 +475,9 @@ fn list_remote_gives_a_superseded_build_its_own_line() {
 
 #[test]
 fn list_remote_network_failure_points_at_offline() {
-    Command::cargo_bin("jlo-bin")
-        .unwrap()
+    let home = tempfile::tempdir().unwrap();
+    jlo(home.path())
         .arg("list")
-        .env("JLO_ADOPTIUM_API_URL", "http://127.0.0.1:1")
         .assert()
         .failure()
         .code(1)
@@ -548,10 +511,8 @@ fn network_test_home() -> std::path::PathBuf {
 /// `jlo-bin` run from `project`, which doubles as its `JLO_HOME`, against the
 /// shared store.
 fn network_cmd(project: &std::path::Path) -> Command {
-    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
-    cmd.current_dir(project)
-        .env("HOME", network_test_home())
-        .env("JLO_HOME", project);
+    let mut cmd = jlo_online(&network_test_home());
+    cmd.current_dir(project).env("JLO_HOME", project);
     cmd
 }
 
@@ -559,11 +520,11 @@ fn network_cmd(project: &std::path::Path) -> Command {
 fn init_with_version() {
     let temp_dir = tempfile::tempdir().unwrap();
 
-    let mut cmd = Command::cargo_bin("jlo-bin").unwrap();
+    let mut cmd = jlo(temp_dir.path());
     cmd.args(["init", "21"])
         .current_dir(temp_dir.path())
-        // An explicit version never asks Adoptium anything.
-        .env("JLO_ADOPTIUM_API_URL", "http://127.0.0.1:1")
+        // An explicit version never asks Adoptium anything, and it would find
+        // nothing listening if it did.
         .assert()
         .success()
         .code(0)
@@ -744,11 +705,9 @@ fn run_against_an_offer(
         }
     }
 
-    let mut cmd = std::process::Command::new(assert_cmd::cargo::cargo_bin("jlo-bin"));
+    let mut cmd = hermetic(jlo_bin(), home.path());
     cmd.args(args)
-        .env("HOME", home.path())
         .env("JLO_ADOPTIUM_API_URL", server.url())
-        .env_remove("JAVA_HOME")
         .stdout(stdout);
     if let Some(version) = active {
         cmd.env("JAVA_HOME", store.join(version));
@@ -972,12 +931,9 @@ fn a_name_adoptium_does_not_offer_is_skipped_not_a_stop() {
     let home = tempfile::tempdir().unwrap();
     install_fake_jdk(home.path(), "21.0.11+10.0.LTS");
 
-    Command::cargo_bin("jlo-bin")
-        .unwrap()
+    jlo(home.path())
         .args(["install", "8", "21"])
-        .env("HOME", home.path())
         .env("JLO_ADOPTIUM_API_URL", server.url())
-        .env_remove("JAVA_HOME")
         .assert()
         .success()
         .code(0)
@@ -1001,12 +957,9 @@ fn only_names_adoptium_does_not_offer_is_an_error() {
 
     let home = tempfile::tempdir().unwrap();
 
-    Command::cargo_bin("jlo-bin")
-        .unwrap()
+    jlo(home.path())
         .args(["install", "8", "30"])
-        .env("HOME", home.path())
         .env("JLO_ADOPTIUM_API_URL", server.url())
-        .env_remove("JAVA_HOME")
         .assert()
         .failure()
         .code(1)
@@ -1034,12 +987,9 @@ fn a_failed_lookup_stops_the_run_before_anything_changes() {
     install_fake_jdk(home.path(), "21.0.5+11");
     let store = jdk_store_in(home.path());
 
-    Command::cargo_bin("jlo-bin")
-        .unwrap()
+    jlo(home.path())
         .arg("update")
-        .env("HOME", home.path())
         .env("JLO_ADOPTIUM_API_URL", server.url())
-        .env_remove("JAVA_HOME")
         .assert()
         .failure()
         .code(1)
@@ -1125,8 +1075,8 @@ fn env_does_not_let_a_hostile_path_execute_when_evaluated() {
 /// accepted: `clap_complete` can target more, which must not leak through.
 #[test]
 fn completions_refuse_an_unsupported_shell() {
-    Command::cargo_bin("jlo-bin")
-        .unwrap()
+    let home = tempfile::tempdir().unwrap();
+    jlo(home.path())
         .args(["completions", "fish"])
         .assert()
         .code(2)
@@ -1140,20 +1090,17 @@ fn completions_refuse_an_unsupported_shell() {
 /// writes to the same channel and must behave the same way.
 #[test]
 fn env_survives_a_reader_that_stops_early() {
-    let home = tempfile::tempdir().unwrap();
     // The store is derived from $HOME, so a throwaway home is enough to stand
     // a JDK up without installing one.
+    let home = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(jdk_store_in(home.path()).join("21.0.5+11/bin")).unwrap();
 
-    let bin = assert_cmd::cargo::cargo_bin("jlo-bin");
-    let out = std::process::Command::new("/bin/bash")
+    let out = hermetic("/bin/bash", home.path())
         .arg("-c")
         .arg(format!(
             "set -o pipefail; {} env --offline 21 | true",
-            squote(&bin)
+            squote(jlo_bin())
         ))
-        .env("HOME", home.path())
-        .env("JLO_ADOPTIUM_API_URL", "http://127.0.0.1:1")
         .output()
         .unwrap();
 
@@ -1176,8 +1123,8 @@ fn env_survives_a_reader_that_stops_early() {
 // (`VER=$(jlo current)` must get the answer and nothing else), so a combined
 // assertion would pass with them swapped.
 //
-// Offline by construction, which `current_never_touches_the_network` pins down
-// by pointing the client at a dead port itself.
+// Offline by construction, which `current_never_touches_the_network` pins down:
+// the client points at a dead port.
 
 /// Case 1. Exit 1, because stdout is empty: exiting 0 would hand
 /// `VER=$(jlo current)` an empty string and a success code.
@@ -1244,7 +1191,6 @@ fn current_never_touches_the_network() {
 
     fixture_cmd(home.path(), &project, &["current"])
         .env("JAVA_HOME", jdk_store_in(home.path()).join("25.0.4+101"))
-        .env("JLO_ADOPTIUM_API_URL", "http://127.0.0.1:1")
         .assert()
         .success()
         .code(0)
@@ -1548,12 +1494,8 @@ fn remove_reports_a_failed_deletion_as_a_failure() {
         let restore = std::fs::metadata(&store).unwrap().permissions();
         chmod(&store, 0o555);
 
-        let assertion = Command::cargo_bin("jlo-bin")
-            .unwrap()
+        let assertion = jlo(home.path())
             .args(&args)
-            .env("HOME", home.path())
-            .env("JLO_ADOPTIUM_API_URL", "http://127.0.0.1:1")
-            .env_remove("JAVA_HOME")
             .assert()
             .failure()
             .code(1)
@@ -1582,12 +1524,8 @@ fn remove_deletes_every_build_of_the_major_named() {
     install_fake_jdk(home.path(), "21.0.9+10");
     install_fake_jdk(home.path(), "17.0.11+10");
 
-    Command::cargo_bin("jlo-bin")
-        .unwrap()
+    jlo(home.path())
         .args(["remove", "21"])
-        .env("HOME", home.path())
-        .env("JLO_ADOPTIUM_API_URL", "http://127.0.0.1:1")
-        .env_remove("JAVA_HOME")
         .assert()
         .success()
         .code(0)

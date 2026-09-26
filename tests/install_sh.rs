@@ -15,7 +15,7 @@
 
 mod common;
 
-use common::{INTERPRETERS, chmod, shells, skip_missing, squote};
+use common::{INTERPRETERS, chmod, hermetic, jlo_bin, shells, skip_missing, squote};
 use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -79,11 +79,7 @@ fn manifest() -> PathBuf {
 fn release_tarball(dir: &Path) -> PathBuf {
     let stage = dir.join("stage");
     std::fs::create_dir_all(&stage).unwrap();
-    std::fs::copy(
-        assert_cmd::cargo::cargo_bin("jlo-bin"),
-        stage.join("jlo-bin"),
-    )
-    .unwrap();
+    std::fs::copy(jlo_bin(), stage.join("jlo-bin")).unwrap();
     let tarball = dir.join("jlo.tar.gz");
     let ok = Command::new("tar")
         .arg("-czf")
@@ -714,9 +710,8 @@ fn no_copyable_line_is_indented() {
     let home = dir.path().join("home");
     assert_no_indented_commands(&printed(&out), 4, "fresh install");
 
-    let coloured = Command::new(home.join(".jlo").join("bin").join("jlo-bin"))
+    let coloured = hermetic(home.join(".jlo").join("bin").join("jlo-bin"), &home)
         .arg("__install")
-        .env("HOME", &home)
         .env("JLO_HOME", home.join(".jlo"))
         .env("SHELL", "/bin/zsh")
         .env("CLICOLOR_FORCE", "1")
@@ -849,9 +844,8 @@ fn a_reinstall_prints_the_short_form() {
 /// Runs the install verb again over an existing `$JLO_HOME`, the way a second
 /// `install.sh` run would once the tarball is unpacked.
 fn reinstall_over(home: &Path) -> Output {
-    Command::new(home.join(".jlo").join("bin").join("jlo-bin"))
+    hermetic(home.join(".jlo").join("bin").join("jlo-bin"), home)
         .arg("__install")
-        .env("HOME", home)
         .env("JLO_HOME", home.join(".jlo"))
         .env("SHELL", "/bin/zsh")
         .output()
@@ -1521,9 +1515,8 @@ fn a_stale_receipt_makes_the_next_invocation_rewrite_the_files() {
     std::fs::remove_file(jlo.join("bin").join("jlo-init.sh")).unwrap();
 
     // Any command at all, and one that needs no network.
-    let out = Command::new(jlo.join("bin").join("jlo-bin"))
+    let out = hermetic(jlo.join("bin").join("jlo-bin"), &home)
         .arg("--version")
-        .env("HOME", &home)
         .env("JLO_HOME", &jlo)
         .output()
         .unwrap();
@@ -1720,9 +1713,8 @@ fn reload_in(sh: &str, home: &Path, jlo: &Path, enabled: &[&str]) -> Output {
         sources.push_str(&squote(jlo.join(name)));
         sources.push('\n');
     }
-    let reload = Command::new(jlo.join("bin").join("jlo-bin"))
+    let reload = hermetic(jlo.join("bin").join("jlo-bin"), home)
         .args(["__install", "--reload"])
-        .env("HOME", home)
         .env("JLO_HOME", jlo)
         .output()
         .unwrap();
@@ -1967,9 +1959,8 @@ fn an_installer_refuses_a_jlo_home_with_a_newline() {
     );
 
     // The verb run directly refuses the same value on its own account.
-    let direct = Command::new(assert_cmd::cargo::cargo_bin("jlo-bin"))
+    let direct = hermetic(jlo_bin(), &home)
         .arg("__install")
-        .env("HOME", &home)
         .env("JLO_HOME", &jlo_home)
         .env("SHELL", "/bin/zsh")
         .output()
@@ -2047,9 +2038,8 @@ fn publish_self_renames_the_staged_binary_into_the_layout() {
     std::fs::write(&binary, "not a binary\n").unwrap();
 
     let out = run_staged(
-        Command::new(&staged)
+        hermetic(&staged, &home)
             .args(["__install", "--publish-self"])
-            .env("HOME", &home)
             .env("JLO_HOME", &jlo_home)
             .env("SHELL", "/bin/zsh"),
     );
@@ -2069,7 +2059,7 @@ fn publish_self_renames_the_staged_binary_into_the_layout() {
         "{binary:?} is not the file that was staged, so it was copied rather \
          than renamed into place"
     );
-    let version = Command::new(&binary).arg("--version").output().unwrap();
+    let version = hermetic(&binary, &home).arg("--version").output().unwrap();
     assert!(
         version.status.success(),
         "{binary:?} is not runnable after the publish: {}",
@@ -2088,9 +2078,8 @@ fn publish_self_is_a_no_op_when_the_binary_is_already_in_place() {
     let binary = jlo_home.join("bin").join("jlo-bin");
 
     let out = run_staged(
-        Command::new(&binary)
+        hermetic(&binary, &home)
             .args(["__install", "--publish-self"])
-            .env("HOME", &home)
             .env("JLO_HOME", &jlo_home)
             .env("SHELL", "/bin/zsh"),
     );
@@ -2321,9 +2310,8 @@ fn a_staging_name_outside_the_install_directory_is_left_alone() {
 
     let elsewhere = dir.path().join("other-home");
     let out = run_staged(
-        Command::new(impostor.join("jlo-bin"))
+        hermetic(impostor.join("jlo-bin"), &home)
             .args(["__install", "--publish-self"])
-            .env("HOME", &home)
             .env("JLO_HOME", &elsewhere)
             .env("SHELL", "/bin/zsh"),
     );
@@ -2356,9 +2344,8 @@ fn staging_cleanup_stops_at_anything_it_did_not_put_there() {
     std::fs::write(&bystander, "somebody else's\n").unwrap();
 
     let out = run_staged(
-        Command::new(stage.join("jlo-bin"))
+        hermetic(stage.join("jlo-bin"), &home)
             .args(["__install", "--publish-self"])
-            .env("HOME", &home)
             .env("JLO_HOME", &jlo_home)
             .env("SHELL", "/bin/zsh"),
     );

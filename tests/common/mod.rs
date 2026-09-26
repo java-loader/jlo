@@ -1,8 +1,54 @@
 //! Helpers shared by the integration test crates. Each crate uses a different
 //! subset, so every item carries its own `dead_code` allow.
 
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+/// Where every URL jlo would fetch from points unless a test says otherwise: a
+/// port nothing listens on, so a forgotten mock fails fast instead of
+/// reaching the real service.
+const DEAD_URL: &str = "http://127.0.0.1:1";
+
+/// The binary under test.
+#[allow(dead_code)]
+pub(crate) fn jlo_bin() -> PathBuf {
+    assert_cmd::cargo::cargo_bin("jlo-bin")
+}
+
+/// `program` run with nothing inherited from whoever runs the tests: jlo reads
+/// `JAVA_HOME`, `JLO_HOME`, `TERM`, the colour variables and more, and a test
+/// that forgets one passes on its author's machine and fails where the
+/// environment differs. `home` is required because the store and the `.jlorc`
+/// walk derive from it, and no default can be trusted not to be the real one.
+/// `PATH` is the system directories alone: enough for `sh`, `cp` and `python3`,
+/// the tools the tests and their fake releases run.
+#[allow(dead_code)]
+pub(crate) fn hermetic(program: impl AsRef<OsStr>, home: &Path) -> Command {
+    let mut cmd = Command::new(program);
+    cmd.env_clear()
+        .env("HOME", home)
+        .env("PATH", "/usr/bin:/bin")
+        .env("JLO_ADOPTIUM_API_URL", DEAD_URL)
+        .env("JLO_RELEASE_API_URL", DEAD_URL);
+    cmd
+}
+
+/// `jlo-bin` under [`hermetic`]. A test adds only what it is about.
+#[allow(dead_code)]
+pub(crate) fn jlo(home: &Path) -> assert_cmd::Command {
+    assert_cmd::Command::from_std(hermetic(jlo_bin(), home))
+}
+
+/// [`jlo`] with Adoptium left at its compiled-in address: the one opt-in to
+/// the real API, for the tests that exist to notice the fixtures drifting
+/// from it.
+#[allow(dead_code)]
+pub(crate) fn jlo_online(home: &Path) -> assert_cmd::Command {
+    let mut cmd = hermetic(jlo_bin(), home);
+    cmd.env_remove("JLO_ADOPTIUM_API_URL");
+    assert_cmd::Command::from_std(cmd)
+}
 
 /// Every interpreter the shell code must work under.
 ///

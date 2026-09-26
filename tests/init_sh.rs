@@ -21,7 +21,8 @@
 mod common;
 
 use common::{
-    INTERPRETERS, bash_bin, chmod, fake_jdk_archive, install_fake_jdk, jdk_store_in, offer, shells,
+    INTERPRETERS, bash_bin, chmod, fake_jdk_archive, install_fake_jdk, jdk_store_in, jlo_bin,
+    offer, shells,
 };
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -30,7 +31,7 @@ use std::process::{Command, Output};
 /// symlink to the binary under test, which is what the wrapper expects to find.
 fn jlo_home() -> tempfile::TempDir {
     let home = init_sh_home();
-    let target = assert_cmd::cargo::cargo_bin("jlo-bin");
+    let target = jlo_bin();
     std::os::unix::fs::symlink(target, home.path().join("bin").join("jlo-bin")).unwrap();
     home
 }
