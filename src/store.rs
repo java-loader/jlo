@@ -1058,6 +1058,11 @@ fn is_staging_dir(name: Option<&str>) -> bool {
 /// takes one (`install.sh` unpacks before it hands over to the locked verb),
 /// so "in use" is read as "modified in the last hour", which is far longer
 /// than any install takes.
+///
+/// Only an entry *known* to be older than that goes. One whose age cannot be
+/// read - no metadata, no mtime, or an mtime in the future (clock skew, a
+/// restored backup, NFS) - is kept: a leftover costs disk, a wrong deletion
+/// costs a working install.
 pub(crate) fn sweep_stale_staging(base: &Path, prefix: &str) {
     let Ok(entries) = std::fs::read_dir(base) else {
         return;
@@ -1070,12 +1075,13 @@ pub(crate) fn sweep_stale_staging(base: &Path, prefix: &str) {
         {
             continue;
         }
-        let recently_touched = entry
+        let known_stale = entry
             .metadata()
             .and_then(|m| m.modified())
-            .and_then(|t| t.elapsed().map_err(|_| std::io::ErrorKind::Other.into()))
-            .is_ok_and(|age| age < std::time::Duration::from_hours(1));
-        if !recently_touched {
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age >= std::time::Duration::from_hours(1));
+        if known_stale {
             let _ = std::fs::remove_dir_all(entry.path());
         }
     }
@@ -1899,6 +1905,27 @@ mod tests {
 
         assert!(in_use.path().exists(), "a live install was swept out");
         assert!(second.path().exists());
+    }
+
+    /// An mtime in the future (clock skew, a restored backup, NFS) says
+    /// nothing about the directory being old, so the sweep must not read it
+    /// as permission to delete.
+    #[test]
+    fn a_staging_directory_with_a_future_mtime_survives_a_sweep() {
+        let dir = tempdir().unwrap();
+        let future = dir.path().join(".tmpFUTURE");
+        fs::create_dir_all(future.join("jdk-21.0.5+11")).unwrap();
+        let later = std::time::SystemTime::now() + std::time::Duration::from_hours(2);
+        fs::File::options()
+            .read(true)
+            .open(&future)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(later))
+            .unwrap();
+
+        sweep_stale_staging(dir.path(), STAGING_PREFIX);
+
+        assert!(future.exists(), "a directory of unknown age was deleted");
     }
 
     /// The listing must pass over a staging directory, or an interrupted
