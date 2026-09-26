@@ -947,9 +947,8 @@ fn not_offered_mock(server: &mut mockito::ServerGuard, major: &str) -> mockito::
     latest(server, major).with_body("[]").create()
 }
 
-/// Names are processed sorted, so on Apple silicon `jlo install 8 21` used to
-/// stop at 8 and install nothing. A name Adoptium does not offer is skipped
-/// with a warning, and the ones after it still go.
+/// On Apple silicon `jlo install 8 21` used to stop at 8 and fail. A name
+/// Adoptium does not offer is skipped with a warning, and the others still go.
 #[test]
 fn a_name_adoptium_does_not_offer_is_skipped_not_a_stop() {
     let mut server = mockito::Server::new();
@@ -1001,21 +1000,22 @@ fn only_names_adoptium_does_not_offer_is_an_error() {
         .code(1)
         .stdout(predicate::str::is_empty())
         .stderr(predicate::str::contains(
-            "Adoptium offers no build of '8' or '30' for",
+            "Adoptium offers no build of '30' or '8' for",
         ))
         .stderr(predicate::str::contains("Run 'jlo list'"))
         .stderr(predicate::str::contains("skipping").not());
 }
 
 /// A lookup that fails says nothing about the name, so it stops the run -
-/// and every name is looked up first, so it stops before 17, which sorts
-/// ahead of the failing 21, is downloaded or has its old build replaced.
+/// and every name is looked up first, so it stops before 21, which is
+/// processed ahead of the failing 17, is downloaded or has its old build
+/// replaced.
 #[test]
 fn a_failed_lookup_stops_the_run_before_anything_changes() {
     let mut server = mockito::Server::new();
-    let _offers_17 = offer(&mut server, "17", "17.0.9+10", "00").create();
-    let _fails_21 = latest(&mut server, "21").with_status(500).create();
-    let download = server.mock("GET", "/jdk-17.tar.gz").expect(0).create();
+    let _offers_21 = offer(&mut server, "21", "21.0.9+10", "00").create();
+    let _fails_17 = latest(&mut server, "17").with_status(500).create();
+    let download = server.mock("GET", "/jdk-21.tar.gz").expect(0).create();
 
     let home = tempfile::tempdir().unwrap();
     install_fake_jdk(home.path(), "17.0.5+8");
@@ -1034,9 +1034,9 @@ fn a_failed_lookup_stops_the_run_before_anything_changes() {
         .stderr(predicate::str::contains("HTTP 500"));
 
     download.assert();
-    assert!(store.join("17.0.5+8").exists(), "nothing may be replaced");
+    assert!(store.join("21.0.5+11").exists(), "nothing may be replaced");
     assert!(
-        !store.join("17.0.9+10").exists(),
+        !store.join("21.0.9+10").exists(),
         "nothing may be installed"
     );
 }

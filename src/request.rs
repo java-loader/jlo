@@ -13,6 +13,7 @@
 //! and no filter has to remember to exclude one.
 
 use anyhow::bail;
+use std::cmp::Reverse;
 use std::fmt;
 
 /// The suffix that names the pre-release stream. One spelling: a store
@@ -34,16 +35,25 @@ pub(crate) enum Stream {
 
 /// A major version and one of its two streams - `21`, or `28-ea`.
 ///
-/// `Ord` is derived and is relied on: major first, then stream, with `Ga`
-/// before `Ea` because that is the declaration order. `prune` and
-/// `installed_requests` sort by it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+/// Deliberately not `Ord`: names are put in order in one way only,
+/// [`Self::listing_order`], and a derived `Ord` would be a second.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct Request {
     pub major: i64,
     pub stream: Stream,
 }
 
 impl Request {
+    /// The sort key of every per-name output - `jlo list`, the
+    /// `jlo remove --superseded` report, `jlo install` and `jlo update`:
+    /// newest major first, and of one major the released name before the
+    /// pre-release (`Ga` is declared before `Ea`). Reversing a plain
+    /// major-then-stream order would lead with `27-ea` instead, putting a
+    /// preview above the release a user most likely has.
+    pub(crate) fn listing_order(self) -> (Reverse<i64>, Stream) {
+        (Reverse(self.major), self.stream)
+    }
+
     /// Parse the one grammar J'Lo accepts for a version: a major of 8 or more,
     /// optionally suffixed `-ea`.
     ///
@@ -205,44 +215,6 @@ mod tests {
         assert!(
             message.contains("-ea"),
             "should name the -ea form: {message}"
-        );
-    }
-
-    /// Ordering is what `installed_requests` and `prune` sort by, and the two
-    /// streams of one major must not interleave with another major's.
-    #[test]
-    fn a_request_orders_by_major_then_stream() {
-        let mut names = vec![
-            Request {
-                major: 28,
-                stream: Stream::Ea,
-            },
-            Request {
-                major: 21,
-                stream: Stream::Ga,
-            },
-            Request {
-                major: 28,
-                stream: Stream::Ga,
-            },
-        ];
-        names.sort();
-        assert_eq!(
-            names,
-            vec![
-                Request {
-                    major: 21,
-                    stream: Stream::Ga
-                },
-                Request {
-                    major: 28,
-                    stream: Stream::Ga
-                },
-                Request {
-                    major: 28,
-                    stream: Stream::Ea
-                },
-            ]
         );
     }
 }

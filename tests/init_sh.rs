@@ -625,10 +625,11 @@ fn a_read_only_environment_is_refused_before_the_binary_runs() {
 }
 
 /// The stub above pins the wrapper's half; this is the whole chain, real
-/// binary included. Names go sorted: 17, which the shell is on, is replaced;
-/// 21 is looked up fine but its download fails. The run fails, and the shell
-/// must still end up on the new 17 - `JAVA_HOME` and `PATH` alike - because
-/// the old 17 is gone and a failure later in the run does not bring it back.
+/// binary included. Names go newest first: 21, which the shell is on, is
+/// replaced; 17 is looked up fine but its download fails. The run fails, and
+/// the shell must still end up on the new 21 - `JAVA_HOME` and `PATH` alike -
+/// because the old 21 is gone and a failure later in the run does not bring
+/// it back.
 #[test]
 fn a_later_failure_still_moves_the_shell_off_the_replaced_build() {
     use sha2::Digest;
@@ -639,16 +640,16 @@ fn a_later_failure_still_moves_the_shell_off_the_replaced_build() {
     ) {
         for verb in ["update", "install 17 21"] {
             let mut server = mockito::Server::new();
-            let archive = fake_jdk_archive("jdk-17.0.9+10");
+            let archive = fake_jdk_archive("jdk-21.0.9+10");
             let checksum = hex::encode(sha2::Sha256::digest(&archive));
-            let asked_17 = offer(&mut server, "17", "17.0.9+10", &checksum).create();
-            let asked_21 = offer(&mut server, "21", "21.0.9+10", "00").create();
-            let _pkg_17 = server
-                .mock("GET", "/jdk-17.tar.gz")
+            let asked_21 = offer(&mut server, "21", "21.0.9+10", &checksum).create();
+            let asked_17 = offer(&mut server, "17", "17.0.9+10", "00").create();
+            let _pkg_21 = server
+                .mock("GET", "/jdk-21.tar.gz")
                 .with_body(archive)
                 .create();
-            let pkg_21 = server
-                .mock("GET", "/jdk-21.tar.gz")
+            let pkg_17 = server
+                .mock("GET", "/jdk-17.tar.gz")
                 .with_status(500)
                 .create();
 
@@ -658,8 +659,8 @@ fn a_later_failure_still_moves_the_shell_off_the_replaced_build() {
             for version in ["17.0.5+8", "21.0.5+11"] {
                 install_fake_jdk(home.path(), version);
             }
-            let old = store.join("17.0.5+8");
-            let new = store.join("17.0.9+10");
+            let old = store.join("21.0.5+11");
+            let new = store.join("21.0.9+10");
 
             let out = run_in(
                 sh,
@@ -684,14 +685,14 @@ fn a_later_failure_still_moves_the_shell_off_the_replaced_build() {
             let stderr = String::from_utf8_lossy(&out.stderr);
             let ctx = format!("{sh} {verb}: {stdout:?} / {stderr:?}");
 
-            asked_17.assert();
             asked_21.assert();
-            pkg_21.assert();
+            asked_17.assert();
+            pkg_17.assert();
             assert!(stdout.contains("status=1"), "{ctx}");
             assert!(!old.exists(), "the replacement was undone: {ctx}");
             assert!(new.join("bin/java").exists(), "{ctx}");
             assert!(
-                store.join("21.0.5+11").exists() && !store.join("21.0.9+10").exists(),
+                store.join("17.0.5+8").exists() && !store.join("17.0.9+10").exists(),
                 "the failed name's install was touched: {ctx}"
             );
             assert!(

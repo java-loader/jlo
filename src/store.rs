@@ -373,8 +373,9 @@ impl JdkStore {
         newest_ga(&self.list().ok()?).map(|jdk| jdk.request)
     }
 
-    /// The version names present in the store, ascending. A major with a
-    /// build of each stream installed contributes both of its names.
+    /// The version names present in the store, in `jlo list`'s order. A
+    /// major with a build of each stream installed contributes both of its
+    /// names.
     pub(crate) fn installed_requests(&self) -> anyhow::Result<Vec<Request>> {
         let requests: HashSet<Request> = self
             .scan_required()?
@@ -383,7 +384,7 @@ impl JdkStore {
             .collect();
 
         let mut requests: Vec<Request> = requests.into_iter().collect();
-        requests.sort_unstable();
+        requests.sort_unstable_by_key(|request| request.listing_order());
         Ok(requests)
     }
 
@@ -495,11 +496,10 @@ impl JdkStore {
             }
         }
 
-        // Reported by name, newest name first, to match `jlo list`; the
-        // stable sort keeps each name's builds newest first. The derived
-        // `Ord` also orders the two streams of one major stably.
+        // Reported by name in `jlo list`'s order; the stable sort keeps each
+        // name's builds newest first.
         let mut superseded = self.superseded()?;
-        superseded.sort_by_key(|jdk| std::cmp::Reverse(jdk.request));
+        superseded.sort_by_key(|jdk| jdk.request.listing_order());
 
         for jdk in superseded {
             let request = jdk.request;
@@ -788,9 +788,10 @@ pub(crate) fn install_each(
     emit: impl FnOnce(Option<&Path>) -> anyhow::Result<()>,
 ) -> InstallRun {
     // Sorted for a stable processing order, rather than whatever order the
-    // hash set happens to iterate in.
+    // hash set happens to iterate in - `jlo list`'s, so the names are
+    // reported the way the listing shows them.
     let mut requests: Vec<Request> = requests.into_iter().collect();
-    requests.sort_unstable();
+    requests.sort_unstable_by_key(|request| request.listing_order());
 
     let mut run = InstallRun::default();
     let offered = match resolve_offered(client, &requests) {
@@ -902,10 +903,9 @@ fn replace(
 ///
 /// A name it does not offer is skipped with a warning, the rule `remove` and
 /// `requested_versions` already follow: it cannot be acted on, so stopping
-/// the others on its account protects nothing - and names are processed
-/// sorted, so `jlo install 8 21` on Apple silicon would otherwise install
-/// nothing. It is an error only when it leaves nothing at all, and then the
-/// store is untouched.
+/// the others on its account protects nothing: `jlo install 8 21` on Apple
+/// silicon should install 21, not fail over 8. It is an error only when it
+/// leaves nothing at all, and then the store is untouched.
 ///
 /// A lookup that *fails* - network, HTTP, a response that does not parse -
 /// is different: it says nothing about the name, so it stops the run, and
@@ -1775,10 +1775,11 @@ mod tests {
 
         let requests = JdkStore::at(dir.path()).installed_requests().unwrap();
 
-        // One entry per name, however many builds it has, in name order.
+        // One entry per name, however many builds it has, in `jlo list`'s
+        // order.
         assert_eq!(
             requests,
-            vec![request("17"), request("21"), request("28-ea")]
+            vec![request("28-ea"), request("21"), request("17")]
         );
     }
 
@@ -2145,8 +2146,9 @@ mod tests {
         assert!(!dir.path().join("26.0.2-beta+101.0.ea").exists());
     }
 
-    /// One line per name, newest name first, the way `jlo list` orders them -
-    /// even where the two streams of a major interleave by version.
+    /// One line per name in `jlo list`'s order - newest major first, and of
+    /// one major the released name before the pre-release - even where the
+    /// two streams interleave by version.
     #[test]
     fn prune_reports_names_newest_first() {
         let dir = tempdir().unwrap();
@@ -2170,8 +2172,8 @@ mod tests {
         assert_eq!(
             names,
             vec![
-                request("26-ea"),
                 request("26"),
+                request("26-ea"),
                 request("21"),
                 request("17")
             ]

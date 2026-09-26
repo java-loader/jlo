@@ -9,7 +9,6 @@ use crate::store::{
 use clap::builder::styling::{AnsiColor, Style, Styles};
 use console::style;
 use indicatif::{ProgressBar, ProgressBarIter, ProgressStyle};
-use std::cmp::Reverse;
 use std::io::{IsTerminal, Read, stderr};
 use std::path::Path;
 use std::process::exit;
@@ -905,8 +904,7 @@ fn build_rows(
         .map(|jdk| jdk.request)
         .chain(installed.iter().map(|jdk| jdk.request))
         .collect();
-    // Newest major first, GA before EA: reversing `Request`'s `Ord` would lead with `27-ea`.
-    names.sort_unstable_by_key(|name| (Reverse(name.major), name.stream));
+    names.sort_unstable_by_key(|name| name.listing_order());
     names.dedup();
 
     names
