@@ -2250,3 +2250,59 @@ fn the_install_verb_sweeps_abandoned_staging_only() {
     );
     assert!(fresh.exists(), "a fresh staging directory was swept");
 }
+
+/// An installer suspended for over an hour between unpacking and its `exec`
+/// (a laptop asleep, a `SIGSTOP`) hands over from a staging directory the
+/// sweep counts as abandoned. Sweeping it would delete the running binary
+/// before it is published.
+#[test]
+fn the_sweep_spares_the_staging_directory_the_running_binary_came_from() {
+    let (dir, _) = install(None);
+    let home = dir.path().join("home");
+    let jlo_home = home.join(".jlo");
+    let bin = jlo_home.join("bin");
+    let binary = bin.join("jlo-bin");
+    let two_hours_ago = std::time::SystemTime::now() - std::time::Duration::from_hours(2);
+
+    let stage = bin.join(".jlo-install-test");
+    std::fs::create_dir_all(&stage).unwrap();
+    let staged = stage.join("jlo-bin");
+    std::fs::copy(&binary, &staged).unwrap();
+    let staged_inode = std::fs::metadata(&staged).unwrap().ino();
+    std::fs::File::open(&stage)
+        .unwrap()
+        .set_modified(two_hours_ago)
+        .unwrap();
+
+    let abandoned = bin.join(".jlo-install-4242");
+    std::fs::create_dir_all(&abandoned).unwrap();
+    std::fs::File::open(&abandoned)
+        .unwrap()
+        .set_modified(two_hours_ago)
+        .unwrap();
+
+    let out = run_staged(
+        hermetic(&staged, &home)
+            .args(["__install", "--publish-self"])
+            .env("JLO_HOME", &jlo_home)
+            .env("SHELL", "/bin/zsh"),
+    );
+    assert!(
+        out.status.success(),
+        "__install --publish-self failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        std::fs::metadata(&binary).unwrap().ino(),
+        staged_inode,
+        "{binary:?} is not the file that was staged"
+    );
+    assert!(
+        !abandoned.exists(),
+        "an abandoned staging directory survived"
+    );
+    assert!(
+        !stage.exists(),
+        "the staging directory the binary came from was not cleared"
+    );
+}

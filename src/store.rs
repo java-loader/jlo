@@ -1046,7 +1046,7 @@ fn staging_dir(store: &JdkStore) -> anyhow::Result<tempfile::TempDir> {
     // gigabyte of it, in the user's JDK directory rather than in `$TMPDIR`
     // where the system would eventually clear it. Nothing else will ever
     // remove it, so the next install does, before adding one of its own.
-    sweep_stale_staging(store.base(), STAGING_PREFIX);
+    sweep_stale_staging(store.base(), STAGING_PREFIX, None);
 
     tempfile::tempdir_in(store.base())
         .context("could not create a staging directory in the JDK install directory")
@@ -1074,7 +1074,11 @@ const STAGING_PREFIX: &str = ".tmp";
 /// read - no metadata, no mtime, or an mtime in the future (clock skew, a
 /// restored backup, NFS) - is kept: a leftover costs disk, a wrong deletion
 /// costs a working install.
-pub(crate) fn sweep_stale_staging(base: &Path, prefix: &str) {
+///
+/// `keep` is spared whatever its age: the directory the running binary was
+/// staged in, which an installer suspended for over an hour between unpacking
+/// and its `exec` hands over from.
+pub(crate) fn sweep_stale_staging(base: &Path, prefix: &str, keep: Option<&Path>) {
     let Ok(entries) = std::fs::read_dir(base) else {
         return;
     };
@@ -1084,6 +1088,9 @@ pub(crate) fn sweep_stale_staging(base: &Path, prefix: &str) {
             .to_str()
             .is_some_and(|name| name.starts_with(prefix))
         {
+            continue;
+        }
+        if keep.is_some_and(|keep| same_path(&entry.path(), keep)) {
             continue;
         }
         let known_stale = entry
@@ -1935,7 +1942,7 @@ mod tests {
             .set_times(fs::FileTimes::new().set_modified(later))
             .unwrap();
 
-        sweep_stale_staging(dir.path(), STAGING_PREFIX);
+        sweep_stale_staging(dir.path(), STAGING_PREFIX, None);
 
         assert!(future.exists(), "a directory of unknown age was deleted");
     }

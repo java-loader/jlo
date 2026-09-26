@@ -89,10 +89,10 @@ impl Layout {
         &self.bin
     }
 
-    /// Remove staging directories an earlier run abandoned; see
-    /// [`crate::store::sweep_stale_staging`] for why that is judged by age.
-    fn sweep_stale_staging(&self) {
-        crate::store::sweep_stale_staging(&self.bin, STAGING_PREFIX);
+    /// Remove staging directories an earlier run abandoned, sparing `keep`;
+    /// see [`crate::store::sweep_stale_staging`] for why that is judged by age.
+    fn sweep_stale_staging(&self, keep: Option<&Path>) {
+        crate::store::sweep_stale_staging(&self.bin, STAGING_PREFIX, keep);
     }
 
     /// The binary's path, which is also the symlink target.
@@ -118,7 +118,7 @@ pub(crate) fn cmd_install(args: &[String], wrapped: bool) -> Result<(), CommandE
     // is the last chance to clear the directory we came out of. Dropping it
     // removes the directory on every path, including the successful one, where
     // the rename has already emptied it.
-    let _staging = Staging::around(&layout, args.iter().any(|arg| arg == "--publish-self"));
+    let staging = Staging::around(&layout, args.iter().any(|arg| arg == "--publish-self"));
     let mut reload = false;
     let mut publish_self = false;
     for arg in args {
@@ -133,7 +133,7 @@ pub(crate) fn cmd_install(args: &[String], wrapped: bool) -> Result<(), CommandE
     }
     // An installer killed after unpacking leaves its staging directory, and
     // every run has a new pid, so nothing else ever comes back for it.
-    layout.sweep_stale_staging();
+    layout.sweep_stale_staging(staging.dir());
     // Read before writing: a first install gets the activation block, a
     // reinstall one line.
     let reinstall = layout.home.join("jlo.sh").exists();
@@ -252,6 +252,10 @@ impl Staging {
                     .is_some_and(|up| same_path(up, layout.bin_dir()))
         });
         Self(dir.map(Path::to_path_buf))
+    }
+
+    fn dir(&self) -> Option<&Path> {
+        self.0.as_deref()
     }
 }
 
