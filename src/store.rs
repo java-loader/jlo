@@ -133,11 +133,11 @@ impl NameGroup<'_> {
 /// The installs grouped by name, in [`Request::listing_order`]. The one answer
 /// `jlo list` renders and `jlo remove --superseded` deletes by.
 ///
-/// By name, not major: a pre-release sorts above the release it previews, so a
-/// major-keyed group would make the released build superseded by a beta. Only
-/// a managed build heads a name: an unmanaged 21.0.3 beside a managed 21.0.1
-/// would otherwise make the managed one superseded, and `remove --superseded`
-/// would leave the name with no build jlo manages.
+/// By name, not major: a pre-release of a later patch sorts above the current
+/// release, so a major-keyed group would make the released build superseded
+/// by a beta. Only a managed build heads a name: an unmanaged 21.0.3 beside a
+/// managed 21.0.1 would otherwise make the managed one superseded, and
+/// `remove --superseded` would leave the name with no build jlo manages.
 ///
 /// `installed` may come in any order; the sort is stable, so two spellings of
 /// one version keep the order given.
@@ -270,7 +270,7 @@ impl JdkStore {
     ///
     /// Matched on the parsed name, not a prefix or the major: a prefix makes
     /// `1` select `17`, and a major-only match would hand `jlo env 26` a
-    /// pre-release, which sorts above the build it previews.
+    /// pre-release of a later patch, which sorts above the current GA build.
     pub(crate) fn find_matching(&self, request: Request) -> Option<PathBuf> {
         self.list()
             .ok()?
@@ -805,8 +805,8 @@ fn install_latest(
     jdk_metadata: &JdkMetadata,
 ) -> anyhow::Result<Latest> {
     let installed = store.list()?;
-    // Only this name: a pre-release sorts above the release it previews, so
-    // measured against `21-ea` an offer for `21` would never be newer.
+    // Only this name: an installed EA of a later patch would otherwise keep
+    // a GA offer from counting as newer.
     let builds: Vec<&InstalledJdk> = installed
         .iter()
         .filter(|jdk| jdk.request == request)
@@ -1749,8 +1749,8 @@ mod tests {
     }
 
     /// The two streams of one major are two names, so neither supersedes the
-    /// other: the beta sorts above the GA build it previews, and keyed on the
-    /// major alone it would make the released build superseded. The released
+    /// other: a later-patch beta sorts above the installed GA build, and keyed
+    /// on the major alone it would make the released build superseded. The released
     /// name comes first, as `jlo list` orders them.
     #[test]
     fn neither_stream_supersedes_the_other() {

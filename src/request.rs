@@ -1,8 +1,8 @@
 //! What version of Java was *asked for*: a major, and which stream of it.
 //!
-//! A pre-release sorts *above* the GA build it previews, so mixing the streams
-//! would hand out a beta for `jlo env 26` and delete the GA build as
-//! superseded. Every rule keyed on "a major" is keyed on a `Request` instead,
+//! An EA build of a later patch sorts *above* the current GA build, so mixing
+//! the streams would hand out a beta for `jlo env 26` and delete the GA build
+//! as superseded. Every rule keyed on "a major" is keyed on a `Request` instead,
 //! so no comparison sees both streams.
 
 use anyhow::bail;

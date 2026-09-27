@@ -601,8 +601,8 @@ fn build_rows(
 }
 
 /// Only builds of this name are compared, never the other stream: a
-/// pre-release sorts above the release it previews, so an offered beta would
-/// read as an update to an installed release.
+/// pre-release of a later patch sorts above the current release, so an offered
+/// beta would read as an update to an installed release.
 fn name_row(
     name: Request,
     offered: Option<&RemoteJdk>,
@@ -1358,9 +1358,9 @@ mod tests {
         );
     }
 
-    /// The mirror image: a pre-release sorts above the release it previews,
-    /// so without the per-name rule the offered beta would read as an update
-    /// to the installed release.
+    /// The mirror image: a pre-release of a later patch sorts above the current
+    /// release, so without the per-name rule the offered beta would read as an
+    /// update to the installed release.
     #[test]
     fn an_offered_pre_release_is_not_an_update_to_an_installed_release() {
         let rows = listed(
