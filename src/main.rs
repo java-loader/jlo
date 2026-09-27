@@ -282,9 +282,10 @@ fn cmd_list(client: &AdoptiumClient, offline: bool) -> Result<(), CommandError> 
     // Resolved once, before either listing: the gutter marks a row by version
     // name, and the path-to-version step is the store's job, not the UI's.
     let active = store.active_version(&installed, active_java_home().as_deref());
+    let groups = store::group_by_name(&installed);
 
     if offline {
-        ui::offline_list(&installed, active.as_deref(), &store);
+        ui::offline_list(&groups, active.as_deref(), store.base());
     } else {
         let available = client.available_jdks().map_err(|e| {
             CommandError::with_hint(
@@ -292,7 +293,7 @@ fn cmd_list(client: &AdoptiumClient, offline: bool) -> Result<(), CommandError> 
                 "Use 'jlo list --offline' to list the JDKs already installed.",
             )
         })?;
-        ui::remote_list(&available, &installed, active.as_deref());
+        ui::remote_list(&available, &groups, active.as_deref());
     }
 
     Ok(())

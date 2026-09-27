@@ -6,8 +6,7 @@ use crate::ui::{self, InstallUi};
 use crate::version::{cmp_desc, compare};
 use anyhow::{Context, anyhow, bail};
 use std::cmp::Ordering;
-use std::collections::hash_map::Entry;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::env;
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -167,6 +166,98 @@ pub(crate) fn supersedes_every_install(offered: &str, builds: &[&InstalledJdk]) 
         .all(|jdk| is_older_than(&jdk.version, offered))
 }
 
+/// What a build is beside the one its name reports.
+///
+/// Exactly one per build, ordered by how much it constrains what the user can
+/// do with the install: a build that is both unmanaged and older is
+/// `Unmanaged` - the fact that decides whether `jlo remove --superseded` will
+/// touch it at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Status {
+    /// As new as the head: two spellings of one version (`v21.0.11+9` beside
+    /// `21.0.11+9`). Neither will be deleted, so neither is superseded.
+    Installed,
+    /// Managed, and older than the head. What `jlo remove --superseded`
+    /// deletes, unless `$JAVA_HOME` points at it.
+    Superseded,
+    /// Installed without a `.jlo-managed` marker: jlo will not delete it.
+    Unmanaged,
+}
+
+/// One installed name - `21` or `28-ea` - and every build of it.
+pub(crate) struct NameGroup<'a> {
+    pub request: Request,
+    /// The newest *managed* build: the one the name reports and the one
+    /// `jlo remove --superseded` keeps. `None` when every build is unmanaged.
+    pub head: Option<&'a InstalledJdk>,
+    /// Every other build, newest first, with what it is beside the head.
+    pub others: Vec<(&'a InstalledJdk, Status)>,
+}
+
+impl NameGroup<'_> {
+    /// Every build of the name, managed or not - what an offer has to
+    /// supersede to count as an update.
+    pub(crate) fn builds(&self) -> Vec<&InstalledJdk> {
+        self.head
+            .into_iter()
+            .chain(self.others.iter().map(|(jdk, _)| *jdk))
+            .collect()
+    }
+}
+
+/// The installs grouped by name, in [`Request::listing_order`]: which build
+/// heads each name and what every other build is. The one answer `jlo list`
+/// renders and `jlo remove --superseded` deletes by, so the two cannot
+/// disagree about which builds are superseded.
+///
+/// Grouped by name, not by major: a pre-release sorts above the release it
+/// previews, so a major-keyed group would make the released build superseded
+/// by a beta of the same major. Only a managed build heads a name: an
+/// unmanaged 21.0.3 beside a managed 21.0.1 would otherwise make the managed
+/// one superseded, which `remove --superseded` - never touching the unmanaged
+/// one - would then delete, leaving the name with no build jlo manages.
+///
+/// `installed` may come in any order. Each name's builds are sorted newest
+/// first, stably, so two spellings of one version keep the order given.
+pub(crate) fn group_by_name(installed: &[InstalledJdk]) -> Vec<NameGroup<'_>> {
+    let mut names: Vec<Request> = installed.iter().map(|jdk| jdk.request).collect();
+    names.sort_unstable_by_key(|name| name.listing_order());
+    names.dedup();
+
+    names
+        .into_iter()
+        .map(|request| {
+            let mut builds: Vec<&InstalledJdk> = installed
+                .iter()
+                .filter(|jdk| jdk.request == request)
+                .collect();
+            builds.sort_by(|a, b| cmp_desc(&a.version, &b.version));
+            let head = builds
+                .iter()
+                .position(|jdk| jdk.managed)
+                .map(|at| builds.remove(at));
+            let others = builds
+                .into_iter()
+                .map(|jdk| {
+                    let status = if !jdk.managed {
+                        Status::Unmanaged
+                    } else if head.is_some_and(|head| is_older_than(&jdk.version, &head.version)) {
+                        Status::Superseded
+                    } else {
+                        Status::Installed
+                    };
+                    (jdk, status)
+                })
+                .collect();
+            NameGroup {
+                request,
+                head,
+                others,
+            }
+        })
+        .collect()
+}
+
 /// The install cascade stage 3 picks: the newest *released* build at or above
 /// the version floor.
 ///
@@ -316,33 +407,6 @@ impl JdkStore {
         Ok(requests)
     }
 
-    /// Every managed JDK strictly older than the newest managed JDK of its
-    /// name, newest first - the rule behind [`Self::prune`].
-    ///
-    /// Grouped by name, not by major: a pre-release sorts above the release
-    /// it previews, so a major-keyed group would make the released build
-    /// superseded by a beta of the same major. "Older", not "not the head":
-    /// two names can spell one version (`21.0.11+9` and `v21.0.11+9`), and
-    /// between those there is nothing to choose, so both stay.
-    fn superseded(&self) -> anyhow::Result<Vec<InstalledJdk>> {
-        let mut newest: HashMap<Request, String> = HashMap::new();
-        let mut superseded = Vec::new();
-        // `list` is newest first, so the first managed JDK of a name is its head.
-        for jdk in self.list()?.into_iter().filter(|jdk| jdk.managed) {
-            match newest.entry(jdk.request) {
-                Entry::Vacant(slot) => {
-                    slot.insert(jdk.version);
-                }
-                Entry::Occupied(head) => {
-                    if is_older_than(&jdk.version, head.get()) {
-                        superseded.push(jdk);
-                    }
-                }
-            }
-        }
-        Ok(superseded)
-    }
-
     /// The managed builds of `request` strictly older than `installed` - the
     /// build this `install`/`update` run put down - newest first.
     ///
@@ -381,7 +445,7 @@ impl JdkStore {
     pub(crate) fn prune(&self, active_java_home: Option<&Path>) -> anyhow::Result<RemoveReport> {
         let mut report = RemoveReport::default();
 
-        // A pass of its own for what `superseded` never sees: the warnings
+        // A pass of its own for what `list` never sees: the warnings
         // about directories jlo cannot name, and the refusal of a missing
         // base directory - which `list` would report as an empty store.
         for candidate in self.scan_required()? {
@@ -390,25 +454,28 @@ impl JdkStore {
             }
         }
 
-        // Reported in `jlo list`'s name order; the stable sort keeps each
-        // name's builds newest first.
-        let mut superseded = self.superseded()?;
-        superseded.sort_by_key(|jdk| jdk.request.listing_order());
+        // Reported in `jlo list`'s order: names as it lists them, each name's
+        // builds newest first.
+        let installed = self.list()?;
+        let superseded = group_by_name(&installed)
+            .into_iter()
+            .flat_map(|group| group.others)
+            .filter(|(_, status)| *status == Status::Superseded);
 
-        for jdk in superseded {
+        for (jdk, _) in superseded {
             // Both spellings of the entry are compared, as in
             // `Self::remove`: `owns` is deliberately not `java_home_in`,
             // so a bundle whose `Contents/Home` has gone unreadable is
             // still protected.
             if active_java_home.is_some_and(|active| owns(&self.base.join(&jdk.version), active)) {
-                report.skipped_in_use = Some(jdk.version);
+                report.skipped_in_use = Some(jdk.version.clone());
                 continue;
             }
             // Record what was *actually* deleted. Announcing the removals up
             // front meant a failure turned the line above it into a false claim.
             remove_recorded(
                 &self.base,
-                jdk.version,
+                jdk.version.clone(),
                 &mut report.removed,
                 &mut report.failures,
             );
@@ -997,9 +1064,9 @@ fn base_dir_for(os: &str, home: &Path) -> PathBuf {
     }
 }
 
-/// Whether `version` is strictly older than `newest`: the one definition of
-/// "superseded", so the listing and the deletion can never disagree. Two spellings of one version compare
-/// equal, so neither is older; a name that does not parse is never older,
+/// Whether `version` is strictly older than `newest`: the one comparison
+/// behind every "superseded" and "outdated". Two spellings of one version
+/// compare equal, so neither is older; a name that does not parse is never older,
 /// and nothing is older than it.
 pub(crate) fn is_older_than(version: &str, newest: &str) -> bool {
     compare(version, newest).is_ok_and(Ordering::is_lt)
@@ -1803,6 +1870,139 @@ mod tests {
         assert_eq!(report.removed.len(), 1);
     }
 
+    // -- group_by_name --
+
+    /// An install as `list` reports it, named the way `scan` names it.
+    fn jdk(version: &str, managed: bool) -> InstalledJdk {
+        InstalledJdk {
+            version: version.to_string(),
+            request: Request::of_build(&crate::version::parse(version).unwrap()).unwrap(),
+            managed,
+        }
+    }
+
+    /// A group as `(name, head, others)`, with every build by its version.
+    type Grouped<'a> = (String, Option<&'a str>, Vec<(&'a str, Status)>);
+
+    fn grouped(installed: &[InstalledJdk]) -> Vec<Grouped<'_>> {
+        group_by_name(installed)
+            .into_iter()
+            .map(|group| {
+                (
+                    group.request.to_string(),
+                    group.head.map(|jdk| jdk.version.as_str()),
+                    group
+                        .others
+                        .into_iter()
+                        .map(|(jdk, status)| (jdk.version.as_str(), status))
+                        .collect(),
+                )
+            })
+            .collect()
+    }
+
+    /// Two builds of one patch differ only in build metadata, which semver
+    /// leaves out of precedence. `prune` used to sort them Equal and delete
+    /// whichever `read_dir` happened to yield second - a coin toss over a JDK,
+    /// and one that took the *newer* build about half the time. Either input
+    /// order gives the same answer.
+    #[test]
+    fn the_lower_build_of_one_patch_is_superseded() {
+        for order in [
+            ["21.0.11+9.0.LTS", "21.0.11+10.0.LTS"],
+            ["21.0.11+10.0.LTS", "21.0.11+9.0.LTS"],
+        ] {
+            let installed = order.map(|version| jdk(version, true));
+            assert_eq!(
+                grouped(&installed),
+                vec![(
+                    "21".to_string(),
+                    Some("21.0.11+10.0.LTS"),
+                    vec![("21.0.11+9.0.LTS", Status::Superseded)]
+                )]
+            );
+        }
+    }
+
+    /// The leniency in `version::parse` means two directory names can spell
+    /// one version. Nothing distinguishes them, so there is no basis for
+    /// picking one to delete: neither is superseded, and both stay.
+    #[test]
+    fn two_spellings_of_one_version_are_neither_superseded() {
+        let installed = [jdk("v21.0.11+9", true), jdk("21.0.11+9", true)];
+        assert_eq!(
+            grouped(&installed),
+            vec![(
+                "21".to_string(),
+                Some("v21.0.11+9"),
+                vec![("21.0.11+9", Status::Installed)]
+            )]
+        );
+    }
+
+    /// Only a managed build heads a name, so an unmanaged *newer* one does
+    /// not make the managed one superseded. Unmanaged wins over superseded:
+    /// `remove --superseded` will not touch an unmanaged build whatever else
+    /// is true. The other builds stay newest first, whatever their status.
+    #[test]
+    fn only_a_managed_build_heads_its_name() {
+        let installed = [
+            jdk("21.0.8+9.0.LTS", false),
+            jdk("21.0.12+7", false),
+            jdk("21.0.9+10.0.LTS", true),
+            jdk("21.0.11+10.0.LTS", true),
+        ];
+        assert_eq!(
+            grouped(&installed),
+            vec![(
+                "21".to_string(),
+                Some("21.0.11+10.0.LTS"),
+                vec![
+                    ("21.0.12+7", Status::Unmanaged),
+                    ("21.0.9+10.0.LTS", Status::Superseded),
+                    ("21.0.8+9.0.LTS", Status::Unmanaged),
+                ]
+            )]
+        );
+    }
+
+    #[test]
+    fn a_name_of_only_unmanaged_builds_has_no_head() {
+        let installed = [jdk("17.0.20+101", false)];
+        assert_eq!(
+            grouped(&installed),
+            vec![(
+                "17".to_string(),
+                None,
+                vec![("17.0.20+101", Status::Unmanaged)]
+            )]
+        );
+    }
+
+    /// The two streams of one major are two names, so neither supersedes the
+    /// other: the beta sorts above the GA build it previews, and keyed on the
+    /// major alone it would make the released build superseded. The released
+    /// name comes first, as `jlo list` orders them.
+    #[test]
+    fn neither_stream_supersedes_the_other() {
+        let installed = [
+            jdk("26.0.3-beta+102.0.ea", true),
+            jdk("26.0.2-beta+101.0.ea", true),
+            jdk("26.0.1+9", true),
+        ];
+        assert_eq!(
+            grouped(&installed),
+            vec![
+                ("26".to_string(), Some("26.0.1+9"), vec![]),
+                (
+                    "26-ea".to_string(),
+                    Some("26.0.3-beta+102.0.ea"),
+                    vec![("26.0.2-beta+101.0.ea", Status::Superseded)]
+                ),
+            ]
+        );
+    }
+
     // -- superseded --
 
     /// What `jlo update` deletes after installing `21.0.5+11`: every older
@@ -1878,67 +2078,6 @@ mod tests {
 
         assert!(active.exists());
         assert!(!dir.path().join("17.0.2+8").exists(), "17.0.2+8 still goes");
-    }
-
-    /// Two builds of one patch differ only in build metadata, which semver
-    /// leaves out of precedence. `prune` used to sort them Equal and delete
-    /// whichever `read_dir` happened to yield second - a coin toss over a JDK,
-    /// and one that took the *newer* build about half the time.
-    #[test]
-    fn prune_keeps_the_higher_build_of_one_patch() {
-        for order in [
-            ["21.0.11+9.0.LTS", "21.0.11+10.0.LTS"],
-            ["21.0.11+10.0.LTS", "21.0.11+9.0.LTS"],
-        ] {
-            let dir = tempdir().unwrap();
-            for version in order {
-                create_jdk_dir(dir.path(), version, true);
-            }
-
-            let report = JdkStore::at(dir.path()).prune(None).unwrap();
-
-            assert_eq!(report.removed, vec!["21.0.11+9.0.LTS"]);
-            assert!(dir.path().join("21.0.11+10.0.LTS").exists());
-            assert!(!dir.path().join("21.0.11+9.0.LTS").exists());
-        }
-    }
-
-    /// The leniency in `version::parse` means two directory names can spell
-    /// one version. Nothing distinguishes them, so `prune` has no basis for
-    /// picking one, and picking by `read_dir` order would be the same coin
-    /// toss. It leaves both alone, which is what `jlo list` already shows.
-    #[test]
-    fn prune_keeps_both_when_two_names_spell_one_version() {
-        let dir = tempdir().unwrap();
-        create_jdk_dir(dir.path(), "21.0.11+9", true);
-        create_jdk_dir(dir.path(), "v21.0.11+9", true);
-
-        let report = JdkStore::at(dir.path()).prune(None).unwrap();
-
-        assert_eq!(report.removed.len(), 0);
-        assert!(dir.path().join("21.0.11+9").exists());
-        assert!(dir.path().join("v21.0.11+9").exists());
-    }
-
-    /// `remove --superseded` keeps the newest of each *name*. Without the
-    /// stream in the key, the beta - which sorts above the GA build it
-    /// previews - would make the released build superseded.
-    #[test]
-    fn prune_keeps_the_newest_of_each_stream() {
-        let dir = tempdir().unwrap();
-        create_jdk_dir(dir.path(), "26.0.1+9", true);
-        create_jdk_dir(dir.path(), "26.0.2-beta+101.0.ea", true);
-        create_jdk_dir(dir.path(), "26.0.3-beta+102.0.ea", true);
-
-        let report = JdkStore::at(dir.path()).prune(None).unwrap();
-
-        assert_eq!(report.removed.len(), 1);
-        assert!(dir.path().join("26.0.1+9").exists(), "the GA build stays");
-        assert!(
-            dir.path().join("26.0.3-beta+102.0.ea").exists(),
-            "the newest beta stays"
-        );
-        assert!(!dir.path().join("26.0.2-beta+101.0.ea").exists());
     }
 
     /// In `jlo list`'s name order - newest major first, and of one major the
