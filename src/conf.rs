@@ -8,58 +8,33 @@ use std::path::{Path, PathBuf};
 const JLO_CONFIG_FILE: &str = ".jlorc";
 const JLO_DEFAULT_CONFIG_FILE: &str = "default.jlorc";
 
-/// A resolved Java version name, and where it came from.
-///
-/// The provenance is the point: `jlo current` reports it, and a bare
-/// [`Request`] forgets it the moment the walk finishes.
+/// A version name, and where it came from: `jlo current` reports the latter.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Resolved {
-    /// The version name in play, e.g. `21` or `28-ea`.
     pub request: Request,
     pub source: Source,
 }
 
 /// Where a version in play came from.
 ///
-/// The variant names are the vocabulary, and their tags are fixed -
-/// `project_config`, `default_config`, `newest_installed`, `foreign` - so the
-/// machine-readable output still to come reports this fact under names that
-/// are already settled rather than inventing a second spelling. Renaming a
-/// variant is therefore a wire-format change, not a refactor.
-///
-/// An explicit argument and the cascade's last stage, the latest release, have
-/// no variant: nothing reports where those came from, so every caller dropped
-/// them.
-///
-/// `NewestInstalled` was added with the fallback cascade and is the reason
-/// this enum was left open: `resolve` resolves a version through four stages,
-/// and only the first two are this module's to answer. The cascade itself
-/// lives in `resolve` for the same reason - see the comment on
-/// `resolve::cascade`.
+/// The variant names are wire format for the machine-readable output still to
+/// come (`project_config`, `default_config`, `newest_installed`, `foreign`):
+/// renaming one is a contract change, not a refactor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Source {
     /// The nearest `.jlorc` at or above the cwd.
     ProjectConfig(PathBuf),
     /// `$JLO_HOME/default.jlorc`.
     DefaultConfig(PathBuf),
-    /// Nothing was configured, so the cascade fell back to the newest JDK
-    /// already installed. No comparison against Adoptium was made: this says
-    /// "the newest one here", not "the newest one there". Never produced by
-    /// [`find`] - this module does not know where JDKs live.
+    /// The newest JDK here, not the newest release. Never produced by
+    /// [`find`].
     NewestInstalled,
-    /// Not a resolution at all: `$JAVA_HOME` was set outside jlo, so no
-    /// config had any say. Never produced by [`find`] - it is how a command
-    /// that starts from the live `$JAVA_HOME` reports a JDK jlo does not
-    /// manage, without inventing a second vocabulary for "where this came
-    /// from".
+    /// `$JAVA_HOME` was set outside jlo. Never produced by [`find`].
     Foreign,
 }
 
 impl Source {
-    /// What to call this source in a status line.
-    ///
-    /// Pure: a project path is already shortened against the cwd by
-    /// [`find_in`], so formatting never has to consult the filesystem.
+    /// Pure: [`find_in`] already shortened a project path against the cwd.
     pub(crate) fn label(&self) -> String {
         match self {
             Self::ProjectConfig(path) | Self::DefaultConfig(path) => path.display().to_string(),
@@ -69,11 +44,8 @@ impl Source {
     }
 }
 
-/// The configured Java version, or `Ok(None)` when nothing is configured.
-///
-/// `None` is an ordinary state rather than a failure, because absence is where
-/// the cascade in `resolve` takes over: the newest installed JDK, then the latest
-/// release. This is stages 1 and 2 of that cascade and nothing more.
+/// Cascade stages 1 and 2. `Ok(None)` when nothing is configured, which is
+/// where the later stages take over.
 pub(crate) fn find() -> anyhow::Result<Option<Resolved>> {
     let physical = std::env::current_dir()
         .map_err(|e| anyhow!("could not determine the current directory: {e}"))?;
@@ -84,28 +56,13 @@ pub(crate) fn find() -> anyhow::Result<Option<Resolved>> {
     )
 }
 
-/// The directory to start the walk from: the one the user believes they are
-/// in, not the one `getcwd` reports.
+/// The directory the user believes they are in (`$PWD`), not the one
+/// `getcwd` reports. Under a symlinked directory they differ, and the autoload
+/// hook walks up from `$PWD`: a binary walking from `getcwd` would find a
+/// different `.jlorc` than the hook that called it.
 ///
-/// The two differ whenever a symlinked directory was cd'd into, and the
-/// difference is not cosmetic here - it decides which `.jlorc` applies. The
-/// autoload hook walks up from `$PWD`, because that is all a shell has, so a
-/// binary walking up from `getcwd` answers a different question than the hook
-/// that called it: the hook finds `work/.jlorc` under `work/app -> ../elsewhere/app`,
-/// fires `jlo env --offline`, and the binary - standing in `elsewhere/app` -
-/// sees no project config and resolves the user default instead. A JDK the
-/// project did not ask for, exported without a word.
-///
-/// The walk itself is already pinned in both implementations; this is the
-/// other half of the same agreement, and the reason the two halves are needed
-/// is that neither side can cheaply learn the other's answer.
-///
-/// `$PWD` is inherited from an environment jlo does not control, so it is
-/// believed only when it names the directory the process is actually in:
-/// absolute, and canonicalizing to the same place. Anything else - a stale
-/// value, a relative one, a deliberately misleading one - falls back to
-/// `getcwd`, which cannot be wrong. This is what `pwd -L`, direnv and cargo
-/// all do.
+/// `$PWD` is believed only when absolute and canonicalizing to the same
+/// place; anything else falls back to `getcwd`, as `pwd -L` and cargo do.
 fn logical_cwd(pwd: Option<PathBuf>, physical: PathBuf) -> PathBuf {
     let Some(pwd) = pwd.filter(|p| p.is_absolute()) else {
         return physical;
@@ -123,24 +80,17 @@ fn logical_cwd(pwd: Option<PathBuf>, physical: PathBuf) -> PathBuf {
     }
 }
 
-/// The error reported when the whole cascade runs dry.
-///
-/// Reachable only with `--offline` now: without it the cascade ends in a
-/// download rather than a failure. So nothing is installed either - stage 3
-/// would have answered - and writing a config would only move the failure one
-/// stage up, to a pinned JDK that is not there. The remedy is an install.
+/// The whole cascade ran dry, which only `--offline` reaches. Nothing is
+/// installed either - stage 3 would have answered - so the remedy is an
+/// install, not a config.
 pub(crate) fn nothing_configured() -> anyhow::Error {
     anyhow!(
         "No JDK is installed, and no '{JLO_CONFIG_FILE}' in the current directory or its parents, nor a default config file, names one. Run 'jlo install <VERSION>' to install one."
     )
 }
 
-/// The walk, with every input passed in so it can be tested without mutating
-/// the process environment.
-///
-/// Project config first, searched upwards: `jlo env` is routinely run from a
-/// subdirectory, and resolving the user default there would hand back a
-/// different JDK without saying so.
+/// Every input passed in, so it is testable without mutating the process
+/// environment.
 fn find_in(
     cwd: &Path,
     home: Option<&Path>,
@@ -159,19 +109,13 @@ fn find_in(
             request,
             source: Source::DefaultConfig(default_path.to_path_buf()),
         })),
-        // Neither file exists. Whether that is a problem is the caller's call.
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(anyhow!("could not load configuration: {e}")),
     }
 }
 
-/// Render a found config path the way the user typed their way to it: a
-/// `.jlorc` in the current directory reads as `./.jlorc`, one further up keeps
-/// its absolute path so it is clear the pin comes from somewhere else.
-///
-/// Done here, where the cwd is already in hand, so that formatting stays a
-/// pure function of what `Source` carries. The result is still a path that
-/// opens.
+/// `./.jlorc` in the current directory; one further up keeps its absolute
+/// path, so it is clear the pin comes from somewhere else.
 fn shorten_against(path: &Path, cwd: &Path) -> PathBuf {
     match path.strip_prefix(cwd) {
         Ok(relative) => Path::new(".").join(relative),
@@ -179,14 +123,8 @@ fn shorten_against(path: &Path, cwd: &Path) -> PathBuf {
     }
 }
 
-/// The nearest `.jlorc` at or above `start`.
-///
-/// The search stops after `home` and after a VCS root, both inclusive: a
-/// `.jlorc` outside the repository - or above the user's home directory -
-/// belongs to some other project, and inheriting it silently is the failure
-/// mode this search exists to prevent. `home` is the last directory examined
-/// rather than a skipped one, so a `.jlorc` sitting in `$HOME` keeps applying
-/// as it did when only the current directory was consulted.
+/// The nearest `.jlorc` at or above `start`, stopping after `home` and after
+/// a VCS root, both inclusive: one above them belongs to some other project.
 fn find_project_config(start: &Path, home: Option<&Path>) -> Option<PathBuf> {
     let mut dir = start;
     loop {
@@ -247,8 +185,8 @@ fn load(path: &Path) -> Result<Request, std::io::Error> {
     })
 }
 
-/// The one `init` failure `--force` answers, as a type so the caller can
-/// offer that flag without matching on the message.
+/// The one `init` failure `--force` answers, typed so the caller can offer
+/// the flag without matching on the message.
 #[derive(Debug)]
 pub(crate) struct AlreadyExists(PathBuf);
 
@@ -260,8 +198,6 @@ impl std::fmt::Display for AlreadyExists {
 
 impl std::error::Error for AlreadyExists {}
 
-/// Write `request` to the project `.jlorc` in the current directory, or with
-/// `global` to `$JLO_HOME/default.jlorc`.
 pub(crate) fn init(request: Request, global: bool, force: bool) -> anyhow::Result<()> {
     if global {
         init_config(&default_jlorc_path()?, request, force)
@@ -278,9 +214,8 @@ fn init_config(path: &Path, request: Request, force: bool) -> anyhow::Result<()>
             .map_err(|e| anyhow!("could not create directory '{}': {e}", parent.display()))?;
     }
 
-    // Two opens rather than one, because the message has to distinguish
-    // "created" from "replaced": create_new is the only way to learn whether
-    // the file was already there without a racy pre-check.
+    // Two opens: create_new is the only race-free way to tell "created" from
+    // "replaced".
     let mut replaced = false;
     let mut file = match OpenOptions::new().write(true).create_new(true).open(path) {
         Ok(file) => file,
@@ -304,9 +239,7 @@ fn init_config(path: &Path, request: Request, force: bool) -> anyhow::Result<()>
     )?;
     writeln!(file, "{request}")?;
 
-    // stderr, like every other status message: this module's contract is that
-    // stdout carries only shell code the caller may `eval`. Nothing sources
-    // `jlo init` today, which is exactly why the inconsistency was easy to miss.
+    // stderr: stdout carries only shell code the caller may `eval`.
     crate::ui::created!(
         "{} config file '{}' with Java {}",
         if replaced { "Updated" } else { "Created" },
