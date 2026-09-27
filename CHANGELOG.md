@@ -1,5 +1,54 @@
 # Changelog
 
+## [0.6.0](https://github.com/java-loader/jlo/compare/jlo-bin-v0.5.0...jlo-bin-v0.6.0) (2026-09-27)
+
+
+### ⚠ BREAKING CHANGES
+
+* **ui:** keep only the output lines a user would be lost without
+* drop pre-1.0 compatibility code
+* **install:** drop the receipt, self-heal and the publication lock
+* **selfupdate:** run the newest release's install.sh instead of a Rust updater
+* **install.sh:** refuse a release without a checksum or a hashing tool
+* **init:** `jlo init` and `jlo init --global` no longer default to the latest release; name the version, e.g. `jlo init 25`.
+
+### Features
+
+* **init:** require a version ([7004d9a](https://github.com/java-loader/jlo/commit/7004d9aba123f7699f16d707b2e6e111ecfd2a02))
+* **install:** print one fixed activation text instead of guessing the profile ([51c4db6](https://github.com/java-loader/jlo/commit/51c4db65ef25fbba9c3918a9addb23ed440b711a))
+* **selfupdate:** run the newest release's install.sh instead of a Rust updater ([74a6d4e](https://github.com/java-loader/jlo/commit/74a6d4ee05e8636b7f3a51e33d445d9496e393cb))
+* **update:** say when a newer J'Lo exists ([cd79c97](https://github.com/java-loader/jlo/commit/cd79c9725107dc767e7d133c058133b6f041f48c))
+
+
+### Bug Fixes
+
+* **conf:** offline dry-run message no longer claims no JDK is installed ([54cd44e](https://github.com/java-loader/jlo/commit/54cd44e4b1372e7a7b2ab5fbdacb58e4d615a594))
+* **install.sh:** refuse a release without a checksum or a hashing tool ([c0e2d1c](https://github.com/java-loader/jlo/commit/c0e2d1c90bbb471c3031e298aa4b884ee0218ddd))
+* **install:** name the file the PATH hint belongs in ([948ea7a](https://github.com/java-loader/jlo/commit/948ea7a05bdffb3aba14e683c5e3d800a6e55b51))
+* **install:** never sweep the staging directory the running binary came from ([99f8beb](https://github.com/java-loader/jlo/commit/99f8bebea9ea3fa61ef4a696b84a9f7cc107069f))
+* **install:** stop switching off an existing ~/.profile for bash on macOS ([5733a74](https://github.com/java-loader/jlo/commit/5733a7424449c7db7e7301ec92dd578425ae39a9))
+* pass the CI's ShellCheck and clippy 1.98 ([f62041f](https://github.com/java-loader/jlo/commit/f62041f6b50260b7168bfa2c7bc9bea3e2d59479))
+* **selfupdate:** name the install line when the installer cannot be downloaded ([92237f9](https://github.com/java-loader/jlo/commit/92237f9b09774fd3b4ab59040a68760629340eb8))
+* **selfupdate:** point the recovery hint at the released install.sh ([cf06c63](https://github.com/java-loader/jlo/commit/cf06c638800f4e6f3b8b7e62d91941dd47591c2f))
+* **shell:** find jlo-bin when a host replays the wrapper without JLO_HOME ([ae06224](https://github.com/java-loader/jlo/commit/ae0622421ef353fee5bf0ef67c0750fced1f1b77))
+* **store:** keep a staging directory whose age cannot be read ([8f6e816](https://github.com/java-loader/jlo/commit/8f6e8164583397391030b75bfb857f8d5bafe42f))
+* **store:** order names the way `jlo list` does, everywhere ([bb3e81e](https://github.com/java-loader/jlo/commit/bb3e81ecf42c1c03bde96f74c131b813700429df))
+* **store:** pass over vendor-named JDKs in silence on remove --superseded ([639b2a6](https://github.com/java-loader/jlo/commit/639b2a6a69515c257fc5129959431511e076e4d2))
+* **store:** take the JDK back out when its marker cannot be written ([b1eb6df](https://github.com/java-loader/jlo/commit/b1eb6df5777acfb76209394362a240c94f304083))
+* **update:** read a missing JDK store as nothing to update ([f8a4d63](https://github.com/java-loader/jlo/commit/f8a4d63f6ebca3737fb4dada36c3f1f7ba9d5b3a))
+
+
+### Performance Improvements
+
+* **resolve:** list the store for cascade stage 3 only when no config answers ([c4b8958](https://github.com/java-loader/jlo/commit/c4b8958bdd52e52ecf7924f315a54230dc385fb4))
+
+
+### Code Refactoring
+
+* drop pre-1.0 compatibility code ([f18dffa](https://github.com/java-loader/jlo/commit/f18dffa27d10dbc7ae467a044398c9fad9f75272))
+* **install:** drop the receipt, self-heal and the publication lock ([a6d932a](https://github.com/java-loader/jlo/commit/a6d932ae93aade722acb46911f87271446a9ed8d))
+* **ui:** keep only the output lines a user would be lost without ([55be43d](https://github.com/java-loader/jlo/commit/55be43ddd36863c887d5ac697327a0195e2ee2f2))
+
 ## [0.5.0](https://github.com/java-loader/jlo/compare/jlo-bin-v0.4.0...jlo-bin-v0.5.0) (2026-09-24)
 
 
