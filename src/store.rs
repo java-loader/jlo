@@ -11,75 +11,45 @@ use std::env;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
-/// The ownership marker jlo writes, *beside* the JDK directory rather than in
-/// it.
-///
-/// A macOS JDK directory is a signed bundle, and a file at its root unseals
-/// it: `codesign --verify` and `spctl --assess` both report "unsealed contents
-/// present in the bundle root" on an install that verifies without one. So the
-/// bundle goes down exactly as Eclipse shipped it and the marker sits next to
-/// it. `scan` filters to directories, so the file never appears as an install,
-/// and neither `/usr/libexec/java_home` (which counts bundles) nor `IntelliJ`
-/// (which scans subdirectories) sees it either.
+/// The ownership marker, *beside* the JDK directory rather than in it: a file
+/// at the root of a macOS JDK bundle unseals it (`codesign --verify` and
+/// `spctl --assess` then fail). `scan` filters to directories, so the marker
+/// never reads as an install.
 fn sibling_marker(base: &Path, version: &str) -> PathBuf {
     base.join(format!("{version}.jlo-managed"))
 }
 
-/// Where a macOS JDK bundle keeps its java home, relative to the bundle
-/// directory. Named once because two rules depend on it and they must not
-/// drift: [`java_home_in`] hands this path out, [`owns`] refuses to delete it.
+/// A macOS bundle's java home, relative to the bundle. One constant because
+/// [`java_home_in`] hands this path out and [`owns`] refuses to delete it, and
+/// the two must not drift.
 const BUNDLE_HOME: [&str; 2] = ["Contents", "Home"];
 
-/// What a `jlo remove` run did, by name ([`JdkStore::remove`]) or by the
-/// superseded rule ([`JdkStore::prune`]), so the caller owns the presentation
-/// and the store owns only the filesystem work.
+/// What a `jlo remove` run did, by name or by the superseded rule. The caller
+/// owns the presentation.
 #[derive(Debug, Default)]
 pub(crate) struct RemoveReport {
-    /// The versions actually deleted: newest first for `remove`, in `jlo
-    /// list`'s name order (each name newest first) for `prune`.
+    /// Newest first for `remove`; `jlo list`'s order for `prune`.
     pub(crate) removed: Vec<String>,
-    /// One message per JDK that could not be deleted.
     pub(crate) failures: Vec<String>,
-    /// Versions matching a target that were left alone for want of a
-    /// `.jlo-managed` marker. The user named these, so every install they did
-    /// *not* get is worth a line. Always empty for `prune`: nobody named the
-    /// unmanaged installs the rule passes over.
+    /// Matched a target but lack the `.jlo-managed` marker. Always empty for
+    /// `prune`: nobody named the unmanaged installs the rule passes over.
     pub(crate) skipped_unmanaged: Vec<String>,
-    /// Targets that matched nothing installed. Not a failure - the JDK is
-    /// already absent, which is what was asked for - but worth saying, since
-    /// it is usually a typo. Always empty for `prune`, which has no targets.
+    /// Targets that matched nothing. Always empty for `prune`.
     pub(crate) not_installed: Vec<String>,
-    /// The version left alone because `$JAVA_HOME` points at it. At most one,
-    /// there being only one `$JAVA_HOME`. Unlike the two above this is worth
-    /// a warning rather than a note: it is the one skip the user can act on,
-    /// by switching shells and running the command again.
+    /// Left alone because `$JAVA_HOME` points at it.
     pub(crate) skipped_in_use: Option<String>,
 }
 
-/// Why [`JdkStore::remove`] deleted nothing.
-///
-/// A typed refusal rather than an `anyhow::Error` because each variant has
-/// its own advice line (`ui::remove_refusal_hint`), and the caller must not
-/// have to match on message text to find it. Every variant here means the
-/// store is exactly as it was - each one fires only when there was nothing
-/// left to remove, or (for [`RemoveError::InUse`]) before anything has been.
+/// Why [`JdkStore::remove`] deleted nothing: every variant means the store is
+/// unchanged. Typed so each gets its own hint without matching on message text.
 #[derive(Debug)]
 pub(crate) enum RemoveError {
-    /// *Nothing at all* was left to remove, and these versions are why:
-    /// none of them matched an install. A version that matches nothing
-    /// alongside one that does is not an error - see [`JdkStore::remove`] -
-    /// so this fires only when the whole command would have done nothing.
-    /// Every such version is named, not just the first.
+    /// No target matched an install. Every such target is named.
     NotInstalled(Vec<String>),
-    /// The only thing left to remove was the JDK `$JAVA_HOME` points at, and
-    /// deleting that leaves the calling shell pointing at a path that no
-    /// longer exists - the hazard that killed `jlo update --clean`. Like the
-    /// other two, it is a skip when there is other work to do and an error
-    /// only when there is not.
+    /// Only the JDK `$JAVA_HOME` points at was left; deleting it would leave
+    /// the calling shell on a path that no longer exists.
     InUse(String),
-    /// Everything that matched lacks the `.jlo-managed` marker, so J'Lo did
-    /// not install it and will not delete it. Like
-    /// [`Self::NotInstalled`], this fires only when it leaves nothing to do.
+    /// Everything that matched lacks the `.jlo-managed` marker.
     Unmanaged(Vec<String>),
     /// The install directory itself could not be read.
     Store(anyhow::Error),
@@ -99,8 +69,7 @@ impl std::fmt::Display for RemoveError {
                 "refusing to remove {}: not installed by jlo",
                 versions.join(", ")
             ),
-            // `{:#}` so the whole `anyhow` chain survives into the one place
-            // that prints it, matching `ui::error!("{:#}", ...)` in `main`.
+            // `{:#}`: the whole `anyhow` chain, as `main` prints every error.
             Self::Store(e) => write!(f, "{e:#}"),
         }
     }
@@ -109,66 +78,50 @@ impl std::fmt::Display for RemoveError {
 /// A JDK found in the install directory, identified by its semver directory name.
 pub(crate) struct InstalledJdk {
     pub version: String,
-    /// The name this install answers to - what every "one build per ..."
-    /// rule groups by. Its stream is read off the version: a pre-release is
-    /// early access, anything else is released.
+    /// The name this install answers to; its stream is read off the version.
     pub request: Request,
-    /// Whether the JDK carries the `.jlo-managed` marker, i.e. whether
-    /// `jlo remove` is allowed to delete it, by either of its selectors.
+    /// Carries the `.jlo-managed` marker, so jlo may delete it.
     pub managed: bool,
 }
 
-/// Whether `offered` is newer than every one of `builds` - the installs of
-/// one name. The single rule behind both `jlo list` calling an offer an
-/// `update` and `install`/`update` downloading it, so the listing and the
-/// command cannot disagree about what counts as moving a name forward.
+/// Whether `offered` is newer than every one of `builds` - one name's
+/// installs. The one rule behind `jlo list`'s `update` and `install`/`update`
+/// downloading, so the two cannot disagree.
 ///
-/// The catalogue can sit *behind* the store - an install that came from
-/// somewhere else, or a major Adoptium has since rolled back - and following
-/// it would be a downgrade. Unmanaged installs count too: an offer no newer
-/// than one of them is not an improvement on what is already on disk. Two
-/// spellings of one version (`v21.0.11+9`, `21.0.11+9`) compare equal, so
-/// neither supersedes the other.
+/// Unmanaged installs count, and the catalogue can sit *behind* the store (a
+/// rolled-back release, an install from elsewhere): following it would be a
+/// downgrade.
 ///
-/// True when `builds` is empty: nothing installed is superseded by anything.
-/// The listing does not call that an update, and checks for it itself.
+/// True for empty `builds`; the listing checks for that itself.
 pub(crate) fn supersedes_every_install(offered: &str, builds: &[&InstalledJdk]) -> bool {
     builds
         .iter()
         .all(|jdk| is_older_than(&jdk.version, offered))
 }
 
-/// What a build is beside the one its name reports.
-///
-/// Exactly one per build, ordered by how much it constrains what the user can
-/// do with the install: a build that is both unmanaged and older is
-/// `Unmanaged` - the fact that decides whether `jlo remove --superseded` will
-/// touch it at all.
+/// What a build is beside its name's head. A build both unmanaged and older is
+/// `Unmanaged`: that decides whether `jlo remove --superseded` touches it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Status {
     /// As new as the head: two spellings of one version (`v21.0.11+9` beside
-    /// `21.0.11+9`). Neither will be deleted, so neither is superseded.
+    /// `21.0.11+9`), so not superseded.
     Installed,
-    /// Managed, and older than the head. What `jlo remove --superseded`
-    /// deletes, unless `$JAVA_HOME` points at it.
+    /// Managed and older than the head.
     Superseded,
-    /// Installed without a `.jlo-managed` marker: jlo will not delete it.
     Unmanaged,
 }
 
-/// One installed name - `21` or `28-ea` - and every build of it.
 pub(crate) struct NameGroup<'a> {
     pub request: Request,
-    /// The newest *managed* build: the one the name reports and the one
+    /// The newest *managed* build: the one the name reports and
     /// `jlo remove --superseded` keeps. `None` when every build is unmanaged.
     pub head: Option<&'a InstalledJdk>,
-    /// Every other build, newest first, with what it is beside the head.
+    /// Every other build, newest first.
     pub others: Vec<(&'a InstalledJdk, Status)>,
 }
 
 impl NameGroup<'_> {
-    /// Every build of the name, managed or not - what an offer has to
-    /// supersede to count as an update.
+    /// Every build, managed or not - what an offer must supersede.
     pub(crate) fn builds(&self) -> Vec<&InstalledJdk> {
         self.head
             .into_iter()
@@ -177,20 +130,17 @@ impl NameGroup<'_> {
     }
 }
 
-/// The installs grouped by name, in [`Request::listing_order`]: which build
-/// heads each name and what every other build is. The one answer `jlo list`
-/// renders and `jlo remove --superseded` deletes by, so the two cannot
-/// disagree about which builds are superseded.
+/// The installs grouped by name, in [`Request::listing_order`]. The one answer
+/// `jlo list` renders and `jlo remove --superseded` deletes by.
 ///
-/// Grouped by name, not by major: a pre-release sorts above the release it
-/// previews, so a major-keyed group would make the released build superseded
-/// by a beta of the same major. Only a managed build heads a name: an
-/// unmanaged 21.0.3 beside a managed 21.0.1 would otherwise make the managed
-/// one superseded, which `remove --superseded` - never touching the unmanaged
-/// one - would then delete, leaving the name with no build jlo manages.
+/// By name, not major: a pre-release sorts above the release it previews, so a
+/// major-keyed group would make the released build superseded by a beta. Only
+/// a managed build heads a name: an unmanaged 21.0.3 beside a managed 21.0.1
+/// would otherwise make the managed one superseded, and `remove --superseded`
+/// would leave the name with no build jlo manages.
 ///
-/// `installed` may come in any order. Each name's builds are sorted newest
-/// first, stably, so two spellings of one version keep the order given.
+/// `installed` may come in any order; the sort is stable, so two spellings of
+/// one version keep the order given.
 pub(crate) fn group_by_name(installed: &[InstalledJdk]) -> Vec<NameGroup<'_>> {
     let mut names: Vec<Request> = installed.iter().map(|jdk| jdk.request).collect();
     names.sort_unstable_by_key(|name| name.listing_order());
@@ -230,17 +180,12 @@ pub(crate) fn group_by_name(installed: &[InstalledJdk]) -> Vec<NameGroup<'_>> {
         .collect()
 }
 
-/// The install cascade stage 3 picks: the newest *released* build at or above
-/// the version floor.
+/// The newest *released* build at or above the version floor: cascade stage 3.
 ///
-/// GA only, because nobody asked for a pre-release: a machine that once tried
-/// `28-ea` must not start answering a bare `jlo env` with a beta. The floor is
-/// the grammar's own - a store of nothing but pre-8 JDKs is one every other
-/// part of jlo would reject, so stage 3 walks past it rather than resolving to
-/// a version that cannot be asked for.
+/// GA only: a machine that once tried `28-ea` must not answer a bare `jlo env`
+/// with a beta. Below the floor is a version that cannot be asked for.
 ///
-/// Takes the list rather than reading the store, because `jlo current` has it
-/// already and must not answer this question differently from the cascade.
+/// Takes the list so `jlo current` cannot answer differently from the cascade.
 /// `installed` is newest first, as [`JdkStore::list`] leaves it.
 pub(crate) fn newest_ga(installed: &[InstalledJdk]) -> Option<&InstalledJdk> {
     installed
@@ -248,26 +193,19 @@ pub(crate) fn newest_ga(installed: &[InstalledJdk]) -> Option<&InstalledJdk> {
         .find(|jdk| jdk.request.stream == Stream::Ga && jdk.request.major >= OLDEST_MAJOR)
 }
 
-/// One directory found in the store, with everything a single walk can say
-/// about it. Each caller applies its own notion of what counts as a JDK here,
-/// which is why nothing is filtered out yet.
+/// One directory in the store, unfiltered: each caller decides what counts as
+/// a JDK.
 struct Candidate {
     path: PathBuf,
-    /// The directory name, or `None` when it is not valid UTF-8.
+    /// `None` when not valid UTF-8.
     name: Option<String>,
-    /// The name as a *request*: its major and its stream, or `None` when the
-    /// name is not a semver. That is what jlo names its installs, and `None`
-    /// is what keeps a hand-placed `temurin-21.0.5` out of the listing. This
-    /// is the key every "one build per ..." rule groups by - keyed on the
-    /// major alone, a pre-release would supersede the released build it
-    /// previews, because it sorts above it.
+    /// `None` when the name is not a semver, which keeps a hand-placed
+    /// `temurin-21.0.5` out of the listing.
     request: Option<Request>,
-    /// Whether the directory carries the `.jlo-managed` marker.
     managed: bool,
 }
 
-/// The directory J'Lo installs JDKs into, and everything it knows about what
-/// lives there.
+/// The directory jlo installs JDKs into.
 pub(crate) struct JdkStore {
     base: PathBuf,
 }
@@ -279,21 +217,17 @@ impl JdkStore {
         Ok(Self::at(base_dir_for(env::consts::OS, &home)))
     }
 
-    /// A store rooted at an arbitrary directory. The test adapter.
+    /// A store rooted at an arbitrary directory, for tests.
     pub(crate) fn at(base: impl Into<PathBuf>) -> Self {
         Self { base: base.into() }
     }
 
-    /// The install directory itself, for the two places that have to name it:
-    /// PATH rewriting, which has to know which PATH entries J'Lo owns, and the
-    /// empty `jlo list --offline` line, which says where it looked.
     pub(crate) fn base(&self) -> &Path {
         &self.base
     }
 
-    /// Every JDK in the store whose directory name parses as a semver, newest
-    /// first. A missing base directory is not an error - it just means nothing
-    /// has been installed yet.
+    /// Every semver-named JDK, newest first. A missing base directory is an
+    /// empty store.
     pub(crate) fn list(&self) -> anyhow::Result<Vec<InstalledJdk>> {
         let candidates = self.scan_existing()?;
 
@@ -313,13 +247,8 @@ impl JdkStore {
         Ok(installed)
     }
 
-    /// The installed version `$JAVA_HOME` currently points at, if that is one
-    /// of ours.
-    ///
-    /// Resolved here rather than in `ui` so the listing works on version
-    /// names and never has to know where the store lives. Returns `None` when
-    /// `$JAVA_HOME` is unset or points outside the store - a system JDK or
-    /// one another tool manages.
+    /// The installed version `$JAVA_HOME` points at; `None` when it is unset
+    /// or points outside the store.
     pub(crate) fn active_version(
         &self,
         installed: &[InstalledJdk],
@@ -331,22 +260,17 @@ impl JdkStore {
             .map(|jdk| jdk.version.clone())
     }
 
-    /// Whether `active` - a live `$JAVA_HOME` - points into `jdk`: the guard
-    /// every deletion applies before touching a build, and the lookup behind
-    /// [`Self::active_version`]. `None` points into nothing.
+    /// Whether a live `$JAVA_HOME` points into `jdk`: the guard every deletion
+    /// applies.
     fn is_live(&self, jdk: &InstalledJdk, active: Option<&Path>) -> bool {
         active.is_some_and(|active| owns(&self.base.join(&jdk.version), active))
     }
 
-    /// The newest installed JDK answering to `request`, if any.
+    /// The newest installed JDK answering to `request`.
     ///
-    /// Matched on the parsed name rather than on a name prefix: a prefix
-    /// match makes `1` select `17`, and the only reason that is unreachable
-    /// is the `>= 8` floor in [`Request::parse`], which is also what refuses
-    /// `17.0` before it can ever mean "some 17.0.x". Matching the whole name
-    /// rather than the major is what keeps a pre-release out of the answer to
-    /// a GA request: it sorts above the build it previews, so a major-only
-    /// filter would hand `jlo env 26` a beta.
+    /// Matched on the parsed name, not a prefix or the major: a prefix makes
+    /// `1` select `17`, and a major-only match would hand `jlo env 26` a
+    /// pre-release, which sorts above the build it previews.
     pub(crate) fn find_matching(&self, request: Request) -> Option<PathBuf> {
         self.list()
             .ok()?
@@ -355,24 +279,14 @@ impl JdkStore {
             .map(|jdk| java_home_in(&self.base.join(jdk.version)))
     }
 
-    /// The name of the newest *released* JDK in the store, or `None` when
-    /// nothing released is installed.
-    ///
-    /// Stage 3 of `resolve`'s version cascade: what a bare `jlo env` resolves to
-    /// when no config anywhere names a version. "Newest" is by semver across
-    /// every major, so a store holding 17.0.11 and 21.0.5 answers 21.
-    ///
-    /// An unreadable store reads as "nothing installed", matching
-    /// [`Self::find_matching`]: both answer "is there one here", and neither
-    /// is the place to fail over a directory that cannot be read.
+    /// [`newest_ga`] against the store. An unreadable store reads as nothing
+    /// installed, as in [`Self::find_matching`]: neither is the place to fail
+    /// over a directory that cannot be read.
     pub(crate) fn newest_ga_request(&self) -> Option<Request> {
         newest_ga(&self.list().ok()?).map(|jdk| jdk.request)
     }
 
-    /// The version names present in the store, in `jlo list`'s order. A
-    /// major with a build of each stream installed contributes both of its
-    /// names. A missing base directory is an empty store, so a bare
-    /// `jlo update` before the first install says there is nothing to update.
+    /// The installed names, in `jlo list`'s order.
     pub(crate) fn installed_requests(&self) -> anyhow::Result<Vec<Request>> {
         Ok(group_by_name(&self.list()?)
             .into_iter()
@@ -380,17 +294,15 @@ impl JdkStore {
             .collect())
     }
 
-    /// Plan what the builds an `install`/`update` run put down supersede:
-    /// per name, its managed builds strictly older than the new one, newest
-    /// first. `installed` is each name with the version and java home of its
-    /// new build.
+    /// Per name, the managed builds strictly older than the one this run
+    /// installed. `installed` is each name with its new build's version and
+    /// java home.
     ///
     /// Bounded by that build, not by the name's current newest: a concurrent
     /// run may have installed a newer one meanwhile, and measuring against it
     /// would delete the very build this run exports as `JAVA_HOME`.
     ///
-    /// A store that cannot be listed plans no deletion, and says so under
-    /// every name.
+    /// A store that cannot be listed plans no deletion, and says so per name.
     fn plan_replacement<'a>(
         &'a self,
         installed: Vec<(Request, String, PathBuf)>,
@@ -435,34 +347,22 @@ impl JdkStore {
 
     /// Remove every managed JDK that is not the newest of its name.
     ///
-    /// `active_java_home` is the directory `$JAVA_HOME` points at, if any, and
-    /// it is skipped by exactly the rule [`Self::remove`] applies to a named
-    /// target: deleting the JDK the calling shell is on leaves that shell
-    /// pointing at a path that no longer exists - the hazard that killed `jlo
-    /// update --clean`. The two selectors of one verb must not disagree about
-    /// it. `jlo install` and `jlo update` may delete the live build only
-    /// when the wrapper evaluates them, because then they move the shell
-    /// first (see [`install_each`]); this verb is not evaluated by the
-    /// wrapper and cannot.
-    ///
-    /// A skip, not a refusal: the other superseded builds still go. It is
-    /// passed in rather than read here for the same reason as in
-    /// [`Self::remove`] - so the guard is testable without mutating the
-    /// process environment.
+    /// The build `$JAVA_HOME` points at is skipped, as [`Self::remove`] skips
+    /// it: this verb is not evaluated by the wrapper, so it cannot move the
+    /// shell off it first, and the shell would be left on a deleted path. The
+    /// other superseded builds still go. Passed in so the guard is testable
+    /// without mutating the process environment.
     pub(crate) fn prune(&self, active_java_home: Option<&Path>) -> anyhow::Result<RemoveReport> {
         let mut report = RemoveReport::default();
 
-        // A pass of its own for what `list` never sees: the warnings
-        // about directories jlo cannot name, and the refusal of a missing
-        // base directory - which `list` would report as an empty store.
+        // A pass of its own for what `list` never sees: directories jlo cannot
+        // name, and a missing base directory, which `list` reads as empty.
         for candidate in self.scan_required()? {
             if candidate.name.is_none() {
                 crate::ui::warning!("ignoring directory with invalid name {:?}", candidate.path);
             }
         }
 
-        // Reported in `jlo list`'s order: names as it lists them, each name's
-        // builds newest first.
         let installed = self.list()?;
         let superseded = group_by_name(&installed)
             .into_iter()
@@ -474,8 +374,6 @@ impl JdkStore {
                 report.skipped_in_use = Some(jdk.version.clone());
                 continue;
             }
-            // Record what was *actually* deleted. Announcing the removals up
-            // front meant a failure turned the line above it into a false claim.
             remove_recorded(
                 &self.base,
                 jdk.version.clone(),
@@ -487,34 +385,15 @@ impl JdkStore {
         Ok(report)
     }
 
-    /// Delete the JDKs `targets` name: for each one, every installed build of
-    /// a version name (`17`, `28-ea`), or the one exact build (`17.0.11+10`).
+    /// Delete what `targets` select: every build of a name (`17`, `28-ea`), or
+    /// one exact build (`17.0.11+10`).
     ///
-    /// The explicit counterpart to [`Self::prune`] - the targets the user
-    /// named, rather than a set derived from a rule.
-    ///
-    /// One rule, three reasons: an install that cannot be removed is set
-    /// aside with the reason why, and never stops the ones that can. The
-    /// reasons are the three [`RemoveError`] variants -
-    /// [`RemoveError::NotInstalled`] (the JDK is already absent, which is
-    /// what was asked for), [`RemoveError::Unmanaged`] (J'Lo did not install
-    /// it) and [`RemoveError::InUse`] (`$JAVA_HOME` points at it) -
-    /// and each becomes an *error* only when it leaves nothing to remove at
-    /// all, because a command told exactly what to delete must not report
-    /// success having deleted nothing.
-    ///
-    /// Setting aside rather than refusing is the whole point. None of the
-    /// three can delete anything, so aborting the other versions on their
-    /// account protects nothing - it only makes the user retype the command
-    /// once per problem. The guard the hazards actually need is "never delete
-    /// this one", and skipping it is exactly that. `jlo update` has the same
-    /// shape: it warns past a version it cannot use and gets on with the
-    /// others.
-    ///
-    /// `active_java_home` is the directory `$JAVA_HOME` points at, if any. It
-    /// is passed in rather than read here so the refusal is testable without
-    /// mutating the process environment, the way [`Self::at`] keeps the
-    /// install directory injectable.
+    /// A target not installed, unmanaged or live (`$JAVA_HOME` points at it)
+    /// is set aside and the rest still go: aborting on it would protect
+    /// nothing. Each is an error only when nothing is left to remove, because a
+    /// command told exactly what to delete must not report success having
+    /// deleted nothing. `active_java_home` is passed in so the guard is
+    /// testable without mutating the process environment.
     pub(crate) fn remove(
         &self,
         targets: &[String],
@@ -533,13 +412,10 @@ impl JdkStore {
             }
         }
 
-        // Filtering `installed` rather than collecting per target means
-        // overlapping targets - `jlo remove 17 17.0.2+8` names the same
-        // directory twice - select it once, where deleting it twice would
-        // turn the second attempt into a spurious "could not remove" line.
-        // It also keeps `installed`'s newest-first order, so the removals
-        // are reported the way `jlo list --offline` shows them, whatever
-        // order the targets were given in.
+        // Filtering `installed` rather than collecting per target: overlapping
+        // targets (`17 17.0.2+8`) select a directory once, where deleting it
+        // twice would add a spurious "could not remove" line. It also keeps
+        // the newest-first order, whatever order the targets came in.
         let matching: Vec<&InstalledJdk> = installed
             .iter()
             .filter(|jdk| selectors.iter().any(|(_, selector)| selector.matches(jdk)))
@@ -560,11 +436,8 @@ impl JdkStore {
             .map(|jdk| jdk.version.clone())
             .collect();
 
-        // Nothing left to delete. Exiting 0 here would report success on a
-        // command that did not do what it was asked, so say which of the
-        // three reasons it was, most actionable first: the live JDK can be
-        // had by switching shells, the unmanaged one is J'Lo declining, and a
-        // version that matched nothing is simply not there.
+        // Nothing left to delete: name the reason, most actionable first (the
+        // live JDK can be had by switching shells).
         if managed.is_empty() {
             return Err(match (in_use, unmanaged.is_empty()) {
                 (Some(version), _) => RemoveError::InUse(version),
@@ -580,8 +453,6 @@ impl JdkStore {
             ..RemoveReport::default()
         };
 
-        // `list` yields newest first, so the removals are reported that way
-        // too - the same order as `jlo list --offline`.
         for jdk in managed {
             remove_recorded(
                 &self.base,
@@ -595,7 +466,7 @@ impl JdkStore {
     }
 
     /// Move an extracted JDK from `source_dir` into the store and mark it
-    /// managed. Returns the installed path.
+    /// managed. Returns its java home.
     pub(crate) fn install(
         &self,
         metadata: &JdkMetadata,
@@ -610,24 +481,16 @@ impl JdkStore {
         ui.start_install();
 
         // No directory to create first: `source_dir` is staged inside the
-        // store, so the store exists, and `semver` is a single path
-        // component, so the store is `dest_dir`'s parent.
+        // store, and `semver` is a single path component.
         std::fs::rename(&extracted_jdk_path, &dest_dir)
             .context("could not move JDK to destination")?;
 
-        // touch a file to indicate that this directory is managed by jlo -
-        // beside it, never inside it. See [`sibling_marker`].
-        //
-        // Directory first, marker second, because the other order is worse
-        // on failure: a marker written before the rename would, if the rename
-        // then failed or the process died, stand beside whatever else holds
-        // that name - or next appears there - and hand it to `jlo remove`.
-        // A failed marker write instead takes the directory back out to the
-        // staging directory it came from, which the caller already cleans
-        // up. Left in place it would be an unmarked build of this version:
-        // the next `install` would call the name up to date and never retry,
-        // and `remove` would refuse it as not jlo's - a permanent orphan jlo
-        // made itself.
+        // Directory first, marker second: a marker written first would, if the
+        // rename failed or the process died, stand beside whatever else holds
+        // that name and hand it to `jlo remove`. A failed marker write moves
+        // the directory back to staging: left in place unmarked, the next
+        // `install` would call the name up to date and `remove` would refuse
+        // it - a permanent orphan.
         if let Err(err) = std::fs::File::create(sibling_marker(&self.base, &metadata.semver)) {
             let err = anyhow::Error::new(err).context("could not create marker file");
             return Err(match std::fs::rename(&dest_dir, &extracted_jdk_path) {
@@ -639,14 +502,11 @@ impl JdkStore {
             });
         }
 
-        // The java home, not the entry: every caller uses this as JAVA_HOME,
-        // and on macOS the two are no longer the same directory.
         Ok(java_home_in(&dest_dir))
     }
 
-    /// Every directory in the base directory, paired with what a single walk
-    /// can tell about it. The raw `io::Error` survives so each caller can keep
-    /// its own answer to "what does a missing base directory mean".
+    /// Every directory in the store. The raw `io::Error` survives so each
+    /// caller decides what a missing base directory means.
     fn scan(&self) -> std::io::Result<Vec<Candidate>> {
         Ok(std::fs::read_dir(&self.base)?
             .filter_map(Result::ok)
@@ -662,10 +522,8 @@ impl JdkStore {
                     .and_then(|name| crate::version::parse(name).ok())
                     .and_then(|semver| Request::of_build(&semver));
                 // `is_file`, not `exists`: a *directory* named
-                // `21.0.3+9.jlo-managed` is itself a store entry with a
-                // semver-shaped name, and letting it confer ownership on its
-                // neighbour `21.0.3+9` would put a JDK jlo never installed
-                // within reach of `jlo remove`.
+                // `21.0.3+9.jlo-managed` must not confer ownership on
+                // `21.0.3+9`, a JDK jlo never installed.
                 let managed = name
                     .as_deref()
                     .is_some_and(|name| sibling_marker(&self.base, name).is_file());
@@ -679,9 +537,7 @@ impl JdkStore {
             .collect())
     }
 
-    /// [`Self::scan`] for the callers that read an absent base directory as
-    /// an empty store - nothing has been installed yet - but still fail on
-    /// one that exists and cannot be read.
+    /// An absent base directory is an empty store; an unreadable one fails.
     fn scan_existing(&self) -> anyhow::Result<Vec<Candidate>> {
         match self.scan() {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
@@ -689,8 +545,7 @@ impl JdkStore {
         }
     }
 
-    /// [`Self::scan`] for the callers that treat an unreadable - or absent -
-    /// base directory as a failure.
+    /// An absent base directory fails too.
     fn scan_required(&self) -> anyhow::Result<Vec<Candidate>> {
         self.scan().with_context(|| self.read_failure())
     }
@@ -720,30 +575,23 @@ pub(crate) enum NameResult {
 
 /// What [`install_each`] did, handed back whole rather than as a `Result`: a
 /// failure on the third name must not hide that the first one deleted the
-/// build the shell was on. The store prints none of it but the live progress
-/// of each download; `ui::update_report` renders the rest.
+/// build the shell was on.
 #[derive(Debug, Default)]
 pub(crate) struct InstallRun {
-    /// Every name the run got to: the ones Adoptium does not offer, then the
-    /// ones already current, then the ones that got a new build - each kind
-    /// in processing order. A name the run stopped before, or
-    /// a new build whose payload could not be written, has no entry.
+    /// Not offered, then already current, then newly installed - each kind in
+    /// processing order. A name the run stopped before, or a new build whose
+    /// payload could not be written, has no entry.
     pub(crate) names: Vec<(Request, NameResult)>,
-    /// The java home of the new build, when the build `$JAVA_HOME` pointed
-    /// at was among those deleted and the shell was told to follow.
+    /// The new build's java home, when the live build was deleted and the
+    /// shell told to follow.
     pub(crate) repointed: Option<PathBuf>,
-    /// The superseded build left in place because `$JAVA_HOME` points at it
-    /// and the shell could not be told to follow.
+    /// The superseded build kept because `$JAVA_HOME` points at it and the
+    /// shell could not be told to follow.
     pub(crate) kept_active: Option<String>,
-    /// What stopped the run: a lookup that failed, which stops it before
-    /// anything is downloaded; no name left that Adoptium offers; a download
-    /// or install, after which the names that follow were not attempted; or
-    /// the shell's payload that could not be written, after which nothing is
-    /// deleted.
     pub(crate) error: Option<CommandError>,
-    /// The majors Adoptium has released, asked only when a pre-release name
-    /// is in play and the run succeeded: a `28-ea` pin whose major is out
-    /// is worth a note. Empty otherwise, and when the lookup failed.
+    /// The majors Adoptium has released, asked only when a pre-release name is
+    /// in play and the run succeeded: a `28-ea` pin whose major is out is worth
+    /// a note.
     pub(crate) released: Vec<i64>,
 }
 
@@ -768,22 +616,15 @@ impl InstallRun {
     }
 }
 
-/// The one operation behind both `install` and `update`: per name, download
-/// the latest build if it supersedes every install of the name, then delete
-/// the builds of that name it supersedes. A name moves forward, never back.
-/// The two verbs differ only in how they arrive at `requests`, which may come
-/// in any order and repeat: they are processed once each, in `jlo list`'s
-/// order. The on-demand install behind `env`, `home` and `exec` does not come
-/// through here: it only fills a missing name, so it has nothing to supersede.
+/// `install` and `update`: per name, download the latest build if it
+/// supersedes every install of the name, then delete the builds it supersedes.
 ///
-/// `active` is `$JAVA_HOME` of the calling shell, if set. `payload` is that
-/// shell's stdout when it evaluates it - and only then may the build `active`
-/// points at be deleted; without one it is kept and named in
-/// [`InstallRun::kept_active`]. The payload is written once, after every
-/// download and before any deletion, moving the shell to the new build when
-/// its old one is among those to go: a run killed before it is written has
-/// deleted nothing, and one killed after has already told the shell where to
-/// go. When it cannot be written, nothing is deleted.
+/// `payload` is the calling shell's stdout when it evaluates it, and only then
+/// may the build `active` (`$JAVA_HOME`) points at be deleted; without one it
+/// is kept. The payload is written once, after every download and before any
+/// deletion: a run killed before it has deleted nothing, one killed after has
+/// already told the shell where to go. When it cannot be written, nothing is
+/// deleted.
 pub(crate) fn install_each<W: std::io::Write>(
     client: &AdoptiumClient,
     store: &JdkStore,
@@ -813,8 +654,7 @@ pub(crate) fn install_each<W: std::io::Write>(
                 run.names.push((request, NameResult::UpToDate(newest)));
             }
             Err(e) => {
-                // Stop, as a failed download always has - but keep what the
-                // names before it did.
+                // Stop, but the names before it still get replaced.
                 run.error = Some(e.into());
                 break;
             }
@@ -829,9 +669,7 @@ pub(crate) fn install_each<W: std::io::Write>(
         return run;
     }
 
-    // Only when a pre-release name is in play, and then once for the whole
-    // run: it is one document, the same for every major. A failed lookup is
-    // swallowed - a note is not worth failing an otherwise successful
+    // A failed lookup is swallowed: a note is not worth failing a successful
     // command over.
     if run.error.is_none() && requests.iter().any(|request| request.is_ea()) {
         run.released = client.released_majors().unwrap_or_default();
@@ -840,8 +678,7 @@ pub(crate) fn install_each<W: std::io::Write>(
     run
 }
 
-/// What one name's new build supersedes, as planned by
-/// [`JdkStore::plan_replacement`].
+/// What one name's new build supersedes.
 struct NamePlan {
     request: Request,
     /// The java home of the build this run installed.
@@ -854,11 +691,10 @@ struct NamePlan {
     failures: Vec<String>,
 }
 
-/// The replacement half of an install run: what its new builds supersede,
-/// planned from one listing once every download is done. [`Self::apply`] is
-/// the only way to act on it, and it writes the shell's payload before it
-/// deletes anything - so the order that keeps the shell off a deleted build
-/// is the interface's, not the caller's.
+/// What an install run's new builds supersede, planned from one listing once
+/// every download is done. [`Self::apply`] is the only way to act on it and
+/// writes the payload before it deletes anything, so the order that keeps the
+/// shell off a deleted build is the interface's, not the caller's.
 struct Replacement<'a> {
     store: &'a JdkStore,
     active: Option<&'a Path>,
@@ -866,17 +702,12 @@ struct Replacement<'a> {
 }
 
 impl Replacement<'_> {
-    /// Write the payload, when there is one, then delete what was planned,
-    /// recording each name in `run`. Takes the plan by value: it is applied
-    /// once.
+    /// Write the payload, if any, then delete what was planned. Without a
+    /// payload nothing moves the shell, so the live build is kept; a payload
+    /// that cannot be written deletes nothing.
     ///
-    /// With a payload, the build `$JAVA_HOME` points at is deleted with the
-    /// rest once the payload has moved the shell to the build that
-    /// superseded it; a payload that cannot be written deletes nothing. Without one nothing moves the
-    /// shell, so that build is kept and named in [`InstallRun::kept_active`].
-    ///
-    /// Each build is still ours only if its marker is: the plan's listing is
-    /// not trusted at deletion time, [`remove_install`] checks again.
+    /// The plan's listing is not trusted at deletion time: [`remove_install`]
+    /// checks the marker again.
     fn apply<W: std::io::Write>(
         self,
         payload: Option<Payload<W>>,
@@ -924,19 +755,11 @@ impl Replacement<'_> {
     }
 }
 
-/// The first phase of [`install_each`]: what Adoptium offers for every name,
-/// asked before anything is downloaded or deleted.
+/// What Adoptium offers for every name, asked before anything is downloaded,
+/// so a failed lookup stops the run with nothing changed.
 ///
-/// A name it does not offer is skipped with a warning, the rule `remove` and
-/// `requested_versions` already follow: it cannot be acted on, so stopping
-/// the others on its account protects nothing: `jlo install 8 21` on Apple
-/// silicon should install 21, not fail over 8. It is an error only when it
-/// leaves nothing at all, and then the store is untouched.
-///
-/// A lookup that *fails* - network, HTTP, a response that does not parse -
-/// is different: it says nothing about the name, so it stops the run, and
-/// asking every name first is what lets it stop before anything changed.
-/// No extra request either way: this is the lookup the download needs.
+/// A name not offered for this platform is skipped - `jlo install 8 21` on
+/// Apple silicon installs 21 - and is an error only when no name is left.
 fn resolve_offered(
     client: &AdoptiumClient,
     requests: &[Request],
@@ -957,8 +780,6 @@ fn resolve_offered(
             ui::NOT_OFFERED_HINT,
         ));
     }
-    // Recorded only when something is left to do: with nothing left, the
-    // error above names every skipped name in one line instead.
     run.names.extend(
         not_offered
             .into_iter()
@@ -967,20 +788,16 @@ fn resolve_offered(
     Ok(offered)
 }
 
-/// What [`install_latest`] found: the name already current, with its newest
-/// build, or a new build installed, with its java home.
 enum Latest {
+    /// With the newest build installed.
     Current(String),
+    /// With the new build's java home.
     Installed(PathBuf),
 }
 
-/// Bring one name to the build on offer, or find it current already.
-///
 /// Downloads only an offer that supersedes every install of the name. Asking
-/// "is this exact build on disk?" instead would follow a catalogue that sits
-/// behind the store: the older build would land beside the newer one, which
-/// it does not supersede, so nothing would be replaced and the name would
-/// hold two builds.
+/// "is this exact build on disk?" instead would follow a catalogue behind the
+/// store, and the name would end up holding two builds.
 fn install_latest(
     client: &AdoptiumClient,
     store: &JdkStore,
@@ -1013,8 +830,7 @@ pub(crate) fn install_jdk(
     store: &JdkStore,
     jdk_metadata: &JdkMetadata,
 ) -> anyhow::Result<PathBuf> {
-    // One progress region spans all three phases, so the terminal shows a
-    // single line that changes rather than three bars stacking up.
+    // One progress region spans all three phases, so they share one line.
     let ui = InstallUi::new(&jdk_metadata.semver);
 
     match install_jdk_inner(client, store, jdk_metadata, &ui) {
@@ -1023,8 +839,6 @@ pub(crate) fn install_jdk(
             Ok(dest_dir)
         }
         Err(e) => {
-            // Clear the live region first: a half-drawn bar above the error
-            // only gets in the way of reading it.
             ui.abandon();
             Err(e)
         }
@@ -1042,7 +856,6 @@ fn install_jdk_inner(
     let file = &mut File::create(&temp_file).context("could not create temporary file")?;
     client.download(jdk_metadata, file, ui)?;
 
-    // Extract JDK to temp dir
     extract::extract(&temp_file, temp_dir.path(), ui)?;
 
     let dest_dir = store.install(jdk_metadata, temp_dir.path(), ui)?;
@@ -1055,59 +868,36 @@ fn install_jdk_inner(
 }
 
 /// Where an install is downloaded and unpacked: inside the store, not in
-/// `$TMPDIR`.
-///
-/// The last step of an install is a `rename` into the store, and `rename` is
-/// only atomic - only *possible* - within one filesystem. `$TMPDIR` is a
-/// different one routinely: every distribution that mounts `/tmp` as tmpfs
-/// (Fedora, Arch, Debian 13) turns every install into an `EXDEV` failure
-/// raised after the whole archive has been downloaded and unpacked.
-/// `install.rs::write_atomic` stages beside its target for the same reason.
-///
-/// A sibling of the installs, and one `scan` passes over: its name does not
-/// parse as a version, so an interrupted install leaves a `.tmpXXXXXX` the
-/// listing and both `remove` selectors ignore, rather than a half-moved JDK.
+/// `$TMPDIR`. The last step is a `rename` into the store, which only works
+/// within one filesystem, and a tmpfs `/tmp` (Fedora, Arch, Debian 13) would
+/// fail it with `EXDEV` after the whole download. Its name does not parse as
+/// a version, so `scan` passes over it.
 fn staging_dir(store: &JdkStore) -> anyhow::Result<tempfile::TempDir> {
     std::fs::create_dir_all(store.base())
         .with_context(|| format!("could not create {}", store.base().display()))?;
 
-    // An install killed with Ctrl-C runs no destructor, so its staging
-    // directory survives - holding the tarball and the unpacked JDK, half a
-    // gigabyte of it, in the user's JDK directory rather than in `$TMPDIR`
-    // where the system would eventually clear it. Nothing else will ever
-    // remove it, so the next install does, before adding one of its own.
+    // An install killed with Ctrl-C runs no destructor, and nothing else
+    // would ever clear its half a gigabyte from the store.
     sweep_stale_staging(store.base(), STAGING_PREFIX, None);
 
     tempfile::tempdir_in(store.base())
         .context("could not create a staging directory in the JDK install directory")
 }
 
-/// The prefix `tempfile` gives the directories [`staging_dir`] makes. A
-/// leading dot is what keeps them out of the listing: `version::parse` refuses
-/// it, so `scan` drops them the way it drops any other non-version name.
+/// The prefix `tempfile` gives staging directories. The leading dot keeps them
+/// out of the listing: `version::parse` refuses it.
 const STAGING_PREFIX: &str = ".tmp";
 
-/// Delete the directories under `base` whose name starts with `prefix` that
-/// an earlier, interrupted install left behind. Shared with the install verb,
-/// which sweeps what an installer staged under `$JLO_HOME/bin`.
+/// Delete the directories under `base` starting with `prefix` that an
+/// interrupted install left behind. Silent on failure: this is housekeeping.
 ///
-/// Best effort in both directions: a failure is not worth a word (the install
-/// that follows is what the user asked for, and this is housekeeping), and a
-/// staging directory belonging to an install running *right now* is left
-/// alone - it is in use, so removing its contents would break a command that
-/// is working. Nothing marks a staging directory as in use - no stager takes
-/// a lock, and `install.sh` unpacks before it hands over to the install verb -
-/// so "in use" is read as "modified in the last hour", which is far longer
-/// than any install takes.
-///
-/// Only an entry *known* to be older than that goes. One whose age cannot be
-/// read - no metadata, no mtime, or an mtime in the future (clock skew, a
-/// restored backup, NFS) - is kept: a leftover costs disk, a wrong deletion
-/// costs a working install.
+/// No stager takes a lock, so one running *right now* is recognised by age:
+/// only an entry *known* to be over an hour old goes. One whose age cannot be
+/// read, or lies in the future (clock skew, NFS), is kept: a leftover costs
+/// disk, a wrong deletion costs a working install.
 ///
 /// `keep` is spared whatever its age: the directory the running binary was
-/// staged in, which an installer suspended for over an hour between unpacking
-/// and its `exec` hands over from.
+/// staged in, for an installer suspended for over an hour before its `exec`.
 pub(crate) fn sweep_stale_staging(base: &Path, prefix: &str, keep: Option<&Path>) {
     let Ok(entries) = std::fs::read_dir(base) else {
         return;
@@ -1135,8 +925,7 @@ pub(crate) fn sweep_stale_staging(base: &Path, prefix: &str, keep: Option<&Path>
     }
 }
 
-/// JDK install location, matching `IntelliJ` IDEA's layout so both tools see the
-/// same JDKs.
+/// `IntelliJ` IDEA's layout, so both tools see the same JDKs.
 fn base_dir_for(os: &str, home: &Path) -> PathBuf {
     match os {
         "macos" => home.join("Library/Java/JavaVirtualMachines"),
@@ -1145,15 +934,13 @@ fn base_dir_for(os: &str, home: &Path) -> PathBuf {
 }
 
 /// Whether `version` is strictly older than `newest`: the one comparison
-/// behind every "superseded" and "outdated". Two spellings of one version
-/// compare equal, so neither is older; a name that does not parse is never older,
-/// and nothing is older than it.
+/// behind every "superseded" and "outdated". Two spellings of one version are
+/// equal; a name that does not parse is neither older nor newer.
 pub(crate) fn is_older_than(version: &str, newest: &str) -> bool {
     compare(version, newest).is_ok_and(Ordering::is_lt)
 }
 
-/// `'a'`, `'a' or 'b'`, `'a', 'b' or 'c'` - so a refusal naming several
-/// versions reads as a sentence rather than as a dumped vector.
+/// `'a'`, `'a' or 'b'`, `'a', 'b' or 'c'`.
 pub(crate) fn quoted_list(items: &[String]) -> String {
     let quoted: Vec<String> = items.iter().map(|item| format!("'{item}'")).collect();
     match quoted.split_last() {
@@ -1164,13 +951,8 @@ pub(crate) fn quoted_list(items: &[String]) -> String {
 }
 
 /// A `jlo remove` target: a version name (`17`, `28-ea`) selects every build
-/// of that name, an exact directory name selects one.
-///
-/// The name, not the major: `jlo remove 26` must leave `26-ea` alone, for the
-/// same reason `jlo env 26` must not resolve to it. Anything that is not a
-/// name falls through to the exact spelling, which is how `17.0.11+10` still
-/// works - and why `17.0` still matches nothing, a range being what `.jlorc`
-/// deliberately does not have.
+/// of that name - so `26` leaves `26-ea` alone - and anything else one exact
+/// directory name. `17.0` therefore matches nothing: there are no ranges.
 enum Selector<'a> {
     Name(Request),
     Exact(&'a str),
@@ -1194,12 +976,10 @@ impl<'a> Selector<'a> {
 
 /// Whether two paths name the same file or directory.
 ///
-/// Canonicalised when both resolve, so a trailing slash or a symlinked home
-/// does not let a live JDK slip past the `$JAVA_HOME` refusal, and
-/// `$JLO_HOME/bin/jlo-bin` reached through a symlink is still recognised as
-/// the running executable. The literal comparison comes first and stands alone as
-/// the fallback: a `$JAVA_HOME` pointing at a path that no longer exists
-/// cannot be canonicalised, and that must not silently turn the refusal off.
+/// Canonicalised when both resolve, so a trailing slash or a symlink does not
+/// let a live JDK slip past the `$JAVA_HOME` guard. The literal comparison
+/// comes first and stands alone: a `$JAVA_HOME` that no longer exists cannot
+/// be canonicalised, and that must not turn the guard off.
 pub(crate) fn same_path(a: &Path, b: &Path) -> bool {
     if a == b {
         return true;
@@ -1210,9 +990,8 @@ pub(crate) fn same_path(a: &Path, b: &Path) -> bool {
     }
 }
 
-/// [`remove_install`], with the outcome recorded: the name in `removed`, or
-/// the reason in `failures`. One place for the failure wording, which the
-/// three deleting paths share.
+/// [`remove_install`], recording the name in `removed` or the reason in
+/// `failures`.
 fn remove_recorded(
     base: &Path,
     name: String,
@@ -1225,28 +1004,17 @@ fn remove_recorded(
     }
 }
 
-/// Delete an install and the marker that claims it.
+/// Delete an install and the marker that claims it. **The marker goes first.**
 ///
-/// One function because the two must not drift, and **the marker goes first**.
-/// Either order can be interrupted; the question is which half is safe to be
-/// left with.
+/// A marker outliving its directory is invisible to `scan` and claims the next
+/// thing to appear under that name, so `jlo remove` would delete a JDK jlo
+/// never installed. A directory outliving its marker merely reads as
+/// unmanaged.
 ///
-/// A marker outliving its directory is the dangerous half. Nothing can clean
-/// it up - `scan` walks directories, so jlo cannot even see it - and it claims
-/// the next thing to appear under that name. A user who then drops a JDK of
-/// their own into `<store>/<version>` has it read as jlo's, and `jlo remove`
-/// deletes a JDK jlo never installed. That is the one thing CONTEXT.md's
-/// robustness order forbids outright.
-///
-/// A directory outliving its marker is the safe half: the install reads as
-/// unmanaged, jlo declines to touch it, and the user removes it by hand. An
-/// orphan the user can delete beats a trap that deletes for them.
-///
-/// The marker's removal is also the last word on ownership. Every caller
-/// decided from a listing, and the store may have changed since: a marker
-/// that is already gone means the install is no longer known to be jlo's, so
-/// it is left alone. Of two runs deleting one install, only the one that
-/// removed the marker goes on to the directory.
+/// The marker's removal is also the last word on ownership: every caller
+/// decided from a listing that may be stale. A marker already gone means the
+/// install is no longer known to be jlo's; of two runs deleting one install,
+/// only the one that removed the marker goes on to the directory.
 fn remove_install(base: &Path, version: &str) -> std::io::Result<()> {
     match std::fs::remove_file(sibling_marker(base, version)) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -1261,17 +1029,12 @@ fn remove_install(base: &Path, version: &str) -> std::io::Result<()> {
 }
 
 /// The java home inside a store entry: `Contents/Home` for a macOS JDK
-/// bundle, the entry itself for a flat install. This is the value `jlo home`,
-/// `jlo env` and `jlo exec` hand out.
+/// bundle, the entry itself for a flat install.
 ///
-/// Probed rather than selected on `env::consts::OS`, because one store holds
-/// both shapes at once: installs made by jlo versions that unwrapped the
-/// bundle sit beside bundles, and a hand-placed JDK may arrive as either.
-///
-/// The probe is `bin/java`, not the directory: a `Contents/Home` that cannot
-/// run Java is not a java home, whatever its name, and requiring the launcher
-/// is also what keeps a Linux JDK that happens to carry a `Contents/Home` from
-/// being read as a bundle.
+/// Probed rather than selected on `env::consts::OS`: one store holds both
+/// shapes (older jlo unwrapped bundles; hand-placed JDKs come either way). The
+/// probe is `bin/java`, so a `Contents/Home` that cannot run Java is not read
+/// as a bundle.
 fn java_home_in(dir: &Path) -> PathBuf {
     let bundled = dir.join(BUNDLE_HOME[0]).join(BUNDLE_HOME[1]);
     if bundled.join("bin").join("java").exists() {
@@ -1281,45 +1044,25 @@ fn java_home_in(dir: &Path) -> PathBuf {
     }
 }
 
-/// Whether `active` - a live `$JAVA_HOME` - names the store entry `dir`, by
-/// either of the two spellings a JDK directory has: the entry itself (a flat
-/// install) or its `Contents/Home` (a macOS bundle).
+/// Whether a live `$JAVA_HOME` names the store entry `dir`, as the entry
+/// itself or its `Contents/Home`.
 ///
-/// Deliberately *not* [`java_home_in`]: this is the guard that stops `jlo
-/// remove` deleting the JDK the calling shell is using, and a guard that asks
-/// the filesystem what shape a directory is can be switched off by a directory
-/// that cannot be stat'd. Both spellings are compared unconditionally instead,
-/// so a bundle whose `Contents/Home` has gone unreadable is still protected.
-///
-/// The same rule answers `jlo current`: a `$JAVA_HOME` pointing at a bundle
-/// root resolves to its version rather than falling through to "that install
-/// is no longer there".
+/// Deliberately *not* [`java_home_in`]: a deletion guard that asks the
+/// filesystem what shape a directory is can be switched off by one that
+/// cannot be stat'd. Both spellings are compared unconditionally.
 fn owns(dir: &Path, active: &Path) -> bool {
     same_path(dir, active) || same_path(&dir.join(BUNDLE_HOME[0]).join(BUNDLE_HOME[1]), active)
 }
 
 /// What to move into the store: the root of the extracted archive.
 ///
-/// On macOS that root is a JDK bundle, and the whole of it is kept - the
-/// `Contents/Info.plist` beside `Contents/Home` is what makes
-/// `/usr/libexec/java_home` (and everything that shells out to it: Maven
-/// Toolchains' macOS discovery, some Gradle toolchain detectors,
-/// `/usr/bin/java`) able to see the install at all. Unwrapping it to the java
-/// home, which is what jlo used to do, left those tools reporting no Java
-/// runtime on a machine with five JDKs on it.
+/// On macOS that is the whole bundle, not its java home: the
+/// `Contents/Info.plist` is what lets `/usr/libexec/java_home` (and
+/// `/usr/bin/java`, Maven and Gradle toolchain discovery) see the install.
 ///
-/// Found by looking, not by name. The archive's own top-level directory is the
-/// fact; `release_name` is an API label that happens to match it for released
-/// builds (`jdk-21.0.12+101`) and does not for early-access ones - Adoptium
-/// labels the 28 EA build `jdk-28+16-ea-beta` and ships an archive that unpacks
-/// into `jdk-28+16`. Joining the label was only ever right by luck, and the
-/// luck ran out at the last step of an install that had already downloaded the
-/// whole archive.
-///
-/// The downloaded archive sits in this directory too, hence the filter to
-/// directories; the `java` launcher is what tells the extracted tree from
-/// anything else, one level in on a macOS bundle. Probed via [`java_home_in`]
-/// rather than selected on `env::consts::OS`, for the reason stated there.
+/// Found by looking, not by name: `release_name` does not match the archive's
+/// top-level directory for early-access builds (`jdk-28+16-ea-beta` unpacks
+/// into `jdk-28+16`).
 fn find_jdk_path(temp_dest: &Path) -> anyhow::Result<PathBuf> {
     let read_failure = || format!("could not read the extracted archive in {temp_dest:?}");
 
