@@ -320,7 +320,7 @@ fn a_failing_installer_fails_the_update_and_reloads_nothing() {
             "no way out named: {stderr:?}"
         );
     }
-    assert!(fs::read(install.binary()).unwrap() == before);
+    assert_eq!(fs::read(install.binary()).unwrap(), before);
     release.assert();
 }
 

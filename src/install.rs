@@ -403,13 +403,14 @@ fn init_stub(layout: &Layout, note: &str) -> String {
 }
 
 /// Source `path` - a shell word, quoted by the caller - when readable, setting
-/// `marker` once it has loaded. Both forms end in `|| :`: a profile sourcing
-/// this under `set -e` must not die for a missing or failing target, so a
-/// stub's status is always 0 and errexit is off while the target runs.
+/// `marker` once it has loaded. A profile sourcing this under `set -e` must not
+/// die for a missing or failing target, so a stub's status is always 0 and
+/// errexit is off while the target runs: `|| :` and an `if` condition both give
+/// that. Not `. f && M=1 || :`, which `ShellCheck` flags (`SC2015`).
 fn guarded_source(path: &str, marker: Option<&str>) -> String {
     match marker {
         None => format!("if [ -r {path} ]; then . {path} || :; fi"),
-        Some(marker) => format!("if [ -r {path} ]; then . {path} && {marker}=1 || :; fi"),
+        Some(marker) => format!("if [ -r {path} ] && . {path}; then {marker}=1; fi"),
     }
 }
 
