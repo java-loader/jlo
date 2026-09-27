@@ -156,8 +156,8 @@ fn cmd_completions(shell: cli::CompletionShell) {
     let _ = std::io::stdout().write_all(&cli::completion_script(shell.into()));
 }
 
-/// Silent on success: the autoload hook calls this on every new shell and
-/// every `cd`.
+/// No status line on stderr for a changed environment: the autoload hook
+/// calls this on every new shell and every `cd`.
 ///
 /// `offline` is the whole of the "a `cd` must not start a download" rule,
 /// decided in Rust rather than in the shell hook.
