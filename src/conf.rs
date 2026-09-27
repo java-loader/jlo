@@ -80,8 +80,8 @@ fn logical_cwd(pwd: Option<PathBuf>, physical: PathBuf) -> PathBuf {
     }
 }
 
-/// The whole cascade ran dry, which only `--offline` reaches. Nothing is
-/// installed either - stage 3 would have answered - so the remedy is an
+/// The whole cascade ran dry, which only `--offline` reaches. No configured
+/// name or eligible installed GA build was found, so the remedy is an
 /// install, not a config.
 pub(crate) fn nothing_configured() -> anyhow::Error {
     anyhow!(
