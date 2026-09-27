@@ -398,7 +398,7 @@ mod tests {
         assert_eq!(find_project_config(&deep, Some(&home)), None);
     }
 
-    /// ADR-0004: `.git` is matched with `exists`, not `is_dir`. A worktree
+    /// `.git` is matched with `exists`, not `is_dir`. A worktree
     /// and a submodule record it as a *file*, and both are still repository
     /// roots - so swapping in `is_dir()` would walk straight out of one and
     /// pick up a `.jlorc` belonging to the superproject. Every other test

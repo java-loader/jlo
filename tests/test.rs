@@ -232,7 +232,7 @@ fn remove_superseded_deletes_only_the_older_managed_builds() {
         .args(["remove", "--superseded"])
         .assert()
         .success()
-        // ADR-0001: deletion is not the environment channel.
+        // Deletion is not the environment channel.
         .stdout(predicate::str::is_empty())
         .stderr(predicate::str::contains("21.0.9+10"))
         .stderr(predicate::str::contains("Removed 1 JDK"))
@@ -484,12 +484,12 @@ fn list_remote_network_failure_points_at_offline() {
 
 // -- the three tests that really talk to Adoptium --
 //
-// ADR-0002: the fixtures can drift silently from the live API, and these are
+// The fixtures can drift silently from the live API, and these are
 // the only thing that would notice. Everything else runs against mockito or a
 // dead port.
 //
 // They install a real ~200 MB JDK, so `$HOME` has to move: `JdkStore::base()`
-// is $HOME-derived (ADR-0005), and without this they wrote into the
+// is $HOME-derived, and without this they wrote into the
 // developer's own ~/Library/Java/JavaVirtualMachines and read back whatever
 // was already there - `cargo test --release` mutated the machine, and the
 // result depended on what had been installed beforehand.
@@ -1081,7 +1081,7 @@ fn current_never_touches_the_network() {
 
 // -- jlo env's output channel --
 
-/// ADR-0001: on success `env` writes export statements to stdout and nothing
+/// On success `env` writes export statements to stdout and nothing
 /// anywhere else. `--verbose` used to add a stderr line here; it is gone,
 /// because `jlo current` answers the same question from the live `JAVA_HOME`
 /// and can therefore also report drift. What must not come back is a second

@@ -375,7 +375,9 @@ fn update_jdks(
 }
 
 /// The build `$JAVA_HOME` points at goes too only when `wrapped`: only then is
-/// stdout known to be evaluated, moving the shell before anything is deleted.
+/// stdout known to be evaluated. The payload is written and flushed before
+/// anything is deleted, so the wrapper still moves the shell even if the
+/// binary fails afterwards.
 fn install_names(
     client: &AdoptiumClient,
     store: &JdkStore,

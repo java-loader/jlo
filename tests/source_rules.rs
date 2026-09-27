@@ -1,6 +1,6 @@
 //! Guards over the source tree itself, for two rules the compiler cannot see.
 //!
-//! Both are ADR decisions whose failure mode is silent: a `println!` on an
+//! Both are decisions whose failure mode is silent: a `println!` on an
 //! untested path is sourced by the user's shell, and a `style()` call outside
 //! `ui.rs` gives one command a palette nobody agreed to. Individual commands
 //! assert `stdout("")` and individual lines assert their colours, but neither
@@ -34,7 +34,7 @@ fn code_lines(source: &str) -> impl Iterator<Item = (usize, &str)> {
     })
 }
 
-/// ADR-0001: stdout is the environment channel. The `jlo` shell function
+/// Stdout is the environment channel. The `jlo` shell function
 /// evaluates what lands there, so a status message written with `println!`
 /// is not a cosmetic bug - the shell tries to execute it.
 ///
@@ -88,7 +88,7 @@ fn writes_to_stdout(code: &str) -> bool {
     })
 }
 
-/// ADR-0007, rule 6: styling is chosen in `ui.rs` and nowhere else. Commands
+/// Styling is chosen in `ui.rs` and nowhere else. Commands
 /// say what a line *is* by calling a named helper; they never pick a colour.
 ///
 /// Indicatif templates count, and are named here explicitly because that is

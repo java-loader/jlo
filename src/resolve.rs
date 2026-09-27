@@ -220,8 +220,8 @@ pub(crate) fn provenance(
     // A `$JAVA_HOME` inside the store that is *gone* was ours, not foreign.
     // Asked of `$JAVA_HOME` itself, not inferred from the listing: an IDE's
     // `temurin-21.0.1` is present but unlistable (foreign), and a listed
-    // bundle's `Contents/Home` may be gone, since `owns` never asks the
-    // filesystem.
+    // bundle's `Contents/Home` may be gone: `owns` compares both spellings
+    // without requiring either to exist.
     if is_inside(store.base(), &java_home) && !java_home.exists() {
         return Err(CommandError::with_hint(
             anyhow!(

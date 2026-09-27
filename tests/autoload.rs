@@ -451,7 +451,7 @@ fn find_stops_at_vcs_root() {
 
 /// The same rule as `find_project_config_stops_at_a_worktree_whose_git_is_a_file`
 /// in `src/conf.rs`, in the other implementation. Two tests for one rule are
-/// justified here for the reason ADR-0004 gives: the walk exists twice, in
+/// justified here: the walk exists twice, in
 /// Rust and in shell, and the shell half is `[ -e ]` rather than `[ -d ]`.
 /// Nothing but this notices if the shell half drifts to `-d`.
 #[test]

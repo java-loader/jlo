@@ -248,8 +248,9 @@ impl AdoptiumClient {
         ))
     }
 
-    /// Every JDK Adoptium can install on this machine, newest first. One
-    /// request per name, ~4s serially, hence the threads.
+    /// The newest build of each released major and of each unreleased
+    /// major's EA stream, newest first. One request per name, ~4s serially,
+    /// hence the threads.
     pub(crate) fn available_jdks(&self) -> anyhow::Result<Vec<RemoteJdk>> {
         let releases = self.fetch_available_releases()?;
         let names: Vec<Request> = releases

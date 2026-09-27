@@ -192,7 +192,7 @@ fn install(jlo_home: Option<&str>) -> (tempfile::TempDir, Output) {
 }
 
 /// The installer's human output is on stderr: stdout is the environment
-/// channel (ADR-0001), and from 0.4.0 `selfupdate` prints a `. jlo.sh` line
+/// channel, and from 0.4.0 `selfupdate` prints a `. jlo.sh` line
 /// there for the shell wrapper to eval.
 fn printed(out: &Output) -> String {
     String::from_utf8_lossy(&out.stderr).into_owned()
