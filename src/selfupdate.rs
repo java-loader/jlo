@@ -1,15 +1,12 @@
 //! `jlo selfupdate`: J'Lo replaced by its newest release.
 //!
-//! The binary does not download itself. It resolves the latest release tag and,
-//! when that release is newer, runs the release's own `install.sh`, pinned to
-//! the tag - so there is one publisher of a new binary, whoever started it. A
-//! pipeline in here (download, checksum, staging, a hand-over by `exec`) was a
-//! second implementation of the installer, and a bug in whichever copy an old
-//! install carried could strand it on a version that cannot update itself.
+//! The binary does not download itself: when the latest release is newer, it
+//! runs that release's `install.sh`, pinned to the tag, so there is one
+//! publisher of a new binary. A second copy of the installer could strand an
+//! old install on a version that cannot update itself.
 //!
-//! When J'Lo is already current it rewrites its shell files instead: the repair
-//! for an upgrade cut off between the binary and its scripts. Either way the
-//! reload lines follow, because the stale piece may be the wrapper resident in
+//! When J'Lo is already current it rewrites its shell files instead. Either
+//! way the reload lines follow: the stale piece may be the wrapper resident in
 //! the shell that asked.
 
 use crate::CommandError;
@@ -40,8 +37,7 @@ const INSTALL_LINE: &str = "/bin/bash -c \"$(curl -fsSL https://github.com/java-
 /// that has already done its work; a slow release host must not hold the prompt.
 const HINT_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// The one contact with the GitHub release host, the way `AdoptiumClient` is
-/// for Adoptium: one type per remote, each with an injectable base URL.
+/// The one contact with the GitHub release host.
 pub(crate) struct ReleaseClient {
     agent: Agent,
     base_url: String,
@@ -187,13 +183,9 @@ pub(crate) fn cmd_selfupdate(wrapped: bool) -> Result<(), CommandError> {
     Ok(install::print_reload(&layout, wrapped)?)
 }
 
-/// The one line `jlo update` adds when a newer J'Lo is out and `jlo
-/// selfupdate` could install it.
-///
-/// Silent on every failure: this runs after the update has done its work, and
-/// an error here would read as that work failing. Asked only for the J'Lo
-/// `selfupdate` may replace, so Homebrew's and a local build never make the
-/// request.
+/// The one line `jlo update` adds when a newer J'Lo is out. Silent on every
+/// failure: an error here would read as the update failing. Asked only for the
+/// J'Lo `selfupdate` may replace.
 pub(crate) fn announce_newer_release() {
     let Ok(home) = crate::jlo_home_dir() else {
         return;

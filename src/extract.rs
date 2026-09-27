@@ -9,10 +9,8 @@ use tar::Archive;
 pub(crate) fn extract(file: &Path, dest: &Path, ui: &InstallUi) -> anyhow::Result<()> {
     match file.extension().and_then(|s| s.to_str()) {
         Some("gz") => extract_tar_gz(file, dest, ui),
-        // Adoptium ships .tar.gz for Linux and macOS and .zip only for
-        // Windows, which jlo does not support. Reaching here therefore says
-        // nothing about the archive and everything about the platform
-        // detection that asked for it - so name that, not the extension.
+        // Adoptium ships .zip only for Windows: reaching here is a platform
+        // detection fault, so the message names that, not the extension.
         Some("zip") => bail!(
             "{file:?} is a Windows JDK archive; jlo supports Linux and macOS only, \
              so the platform it asked Adoptium for is one it cannot install"

@@ -1,49 +1,27 @@
-//! Ordering for the version strings jlo handles: JDK directory and catalogue
-//! names like `21.0.11+10.0.LTS`, and J'Lo's own release tags.
+//! Ordering for JDK directory and catalogue names (`21.0.11+10.0.LTS`) and
+//! J'Lo's release tags. Strict: a name that is not semver is an error, which is
+//! how `temurin-21` and friends stay out of the store.
 //!
-//! Both are proper semver, so this is a thin wrapper over [`semver`] that
-//! exists only so the parse-parse-compare dance is written once. The strictness
-//! is the point: a name that is not semver is an error here, which is how
-//! `temurin-21` and friends get filtered out of the store.
-//!
-//! Build metadata (`+10.0.LTS`) participates in the ordering, which the semver
-//! spec does not ask for: it says precedence ignores build metadata, so
-//! `21.0.11+10.0.LTS` and `21.0.11+9.0.LTS` are equally new.
-//!
-//! jlo needs more than precedence. Adoptium's build metadata carries the JDK
-//! build number, two builds of one patch are two directories in the store, and
-//! `jlo remove --superseded` has to say which of them it keeps. Left equal they sorted
-//! arbitrarily and `prune` deleted whichever `read_dir` yielded second, which
-//! took the newer build about half the time. `Ord for Version` orders the
-//! `build` field after the rest, so `+10.0.LTS` is newer than `+9.0.LTS` and
-//! the answer is both stable and right.
-//!
-//! This is an ordering over Adoptium's naming, not over semver in general.
-//! Within one major Adoptium keeps a single shape - `+101.0.LTS` for an LTS
-//! line, `+12` for the rest - so the identifiers being compared are always
-//! alike, and the first of them is the build number.
+//! Build metadata participates in the ordering, against the semver spec: it
+//! carries Adoptium's build number, two builds of one patch are two
+//! directories, and `jlo remove --superseded` must keep the newer one - left
+//! equal, it deleted whichever `read_dir` yielded second. This relies on
+//! Adoptium keeping one metadata shape per major.
 
 use anyhow::{Context, Result};
 use semver::Version;
 use std::cmp::Ordering;
 
 /// Parse a semver version, tolerating surrounding whitespace and one leading
-/// `v`.
-///
-/// Neither is in the spec and `semver` rejects both, but `semver_rs` - which
-/// this replaced - was node-semver's parser: it trimmed its input and carried
-/// `^v?` in its version regex. A JDK registered by hand as `v21.0.11+9` has
-/// therefore always been found, and refusing it now would make that install
-/// vanish from `jlo list` and from `jlo env 21` without a word. The directory
-/// name is the whole registration, so both are honoured here on purpose.
+/// `v`. Neither is in the spec, but the parser this replaced accepted both, and
+/// refusing them would make a hand-registered `v21.0.11+9` vanish silently.
 pub(crate) fn parse(name: &str) -> Result<Version> {
     let trimmed = name.trim();
     Version::parse(trimmed.strip_prefix('v').unwrap_or(trimmed))
         .with_context(|| format!("{name:?} is not a semver version"))
 }
 
-/// Order `a` against `b`, failing if either side is not semver. Build metadata
-/// breaks a tie rather than being ignored - see the module comment.
+/// Fails if either side is not semver. Build metadata breaks a tie.
 pub(crate) fn compare(a: &str, b: &str) -> Result<Ordering> {
     Ok(parse(a)?.cmp(&parse(b)?))
 }

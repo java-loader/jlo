@@ -13,15 +13,12 @@ use ureq::{Agent, Body};
 
 const USER_AGENT: &str = concat!("J'Lo/", env!("CARGO_PKG_VERSION"));
 
-/// The HTTP agent every remote jlo talks to is reached through.
+/// The HTTP agent for every remote.
 ///
-/// Statuses are inspected by the callers, so keep ureq from turning a non-2xx
-/// response into an error and losing the message wording. ureq defaults its
-/// TLS provider to Rustls regardless of which TLS feature is enabled, and
-/// panics on the first https request if that provider was not compiled in. It
-/// also defaults to bundled Mozilla roots. Select native-tls with the platform
-/// trust store, which is what jlo has always used and what TLS-intercepting
-/// corporate proxies need.
+/// Callers inspect statuses, so ureq must not turn a non-2xx into an error.
+/// ureq defaults to Rustls whatever TLS feature is enabled, and panics on the
+/// first https request if it was not compiled in; native-tls with the
+/// platform trust store is what TLS-intercepting corporate proxies need.
 pub(crate) fn agent() -> Agent {
     Agent::config_builder()
         .user_agent(USER_AGENT)
@@ -36,9 +33,7 @@ pub(crate) fn agent() -> Agent {
         .into()
 }
 
-/// Stream a response body into `file`, reporting progress to `ui`, and return
-/// the SHA256 of what was written as lowercase hex. Comparing it is left to the
-/// caller, which knows what to name in the mismatch.
+/// Returns the SHA256 of what was written, as lowercase hex.
 fn stream_hashed(body: &mut Body, file: &mut File, ui: &InstallUi) -> anyhow::Result<String> {
     let total_size = body
         .content_length()
@@ -101,12 +96,9 @@ struct AssetPackage {
 
 /// Require a field to be a single ordinary path component.
 ///
-/// `Path::join` neither resolves `..` nor resists a leading `/` - an absolute
-/// value discards the base it is joined onto entirely. These strings arrive
-/// over the wire, and the checksum cannot vouch for them: it is fetched from
-/// the same response, and the temp file is created and written before the
-/// digest is compared. So the shape is checked instead, once, before any of
-/// them reaches a path.
+/// `Path::join` neither resolves `..` nor resists a leading `/`, and the
+/// checksum cannot vouch for these strings: it comes from the same response,
+/// and the file is written before the digest is compared.
 fn plain_name(value: &str, field: &str) -> anyhow::Result<()> {
     let mut components = Path::new(value).components();
     match (components.next(), components.next()) {
@@ -115,12 +107,8 @@ fn plain_name(value: &str, field: &str) -> anyhow::Result<()> {
     }
 }
 
-/// One entry of the response from `/v3/assets/feature_releases/{major}/ea`.
-///
-/// A different shape from [`Asset`] on purpose: that endpoint answers with a
-/// *release*, which carries every binary of that build, and the query narrows
-/// the array to this OS and architecture rather than the response shape doing
-/// it.
+/// One entry of the response from `/v3/assets/feature_releases/{major}/ea`:
+/// a *release*, whose binaries the query narrows to this OS and architecture.
 #[derive(serde::Deserialize)]
 struct Release {
     version_data: AssetVersion,
@@ -156,9 +144,7 @@ impl TryFrom<Release> for JdkMetadata {
         {
             bail!("incomplete metadata received from the Adoptium API");
         }
-        // Both of these name a file or a directory jlo creates. Checked here,
-        // at the edge, so no caller has to remember which fields are safe to
-        // join onto a path.
+        // Both name a file or directory jlo creates; checked at the edge.
         plain_name(&metadata.semver, "version.semver")?;
         plain_name(&metadata.package_name, "package name")?;
         Ok(metadata)
@@ -169,9 +155,7 @@ impl TryFrom<Release> for JdkMetadata {
 #[derive(serde::Deserialize)]
 struct ReleaseInfo {
     available_releases: Vec<i64>,
-    // Optional because only the listing reads these two, and a response
-    // without them still answers every other question this document is
-    // fetched for.
+    // Optional: only the listing reads these two.
     /// The newest major with a GA build.
     #[serde(default)]
     most_recent_feature_release: Option<i64>,
@@ -181,13 +165,8 @@ struct ReleaseInfo {
 }
 
 impl ReleaseInfo {
-    /// The majors that exist only as a pre-release stream: above the newest
-    /// release, up to the tip.
-    ///
-    /// Not every major's EA stream: after a GA, Adoptium keeps the stream
-    /// running as a preview of the next *patch*, which is not a new name worth
-    /// offering in a listing, and asking for all of them would be one paged
-    /// request per major.
+    /// The majors that exist only as a pre-release stream. A released major's
+    /// stream previews its next *patch*, not a name worth listing.
     fn unreleased_majors(&self) -> impl Iterator<Item = i64> {
         self.most_recent_feature_release
             .zip(self.tip_version)
@@ -206,9 +185,8 @@ pub(crate) struct RemoteJdk {
     pub request: Request,
 }
 
-/// The single point of contact with Adoptium: discovering available releases,
-/// fetching JDK metadata, and downloading packages. `base_url` covers the two
-/// API endpoints; downloads follow whatever URL the metadata hands back.
+/// The only point of contact with Adoptium. `base_url` covers the API;
+/// downloads follow whatever URL the metadata hands back.
 pub(crate) struct AdoptiumClient {
     agent: Agent,
     base_url: String,
@@ -222,13 +200,9 @@ impl AdoptiumClient {
         }
     }
 
-    /// The newest build of `request` for this OS and architecture, or `None`
-    /// when Adoptium offers none.
-    ///
-    /// "Not offered" is a value, not an error: Adoptium answers it with `200`
-    /// and an empty array, and it is a fact about the name - no JDK 8 for
-    /// macOS on Apple silicon - that a caller handling several names skips
-    /// past, where a network or HTTP failure is one it has to stop at.
+    /// The newest build of `request` for this OS and architecture. `None` -
+    /// Adoptium's `200 []` - is a fact about the name that callers skip past,
+    /// where a network or HTTP failure is one they stop at.
     pub(crate) fn fetch_metadata(&self, request: Request) -> anyhow::Result<Option<JdkMetadata>> {
         self.fetch_newest(request)?
             .map(JdkMetadata::try_from)
@@ -274,13 +248,8 @@ impl AdoptiumClient {
         ))
     }
 
-    /// Every JDK Adoptium can install on this machine, newest first: the
-    /// newest build of every released major, and of the pre-release stream of
-    /// every major not yet released.
-    ///
-    /// Costs one request for the major-version list plus one per name. Done
-    /// serially that is ~4s, so the per-name lookups are fanned out across
-    /// threads sharing the pooled client.
+    /// Every JDK Adoptium can install on this machine, newest first. One
+    /// request per name, ~4s serially, hence the threads.
     pub(crate) fn available_jdks(&self) -> anyhow::Result<Vec<RemoteJdk>> {
         let releases = self.fetch_available_releases()?;
         let names: Vec<Request> = releases
@@ -347,8 +316,7 @@ impl AdoptiumClient {
         )
     }
 
-    /// GET `url` and parse the JSON body. `what` names the document in the
-    /// failure messages.
+    /// `what` names the document in the failure messages.
     fn get_json<T: DeserializeOwned>(&self, url: &str, what: &str) -> anyhow::Result<T> {
         let mut response = self
             .agent
@@ -370,19 +338,12 @@ impl AdoptiumClient {
     }
 
     /// The majors Adoptium has shipped a GA build of.
-    ///
-    /// One small JSON document, the same one `latest_major` reads. Fetched at
-    /// most once per command, and only when a pre-release name is in play, so
-    /// an ordinary `jlo update` makes exactly the requests it made before.
     pub(crate) fn released_majors(&self) -> anyhow::Result<Vec<i64>> {
         Ok(self.fetch_available_releases()?.available_releases)
     }
 
-    /// The newest major Adoptium has shipped, as the name the cascade's last
-    /// stage downloads. `available_releases` holds
-    /// majors that have shipped, so this is a GA name by construction; it is
-    /// parsed rather than assumed so the one grammar, floor included, stays in
-    /// one place.
+    /// The cascade's last stage. Parsed rather than assumed, so the one
+    /// grammar, floor included, stays in one place.
     pub(crate) fn latest_major(&self) -> anyhow::Result<Request> {
         let releases = self.fetch_available_releases()?;
 

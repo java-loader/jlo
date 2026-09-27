@@ -1,24 +1,16 @@
 //! What version of Java was *asked for*: a major, and which stream of it.
 //!
-//! Adoptium runs two streams per major - the released builds, and an
-//! early-access stream that keeps running after the major goes GA (asking for
-//! the EA of 26 today yields `26.0.2-beta`, a preview of the next patch). A
-//! pre-release sorts *above* the GA build it previews, so a store that mixed
-//! the two would hand out a beta for `jlo env 26` and delete the GA build as
-//! superseded.
-//!
-//! So the two are not mixed: `26-ea` is a name that stands beside `26`, and
-//! this type is that name. Every rule keyed on "a major" is keyed on a
-//! `Request` instead, which is why no comparison anywhere sees both streams
-//! and no filter has to remember to exclude one.
+//! A pre-release sorts *above* the GA build it previews, so mixing the streams
+//! would hand out a beta for `jlo env 26` and delete the GA build as
+//! superseded. Every rule keyed on "a major" is keyed on a `Request` instead,
+//! so no comparison sees both streams.
 
 use anyhow::bail;
 use std::cmp::Reverse;
 use std::fmt;
 
-/// The suffix that names the pre-release stream. One spelling: a store
-/// directory is named by Adoptium's semver, and a second accepted spelling
-/// would let the requested name and the installed name disagree.
+/// One spelling: a second would let the requested and installed names
+/// disagree.
 const EA_SUFFIX: &str = "-ea";
 
 /// The oldest major J'Lo will address. Adoptium offers 8 and up, and the floor
@@ -44,12 +36,9 @@ pub(crate) struct Request {
 }
 
 impl Request {
-    /// The sort key of every per-name output - `jlo list`, the
-    /// `jlo remove --superseded` report, `jlo install` and `jlo update`:
-    /// newest major first, and of one major the released name before the
-    /// pre-release (`Ga` is declared before `Ea`). Reversing a plain
-    /// major-then-stream order would lead with `27-ea` instead, putting a
-    /// preview above the release a user most likely has.
+    /// The sort key of every per-name output: newest major first, and the
+    /// released name before the pre-release (`Ga` is declared before `Ea`).
+    /// Reversing a plain major-then-stream order would lead with `27-ea`.
     pub(crate) fn listing_order(self) -> (Reverse<i64>, Stream) {
         (Reverse(self.major), self.stream)
     }
@@ -66,28 +55,21 @@ impl Request {
             None => (text, Stream::Ga),
         };
 
-        // The parse failure's own wording ("invalid digit found in string")
-        // describes the input, not the rule, so it is replaced rather than
-        // wrapped: one message answers the only question a rejection raises.
+        // Replaced, not wrapped: "invalid digit found in string" describes the
+        // input, not the rule.
         //
-        // `i64::from_str` is used rather than a hand-rolled digit scan so the
-        // set of accepted spellings is exactly what `u32::from_str` accepted
-        // before - a leading `+` included. Widening the grammar is the change
-        // being made here; narrowing it is not.
+        // `from_str`, not a digit scan: it accepts a leading `+`, as the
+        // grammar always has, and the grammar may only widen.
         match digits.parse::<i64>() {
             Ok(major) if major >= OLDEST_MAJOR => Ok(Self { major, stream }),
             _ => bail!(Self::rejection(text)),
         }
     }
 
-    /// The name a parsed build version answers to, or `None` when its major
-    /// does not fit an `i64` - the rest of the crate counts majors in `i64`
-    /// because that is what the Adoptium API hands back.
-    ///
-    /// The prerelease field is the whole stream test: Adoptium spells every
-    /// early-access build with one (`-beta`), and no released build carries
-    /// one. No version floor, unlike [`Self::parse`]: a pre-8 JDK in the store
-    /// is still an install, and `jlo list` and `jlo remove` must see it.
+    /// The name a build answers to; `None` when its major does not fit an
+    /// `i64`. The prerelease field is the whole stream test. No version floor,
+    /// unlike [`Self::parse`]: a pre-8 JDK is still an install `jlo list` and
+    /// `jlo remove` must see.
     pub(crate) fn of_build(version: &semver::Version) -> Option<Self> {
         let major = i64::try_from(version.major).ok()?;
         let stream = if version.pre.is_empty() {
@@ -102,11 +84,7 @@ impl Request {
         self.stream == Stream::Ea
     }
 
-    /// The message a rejected version earns. One wording for every rejection,
-    /// because the reader's question is the same in each case: what *is*
-    /// accepted? `conf::load` reports it too, wrapped with the file it came
-    /// from, so that a typo in a `.jlorc` reads the same as one on the command
-    /// line.
+    /// One wording for every rejection, naming what *is* accepted.
     pub(crate) fn rejection(text: &str) -> String {
         format!(
             "unsupported version '{text}': expected a major version (8, 11, 21) \
