@@ -58,11 +58,11 @@ pub(crate) struct RemoveReport {
 
 /// Why [`JdkStore::remove`] deleted nothing.
 ///
-/// A typed refusal rather than an `anyhow::Error` because each variant owns
-/// the advice line that belongs under it, and the caller must not have to
-/// match on message text to find it. Every variant here means the store is
-/// exactly as it was - each one fires only when there was nothing left to
-/// remove, or (for [`RemoveError::InUse`]) before anything has been.
+/// A typed refusal rather than an `anyhow::Error` because each variant has
+/// its own advice line (`ui::remove_refusal_hint`), and the caller must not
+/// have to match on message text to find it. Every variant here means the
+/// store is exactly as it was - each one fires only when there was nothing
+/// left to remove, or (for [`RemoveError::InUse`]) before anything has been.
 #[derive(Debug)]
 pub(crate) enum RemoveError {
     /// *Nothing at all* was left to remove, and these versions are why:
@@ -83,29 +83,6 @@ pub(crate) enum RemoveError {
     Unmanaged(Vec<String>),
     /// The install directory itself could not be read.
     Store(anyhow::Error),
-}
-
-impl RemoveError {
-    /// The advice line that belongs under this refusal, if any.
-    pub(crate) fn hint(&self) -> Option<String> {
-        match self {
-            Self::NotInstalled(_) => Some(
-                "Nothing was removed. Run 'jlo list --offline' to see what is installed."
-                    .to_string(),
-            ),
-            Self::InUse(_) => Some(
-                "Nothing was removed. Switch the shell to another JDK first, \
-                 e.g. 'jlo env 21', then remove it."
-                    .to_string(),
-            ),
-            Self::Unmanaged(_) => Some(
-                "Nothing was removed. J'Lo only deletes installs carrying its \
-                 .jlo-managed marker; remove the directory by hand if you are sure."
-                    .to_string(),
-            ),
-            Self::Store(_) => None,
-        }
-    }
 }
 
 impl std::fmt::Display for RemoveError {
@@ -348,11 +325,17 @@ impl JdkStore {
         installed: &[InstalledJdk],
         active_java_home: Option<&Path>,
     ) -> Option<String> {
-        let active = active_java_home?;
         installed
             .iter()
-            .find(|jdk| owns(&self.base.join(&jdk.version), active))
+            .find(|jdk| self.is_live(jdk, active_java_home))
             .map(|jdk| jdk.version.clone())
+    }
+
+    /// Whether `active` - a live `$JAVA_HOME` - points into `jdk`: the guard
+    /// every deletion applies before touching a build, and the lookup behind
+    /// [`Self::active_version`]. `None` points into nothing.
+    fn is_live(&self, jdk: &InstalledJdk, active: Option<&Path>) -> bool {
+        active.is_some_and(|active| owns(&self.base.join(&jdk.version), active))
     }
 
     /// The newest installed JDK answering to `request`, if any.
@@ -397,23 +380,57 @@ impl JdkStore {
             .collect())
     }
 
-    /// The managed builds of `request` strictly older than `installed` - the
-    /// build this `install`/`update` run put down - newest first.
+    /// Plan what the builds an `install`/`update` run put down supersede:
+    /// per name, its managed builds strictly older than the new one, newest
+    /// first. `installed` is each name with the version and java home of its
+    /// new build.
     ///
     /// Bounded by that build, not by the name's current newest: a concurrent
     /// run may have installed a newer one meanwhile, and measuring against it
     /// would delete the very build this run exports as `JAVA_HOME`.
-    fn superseded_by(
-        &self,
-        request: Request,
-        installed: &str,
-    ) -> anyhow::Result<Vec<InstalledJdk>> {
-        Ok(self
-            .list()?
+    ///
+    /// A store that cannot be listed plans no deletion, and says so under
+    /// every name.
+    fn plan_replacement<'a>(
+        &'a self,
+        installed: Vec<(Request, String, PathBuf)>,
+        active: Option<&'a Path>,
+    ) -> Replacement<'a> {
+        let listing = self.list();
+        let names = installed
             .into_iter()
-            .filter(|jdk| jdk.managed && jdk.request == request)
-            .filter(|jdk| is_older_than(&jdk.version, installed))
-            .collect())
+            .map(|(request, version, java_home)| {
+                let mut plan = NamePlan {
+                    request,
+                    java_home,
+                    builds: Vec::new(),
+                    live: None,
+                    failures: Vec::new(),
+                };
+                match &listing {
+                    Err(e) => plan.failures.push(format!("{e:#}")),
+                    Ok(listing) => {
+                        let superseded = listing.iter().filter(|jdk| {
+                            jdk.managed
+                                && jdk.request == request
+                                && is_older_than(&jdk.version, &version)
+                        });
+                        for jdk in superseded {
+                            if self.is_live(jdk, active) {
+                                plan.live = Some(plan.builds.len());
+                            }
+                            plan.builds.push(jdk.version.clone());
+                        }
+                    }
+                }
+                plan
+            })
+            .collect();
+        Replacement {
+            store: self,
+            active,
+            names,
+        }
     }
 
     /// Remove every managed JDK that is not the newest of its name.
@@ -453,11 +470,7 @@ impl JdkStore {
             .filter(|(_, status)| *status == Status::Superseded);
 
         for (jdk, _) in superseded {
-            // Both spellings of the entry are compared, as in
-            // `Self::remove`: `owns` is deliberately not `java_home_in`,
-            // so a bundle whose `Contents/Home` has gone unreadable is
-            // still protected.
-            if active_java_home.is_some_and(|active| owns(&self.base.join(&jdk.version), active)) {
+            if self.is_live(jdk, active_java_home) {
                 report.skipped_in_use = Some(jdk.version.clone());
                 continue;
             }
@@ -534,12 +547,9 @@ impl JdkStore {
 
         // Set aside before the marker check, so a live install that is also
         // unmanaged is reported as live: that is the one the user can act on.
-        let (in_use, removable): (Vec<_>, Vec<_>) = match active_java_home {
-            Some(active) => matching
-                .into_iter()
-                .partition(|jdk| owns(&self.base.join(&jdk.version), active)),
-            None => (Vec::new(), matching),
-        };
+        let (in_use, removable): (Vec<_>, Vec<_>) = matching
+            .into_iter()
+            .partition(|jdk| self.is_live(jdk, active_java_home));
         let in_use = in_use.first().map(|jdk| jdk.version.clone());
 
         let (managed, unmanaged): (Vec<_>, Vec<_>) =
@@ -811,35 +821,12 @@ pub(crate) fn install_each<W: std::io::Write>(
         }
     }
 
-    let mut repointed = None;
-    let mut doomed = Vec::new();
-    for (request, version, java_home) in &installed {
-        let superseded = store.superseded_by(*request, version).map(|mut builds| {
-            let live = builds.iter().position(|old| {
-                active.is_some_and(|active| owns(&store.base.join(&old.version), active))
-            });
-            if let Some(at) = live {
-                if payload.is_some() {
-                    repointed = Some(java_home.clone());
-                } else {
-                    run.kept_active = Some(builds.remove(at).version);
-                }
-            }
-            builds
-        });
-        doomed.push((*request, superseded));
-    }
-
-    if let Some(payload) = payload
-        && let Err(e) = payload.follow(repointed.as_deref(), active, store.base())
+    if let Err(e) = store
+        .plan_replacement(installed, active)
+        .apply(payload, &mut run)
     {
         run.error.get_or_insert(e.into());
         return run;
-    }
-    run.repointed = repointed;
-
-    for (request, superseded) in doomed {
-        run.names.push((request, replace(store, superseded)));
     }
 
     // Only when a pre-release name is in play, and then once for the whole
@@ -853,19 +840,88 @@ pub(crate) fn install_each<W: std::io::Write>(
     run
 }
 
-/// Delete the builds its new build has superseded.
-fn replace(store: &JdkStore, superseded: anyhow::Result<Vec<InstalledJdk>>) -> NameResult {
-    let mut replaced = Vec::new();
-    let mut failures = Vec::new();
-    match superseded {
-        Err(e) => failures.push(format!("{e:#}")),
-        Ok(builds) => {
-            for old in builds {
-                remove_recorded(&store.base, old.version, &mut replaced, &mut failures);
+/// What one name's new build supersedes, as planned by
+/// [`JdkStore::plan_replacement`].
+struct NamePlan {
+    request: Request,
+    /// The java home of the build this run installed.
+    java_home: PathBuf,
+    /// The managed builds to delete, newest first.
+    builds: Vec<String>,
+    /// Where in `builds` the one `$JAVA_HOME` points at is.
+    live: Option<usize>,
+    /// The listing that could not be read, in place of any builds.
+    failures: Vec<String>,
+}
+
+/// The replacement half of an install run: what its new builds supersede,
+/// planned from one listing once every download is done. [`Self::apply`] is
+/// the only way to act on it, and it writes the shell's payload before it
+/// deletes anything - so the order that keeps the shell off a deleted build
+/// is the interface's, not the caller's.
+struct Replacement<'a> {
+    store: &'a JdkStore,
+    active: Option<&'a Path>,
+    names: Vec<NamePlan>,
+}
+
+impl Replacement<'_> {
+    /// Write the payload, when there is one, then delete what was planned,
+    /// recording each name in `run`. Takes the plan by value: it is applied
+    /// once.
+    ///
+    /// With a payload, the build `$JAVA_HOME` points at is deleted with the
+    /// rest once the payload has moved the shell to the build that
+    /// superseded it; a payload that cannot be written deletes nothing. Without one nothing moves the
+    /// shell, so that build is kept and named in [`InstallRun::kept_active`].
+    ///
+    /// Each build is still ours only if its marker is: the plan's listing is
+    /// not trusted at deletion time, [`remove_install`] checks again.
+    fn apply<W: std::io::Write>(
+        self,
+        payload: Option<Payload<W>>,
+        run: &mut InstallRun,
+    ) -> anyhow::Result<()> {
+        let Self {
+            store,
+            active,
+            mut names,
+        } = self;
+        match payload {
+            Some(payload) => {
+                let repoint = names
+                    .iter()
+                    .rev()
+                    .find(|name| name.live.is_some())
+                    .map(|name| name.java_home.clone());
+                payload.follow(repoint.as_deref(), active, store.base())?;
+                run.repointed = repoint;
+            }
+            None => {
+                for name in &mut names {
+                    if let Some(at) = name.live {
+                        run.kept_active = Some(name.builds.remove(at));
+                    }
+                }
             }
         }
+
+        for NamePlan {
+            request,
+            builds,
+            mut failures,
+            ..
+        } in names
+        {
+            let mut replaced = Vec::new();
+            for version in builds {
+                remove_recorded(&store.base, version, &mut replaced, &mut failures);
+            }
+            run.names
+                .push((request, NameResult::Installed { replaced, failures }));
+        }
+        Ok(())
     }
-    NameResult::Installed { replaced, failures }
 }
 
 /// The first phase of [`install_each`]: what Adoptium offers for every name,
@@ -1185,10 +1241,21 @@ fn remove_recorded(
 /// A directory outliving its marker is the safe half: the install reads as
 /// unmanaged, jlo declines to touch it, and the user removes it by hand. An
 /// orphan the user can delete beats a trap that deletes for them.
+///
+/// The marker's removal is also the last word on ownership. Every caller
+/// decided from a listing, and the store may have changed since: a marker
+/// that is already gone means the install is no longer known to be jlo's, so
+/// it is left alone. Of two runs deleting one install, only the one that
+/// removed the marker goes on to the directory.
 fn remove_install(base: &Path, version: &str) -> std::io::Result<()> {
     match std::fs::remove_file(sibling_marker(base, version)) {
-        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
-        _ => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(std::io::Error::new(
+                e.kind(),
+                "its .jlo-managed marker is gone",
+            ));
+        }
+        result => result?,
     }
     std::fs::remove_dir_all(base.join(version))
 }
@@ -1471,115 +1538,50 @@ mod tests {
         );
     }
 
-    /// `jlo current` asks this, and `jlo env` set the `$JAVA_HOME` it is
-    /// asking about - so for a bundle that is the `Contents/Home` path, not
-    /// the store entry. Getting this wrong makes `current` report a live
-    /// install as one that is no longer there.
+    /// The live-build guard every deletion and `jlo current` go through,
+    /// over every spelling a `$JAVA_HOME` can have for one build. `jlo env`
+    /// exports a bundle's `Contents/Home`; a hand-set one may name the bundle
+    /// root; a symlink (on macOS every path under `/var` is one) or a trailing
+    /// separator must not walk past it. The bundle whose launcher is gone is
+    /// why the guard compares paths rather than asking [`java_home_in`]: the
+    /// shape probe would fall back to the entry and call a `Contents/Home`
+    /// nobody's - a probe that fails is exactly the case the guard must
+    /// survive.
     #[test]
-    fn active_version_recognises_a_bundles_contents_home() {
+    fn is_live_recognises_every_spelling_of_the_build_in_use() {
         let dir = tempdir().unwrap();
-        let java_home = create_bundle_jdk_dir(dir.path(), "21.0.3+9", true);
-        let store = JdkStore::at(dir.path());
+        let base = dir.path();
+        create_jdk_dir(base, "17.0.2+8", true);
+        let bundle_home = create_bundle_jdk_dir(base, "21.0.3+9", true);
+        let broken_home = create_bundle_jdk_dir(base, "25.0.1+8", true);
+        fs::remove_file(broken_home.join("bin").join("java")).unwrap();
+        let link = base.join("link");
+        std::os::unix::fs::symlink(base.join("17.0.2+8"), &link).unwrap();
+        let store = JdkStore::at(base);
         let installed = store.list().unwrap();
+        let jdk = |version: &str| installed.iter().find(|jdk| jdk.version == version).unwrap();
 
-        assert_eq!(
-            store
-                .active_version(&installed, Some(&java_home))
-                .as_deref(),
-            Some("21.0.3+9")
-        );
-    }
-
-    /// The bundle root is the other spelling of the same install. Nothing jlo
-    /// prints produces it, but a `$JAVA_HOME` set by hand can, and answering
-    /// "not one of ours" about our own directory would be wrong.
-    #[test]
-    fn active_version_recognises_a_bundle_root() {
-        let dir = tempdir().unwrap();
-        create_bundle_jdk_dir(dir.path(), "21.0.3+9", true);
-        let store = JdkStore::at(dir.path());
-        let installed = store.list().unwrap();
-
-        let entry = dir.path().join("21.0.3+9");
-        assert_eq!(
-            store.active_version(&installed, Some(&entry)).as_deref(),
-            Some("21.0.3+9")
-        );
-    }
-
-    /// The refusal that protects the calling shell, in bundle shape. `jlo env`
-    /// exported the `Contents/Home` path, so that is what the guard is handed,
-    /// and a guard that only knew the store entry would delete the JDK the
-    /// shell is running on.
-    #[test]
-    fn remove_refuses_a_bundle_whose_contents_home_is_in_use() {
-        let dir = tempdir().unwrap();
-        let java_home = create_bundle_jdk_dir(dir.path(), "21.0.3+9", true);
-
-        let err = JdkStore::at(dir.path())
-            .remove(&["21".to_string()], Some(&java_home))
-            .expect_err("JAVA_HOME points at it");
-
-        assert!(matches!(err, RemoveError::InUse(v) if v == "21.0.3+9"));
-        assert!(dir.path().join("21.0.3+9").exists());
-    }
-
-    /// The reason the guard compares paths instead of asking the filesystem
-    /// what shape the directory is. Here the bundle's launcher is gone, so the
-    /// shape probe would fall back to the store entry and conclude that a
-    /// `$JAVA_HOME` of `Contents/Home` belongs to nobody - and delete the
-    /// directory the calling shell is pointing into. A probe that fails is
-    /// exactly the case a removal guard must survive.
-    #[test]
-    fn remove_refuses_a_bundle_whose_launcher_is_missing() {
-        let dir = tempdir().unwrap();
-        let java_home = create_bundle_jdk_dir(dir.path(), "21.0.3+9", true);
-        fs::remove_file(java_home.join("bin").join("java")).unwrap();
-        assert_eq!(
-            java_home_in(&dir.path().join("21.0.3+9")),
-            dir.path().join("21.0.3+9")
-        );
-
-        let err = JdkStore::at(dir.path())
-            .remove(&["21".to_string()], Some(&java_home))
-            .expect_err("JAVA_HOME points into it");
-
-        assert!(matches!(err, RemoveError::InUse(v) if v == "21.0.3+9"));
-        assert!(dir.path().join("21.0.3+9").exists());
-    }
-
-    /// The other spelling, at the other end of the guard: a `$JAVA_HOME` set
-    /// by hand to the bundle root is still the JDK in use.
-    #[test]
-    fn remove_refuses_a_bundle_whose_root_is_in_use() {
-        let dir = tempdir().unwrap();
-        create_bundle_jdk_dir(dir.path(), "21.0.3+9", true);
-        let entry = dir.path().join("21.0.3+9");
-
-        let err = JdkStore::at(dir.path())
-            .remove(&["21".to_string()], Some(&entry))
-            .expect_err("JAVA_HOME points at it");
-
-        assert!(matches!(err, RemoveError::InUse(v) if v == "21.0.3+9"));
-        assert!(entry.exists());
-    }
-
-    /// `$JAVA_HOME` reached through a symlink - on macOS every path under
-    /// `/var` is one, `/private/var` being the real spelling. Comparing the
-    /// strings alone says "not in use" and deletes the JDK the shell runs.
-    #[test]
-    fn remove_refuses_a_jdk_in_use_under_another_spelling() {
-        let dir = tempdir().unwrap();
-        create_jdk_dir(dir.path(), "21.0.3+9", true);
-        let link = dir.path().join("link");
-        std::os::unix::fs::symlink(dir.path().join("21.0.3+9"), &link).unwrap();
-
-        let err = JdkStore::at(dir.path())
-            .remove(&["21".to_string()], Some(&link))
-            .expect_err("JAVA_HOME points at it through a symlink");
-
-        assert!(matches!(err, RemoveError::InUse(v) if v == "21.0.3+9"));
-        assert!(dir.path().join("21.0.3+9").exists());
+        let cases: [(&str, Option<PathBuf>, bool); 8] = [
+            ("17.0.2+8", Some(base.join("17.0.2+8")), true),
+            ("17.0.2+8", Some(link), true),
+            (
+                "17.0.2+8",
+                Some(PathBuf::from(format!("{}/17.0.2+8/", base.display()))),
+                true,
+            ),
+            ("21.0.3+9", Some(bundle_home), true),
+            ("21.0.3+9", Some(base.join("21.0.3+9")), true),
+            ("25.0.1+8", Some(broken_home), true),
+            ("17.0.2+8", Some(base.join("21.0.3+9")), false),
+            ("17.0.2+8", None, false),
+        ];
+        for (version, active, live) in cases {
+            assert_eq!(
+                store.is_live(jdk(version), active.as_deref()),
+                live,
+                "{version} with JAVA_HOME {active:?}"
+            );
+        }
     }
 
     // -- find_matching --
@@ -2027,7 +2029,7 @@ mod tests {
         );
     }
 
-    // -- superseded --
+    // -- replacement --
 
     /// What `jlo update` deletes after installing `21.0.5+11`: every older
     /// managed build of *that name* - and nothing of the sibling stream,
@@ -2045,12 +2047,45 @@ mod tests {
         create_jdk_dir(base, "21.0.7+6", true);
         create_jdk_dir(base, "21.0.0-beta+4.0.ea", true);
 
-        let superseded = JdkStore::at(base)
-            .superseded_by(request("21"), "21.0.5+11")
-            .unwrap();
+        let store = JdkStore::at(base);
+        let installed = vec![(
+            request("21"),
+            "21.0.5+11".to_string(),
+            base.join("21.0.5+11"),
+        )];
+        let plan = store.plan_replacement(installed, None);
 
-        let names: Vec<_> = superseded.iter().map(|jdk| jdk.version.as_str()).collect();
-        assert_eq!(names, vec!["21.0.3+9", "21.0.1+12"]);
+        assert_eq!(plan.names[0].builds, vec!["21.0.3+9", "21.0.1+12"]);
+    }
+
+    /// A plan is a listing, and the store can change before it is applied.
+    /// A build whose marker went in between is no longer known to be jlo's:
+    /// deleting it on the plan's word would delete what may not be ours.
+    #[test]
+    fn applying_a_plan_leaves_a_build_whose_marker_has_gone() {
+        let dir = tempdir().unwrap();
+        let base = dir.path();
+        create_jdk_dir(base, "21.0.3+9", true);
+        create_jdk_dir(base, "21.0.5+11", true);
+        let store = JdkStore::at(base);
+        let installed = vec![(
+            request("21"),
+            "21.0.5+11".to_string(),
+            base.join("21.0.5+11"),
+        )];
+        let plan = store.plan_replacement(installed, None);
+
+        fs::remove_file(sibling_marker(base, "21.0.3+9")).unwrap();
+        let mut run = InstallRun::default();
+        plan.apply::<std::io::Sink>(None, &mut run).unwrap();
+
+        assert!(base.join("21.0.3+9/bin/java").exists());
+        let (_, result) = &run.names[0];
+        let NameResult::Installed { replaced, failures } = result else {
+            panic!("{result:?}");
+        };
+        assert!(replaced.is_empty(), "{replaced:?}");
+        assert_eq!(failures.len(), 1, "{failures:?}");
     }
 
     /// The guard `jlo remove <version>` applies to a named target, applied by
@@ -2070,21 +2105,6 @@ mod tests {
         assert!(active.exists(), "the live JDK must survive");
         assert_eq!(report.skipped_in_use.as_deref(), Some("21.0.1+12"));
         assert_eq!(report.removed.len(), 0);
-    }
-
-    /// `$JAVA_HOME` on a macOS bundle names `<version>/Contents/Home`, not the
-    /// store entry, so a guard comparing only the entry would protect nothing
-    /// on the platform the bundle exists for.
-    #[test]
-    fn prune_recognises_the_bundle_spelling_of_the_live_jdk() {
-        let dir = tempdir().unwrap();
-        let active = create_bundle_jdk_dir(dir.path(), "21.0.1+12", true);
-        create_bundle_jdk_dir(dir.path(), "21.0.3+9", true);
-
-        let report = JdkStore::at(dir.path()).prune(Some(&active)).unwrap();
-
-        assert!(dir.path().join("21.0.1+12").exists());
-        assert_eq!(report.skipped_in_use.as_deref(), Some("21.0.1+12"));
     }
 
     /// A skip, not a refusal: the live JDK stays and every other superseded
@@ -2518,21 +2538,6 @@ mod tests {
 
         assert_eq!(report.removed, vec!["17.0.2+8"]);
         assert!(active.exists());
-    }
-
-    /// A `$JAVA_HOME` with a trailing separator names the same directory, and
-    /// must not walk past the refusal.
-    #[test]
-    fn remove_sees_through_a_trailing_separator_on_java_home() {
-        let dir = tempdir().unwrap();
-        create_jdk_dir(dir.path(), "21.0.3+9", true);
-        let active = PathBuf::from(format!("{}/21.0.3+9/", dir.path().display()));
-
-        let err = JdkStore::at(dir.path())
-            .remove(&targets(&["21"]), Some(&active))
-            .unwrap_err();
-
-        assert!(matches!(err, RemoveError::InUse(_)), "{err}");
     }
 
     /// `list` treats a missing base directory as "nothing installed", so an

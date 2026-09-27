@@ -61,12 +61,12 @@ impl From<anyhow::Error> for CommandError {
     }
 }
 
-/// `JdkStore::remove` refuses with a typed error that already knows which
-/// advice line belongs under it, so the conversion is the whole of
+/// `JdkStore::remove` refuses with a typed error whose variant picks the
+/// advice line under it (`ui::remove_refusal_hint`), so the conversion is the whole of
 /// `cmd_remove`'s error handling - no matching on message text.
 impl From<RemoveError> for CommandError {
     fn from(error: RemoveError) -> Self {
-        let hint = error.hint();
+        let hint = ui::remove_refusal_hint(&error);
         // Only the store variant carries a context chain worth preserving;
         // the refusals are a single sentence this type formats itself.
         let error = match error {

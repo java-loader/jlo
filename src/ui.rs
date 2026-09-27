@@ -3,7 +3,8 @@ use crate::conf::{Resolved, Source};
 use crate::request::Request;
 use crate::resolve::Active;
 use crate::store::{
-    InstallRun, NameGroup, NameResult, RemoveReport, Status, quoted_list, supersedes_every_install,
+    InstallRun, NameGroup, NameResult, RemoveError, RemoveReport, Status, quoted_list,
+    supersedes_every_install,
 };
 use clap::builder::styling::Styles;
 use console::style;
@@ -243,9 +244,31 @@ pub(crate) fn update_report(run: &InstallRun) {
 /// and it did not run this command.
 fn kept_active_hint(version: &str) -> String {
     format!(
-        "Kept {version}, which JAVA_HOME points at. Run 'jlo env' in the shell using it, \
-         then 'jlo remove --superseded'."
+        "Kept {version}, which JAVA_HOME points at. {}",
+        switch_shell_hint("run 'jlo remove --superseded'")
     )
+}
+
+/// The advice wherever J'Lo left a JDK alone because `JAVA_HOME` points at
+/// it - one wording, so `remove` and `install`/`update` cannot drift apart.
+/// `then` is what to do once the shell has moved.
+fn switch_shell_hint(then: &str) -> String {
+    format!("Switch the shell to another JDK first, e.g. 'jlo env 21', then {then}.")
+}
+
+/// The advice line under a `jlo remove` that deleted nothing, if any.
+pub(crate) fn remove_refusal_hint(refusal: &RemoveError) -> Option<String> {
+    let advice = match refusal {
+        RemoveError::NotInstalled(_) => {
+            "Run 'jlo list --offline' to see what is installed.".to_string()
+        }
+        RemoveError::InUse(_) => switch_shell_hint("remove it"),
+        RemoveError::Unmanaged(_) => "J'Lo only deletes installs carrying its .jlo-managed \
+             marker; remove the directory by hand if you are sure."
+            .to_string(),
+        RemoveError::Store(_) => return None,
+    };
+    Some(format!("Nothing was removed. {advice}"))
 }
 
 /// Diagnostic prefixes.
@@ -455,7 +478,7 @@ pub(crate) fn remove_report(report: &RemoveReport) {
     // not something buried among the notes above it.
     if let Some(version) = &report.skipped_in_use {
         warning!("left {version} alone: JAVA_HOME points at it");
-        hint!("Switch the shell to another JDK first, e.g. 'jlo env 21', then run it again.");
+        hint!("{}", switch_shell_hint("run it again"));
     }
 }
 
