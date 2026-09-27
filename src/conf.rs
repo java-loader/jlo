@@ -1,5 +1,5 @@
 use crate::jlo_home_dir;
-use crate::request::Request;
+use crate::request::{OLDEST_MAJOR, Request};
 use anyhow::anyhow;
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -85,7 +85,7 @@ fn logical_cwd(pwd: Option<PathBuf>, physical: PathBuf) -> PathBuf {
 /// install, not a config.
 pub(crate) fn nothing_configured() -> anyhow::Error {
     anyhow!(
-        "No JDK is installed, and no '{JLO_CONFIG_FILE}' in the current directory or its parents, nor a default config file, names one. Run 'jlo install <VERSION>' to install one."
+        "No released JDK {OLDEST_MAJOR} or newer is installed, and no '{JLO_CONFIG_FILE}' in the current directory or its parents, nor a default config file, names one. Run 'jlo install <VERSION>' to install one."
     )
 }
 

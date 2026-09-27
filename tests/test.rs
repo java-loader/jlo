@@ -1205,7 +1205,10 @@ fn bare_env_offline_ignores_an_ea_install() {
     fixture_cmd(home.path(), &project, &["env", "--offline"])
         .assert()
         .failure()
-        .stdout("");
+        .stdout("")
+        .stderr(predicate::str::contains(
+            "No released JDK 8 or newer is installed",
+        ));
 }
 
 /// A bare `install` resolves through the cascade, then asks Adoptium about
