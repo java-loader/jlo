@@ -1,12 +1,6 @@
-//! What version of Java a command should run against, and where that JDK
-//! lives.
-//!
-//! The cascade is jlo's one rule, and four commands ask it the same question,
-//! so it gets a name here rather than a copy in each of them. Everything in
-//! this module answers "which JDK", never "what do I print" - that is `ui`.
-//! The one thing it does beyond answering: when the JDK it settled on is
-//! missing and the command is not `--offline`, [`java_home`] installs it on
-//! demand, through the same `store::install_jdk` the download verbs use.
+//! Which JDK a command runs against, and where it lives. Answers "which JDK",
+//! never "what do I print"; the one side effect is [`java_home`]'s on-demand
+//! install of a missing JDK when not `--offline`.
 
 use crate::adoptium::AdoptiumClient;
 use crate::conf;
@@ -16,7 +10,7 @@ use crate::{CommandError, ui};
 use anyhow::{Context, anyhow};
 use std::path::{Path, PathBuf};
 
-/// The command asking: the verb an offline miss tells the reader to re-run.
+/// The verb an offline miss tells the reader to re-run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Verb {
     Env,
@@ -32,45 +26,30 @@ impl Verb {
     }
 }
 
-/// A resolved JDK: the version name the cascade settled on, and where that
-/// JDK lives.
 #[derive(Debug)]
 pub(crate) struct Target {
     pub request: Request,
     pub java_home: PathBuf,
 }
 
-/// What is active in this shell, and why.
-///
-/// Built by [`provenance`] and handed to `ui::provenance_line` formatted-but-
-/// undecided: `ui` never consults the store, the config or the environment -
-/// it turns this into a line. The shape is deliberately wider than any one
-/// caller needs, so the machine-readable output still to come reports the
-/// same four facts under the same names rather than inventing a second
-/// schema.
+/// What is active in this shell, and why. Wider than any one caller needs, so
+/// machine-readable output can report the same facts under the same names.
 #[derive(Debug)]
 pub(crate) struct Active {
     /// The directory `$JAVA_HOME` points at.
     pub path: PathBuf,
-    /// The install's version, e.g. `25.0.4+101`. `None` when the JDK is not
-    /// one of jlo's, which is the one case that reports a path instead.
+    /// `None` when the JDK is not one of jlo's.
     pub version: Option<String>,
-    /// The version name of `version` - its major and its stream, so a GA
-    /// build and a pre-release of one major are told apart here too.
     pub request: Option<Request>,
-    /// Where the active JDK came from. `None` when it is one of jlo's but
-    /// nothing accounts for it - either nothing is pinned, or what is pinned
-    /// is a different name, which `pinned_elsewhere` distinguishes.
+    /// `None` when it is one of jlo's but nothing accounts for it: nothing is
+    /// pinned, or a different name is ([`Self::pinned_elsewhere`]).
     pub source: Option<conf::Source>,
-    /// A config that pins a *different* name than the one active. Set only
-    /// when the two disagree; that disagreement is the whole reason this
-    /// command answers "and why" rather than just "what".
+    /// A config that pins a *different* name than the one active.
     pub pinned_elsewhere: Option<conf::Resolved>,
 }
 
-/// The JDK `verb` runs against: the explicit version or the cascade's answer,
-/// then its java home - from the store alone when `offline`, installing on
-/// demand otherwise.
+/// The explicit version or the cascade's answer, then its java home: from the
+/// store alone when `offline`, installing on demand otherwise.
 pub(crate) fn java_home(
     client: &AdoptiumClient,
     store: &JdkStore,
@@ -87,8 +66,6 @@ pub(crate) fn java_home(
     Ok(Target { request, java_home })
 }
 
-/// Determine the requested version name: the explicit CLI argument if
-/// present, otherwise the fallback cascade below.
 fn resolve_java_version_from(
     explicit: Option<String>,
     store: &JdkStore,
@@ -110,11 +87,8 @@ fn resolve_java_version_from(
     }
 }
 
-/// Stages 1-3 of the cascade: what this machine answers without the network.
-///
-/// Named on its own so the stage order is written once: `cascade` goes on to
-/// stage 4 from here, and `provenance` stops here, the way `jlo current`
-/// must.
+/// Stages 1-3 of the cascade, written once: `cascade` goes on to stage 4,
+/// `provenance` stops here.
 fn on_disk(
     configured: Option<conf::Resolved>,
     newest_installed: impl FnOnce() -> Option<conf::Resolved>,
@@ -122,31 +96,19 @@ fn on_disk(
     configured.or_else(newest_installed)
 }
 
-/// The version-resolution cascade, once the explicit argument is out of the
-/// way. Four stages, in order:
+/// The version cascade, once the explicit argument is out of the way:
 ///
 /// 1. the nearest `.jlorc` at or above the cwd,
 /// 2. `$JLO_HOME/default.jlorc`,
 /// 3. the newest JDK already installed,
 /// 4. the latest release Adoptium offers, downloaded.
 ///
-/// It lives here rather than in `conf` deliberately. `conf` knows about
-/// config files and nothing else - not where JDKs are installed, not how to
-/// reach Adoptium - and moving the cascade there would hand it both, so the
-/// module that answers "what does this file say" would start answering "what
-/// is on this machine" and "what does the network offer" too. Stages 1 and 2
-/// stay `conf::find`, unchanged; stages 3 and 4 are added here, where the
-/// store and the client already are.
+/// Every input is passed in, so the decisions - including the one that must
+/// *not* download - are testable without a store, a network or a temp
+/// directory.
 ///
-/// Every input is passed in rather than read from the filesystem or the
-/// process environment - the same reason `conf::find_in` takes its cwd - so
-/// the decisions here, including the one that must *not* download, are
-/// testable without a store, a network or a temp directory.
-///
-/// Stage 3 is a closure like stage 4, called only when stages 1 and 2 answer
-/// nothing. It lists the store, and the autoload hook's `jlo env --offline`
-/// in a pinned directory lists it once anyway, to find the pinned JDK; an
-/// eager stage 3 would make that twice on every `cd`.
+/// Stage 3 is a closure, called only when stages 1 and 2 answer nothing: an
+/// eager one would list the store twice on every autoload `cd`.
 fn cascade(
     configured: Option<conf::Resolved>,
     newest_installed: impl FnOnce() -> Option<conf::Resolved>,
@@ -157,10 +119,8 @@ fn cascade(
         return Ok(request);
     }
 
-    // `--offline` stops here, one stage short of the download, and that is the
-    // whole of why entering a directory never starts one: the autoload hook
-    // calls `jlo env --offline`, so the cascade it runs ends at what is
-    // already on disk.
+    // One stage short of the download: this is why the autoload hook's
+    // `jlo env --offline` never starts one.
     if offline {
         return Err(conf::nothing_configured());
     }
@@ -168,19 +128,9 @@ fn cascade(
     latest_release()
 }
 
-/// Stage 3 of the cascade: the newest released JDK already on disk, whatever
-/// major it is.
-///
-/// Deliberately no comparison against Adoptium. Asking whether the newest
-/// installed JDK is also the newest release would put a network round trip on
-/// the hottest path there is - every bare `jlo env` - to answer a question
-/// `jlo update` already exists for. So a machine holding only an outdated 17
-/// resolves to 17 and downloads nothing; stage 4 is reached only when no JDK
-/// is installed at all.
-///
-/// Which build counts - released only, at or above the version floor - is
-/// [`store::newest_ga`]'s rule, so `jlo current` and the cascade cannot
-/// disagree about it.
+/// Stage 3. Deliberately no comparison against Adoptium: that would put a
+/// network round trip on every bare `jlo env` to answer what `jlo update` is
+/// for. A machine holding only an outdated 17 resolves to 17.
 fn newest_installed(store: &JdkStore) -> Option<conf::Resolved> {
     store.newest_ga_request().map(|request| conf::Resolved {
         request,
@@ -188,17 +138,8 @@ fn newest_installed(store: &JdkStore) -> Option<conf::Resolved> {
     })
 }
 
-/// `--offline`: answer from the store alone.
-///
-/// The point of the flag is that asking the question cannot trigger the
-/// several-hundred-megabyte answer - a CI step with a short timeout, a
-/// network-isolated sandbox, or the autoload hook on a `cd`, needs a probe
-/// that fails fast rather than one that hangs on a connection attempt. The
-/// exit status is the answer, so there is no distinct code for "not
-/// installed": 1, like every other failure here.
-///
-/// `verb` is the subcommand to name in the advice line, so `env` does not
-/// send the reader to `home` (and vice versa).
+/// `--offline`: from the store alone, failing fast rather than starting a
+/// several-hundred-megabyte download.
 fn offline_java_home(
     store: &JdkStore,
     request: Request,
@@ -217,20 +158,11 @@ fn offline_java_home(
     Ok(java_home)
 }
 
-/// The version names an explicit run should download: the list given, or the version
-/// the cascade resolves when the list is empty - the same resolution `env`,
-/// `home` and `exec` do, so a bare `jlo install` means the same version they
-/// would pick.
-///
-/// `install` takes no `--offline`, so the cascade here may reach its last
-/// stage: `jlo install` on a machine with no config and no JDK installs the
-/// latest release, which is the only thing it could sensibly mean. `update`
-/// comes here only with a list: without one it means every installed name,
-/// which is not a resolution at all.
+/// The list given, or the version the cascade resolves when it is empty - so
+/// a bare `jlo install` means what `env` would pick.
 ///
 /// An invalid entry is warned about and skipped, so one typo in a list of four
-/// does not cost the other three. A list that leaves nothing valid behind is
-/// an error naming `verb`, the command that asked.
+/// does not cost the other three.
 pub(crate) fn requested_versions(
     versions: Vec<String>,
     verb: &str,
@@ -246,9 +178,7 @@ pub(crate) fn requested_versions(
     for v in versions {
         match Request::parse(&v) {
             Ok(request) => requested.push(request),
-            // The grammar's own wording, not a second one: this is the only
-            // path on which a typo in a version list is reported, and "what
-            // is accepted?" is the only question it raises.
+            // The grammar's own wording, which names what is accepted.
             Err(e) => ui::warning!("skipping {e:#}"),
         }
     }
@@ -260,9 +190,7 @@ pub(crate) fn requested_versions(
     Ok(requested)
 }
 
-/// Resolve the `JAVA_HOME` for the requested version name, installing the JDK on
-/// demand if it is not already present. Diagnostics go to stderr; this returns
-/// the path so callers decide what (if anything) to print to stdout.
+/// Installs the JDK on demand if it is not already present.
 fn resolve_java_home(
     client: &AdoptiumClient,
     store: &JdkStore,
@@ -278,36 +206,22 @@ fn resolve_java_home(
     }
 }
 
-/// What is active in this shell, and why: `$JAVA_HOME` read against the
-/// store and, for a JDK the store recognizes, against the cascade stopped
-/// after stage 3 - this never touches the network.
+/// `$JAVA_HOME` read against the store and, for a JDK the store recognizes,
+/// against the cascade stopped after stage 3. Never touches the network.
 ///
-/// `configured` is stages 1 and 2 (`conf::find`), taken as a closure because
-/// it is consulted only on the branch that needs it: a foreign or vanished
-/// `$JAVA_HOME` is answered without reading any config, so a broken `.jlorc`
-/// cannot fail it.
+/// `configured` is stages 1 and 2, a closure so a foreign or vanished
+/// `$JAVA_HOME` is answered without reading config: a broken `.jlorc` cannot
+/// fail it.
 pub(crate) fn provenance(
     store: &JdkStore,
     java_home: PathBuf,
     configured: impl FnOnce() -> anyhow::Result<Option<conf::Resolved>>,
 ) -> Result<Active, CommandError> {
-    // Asked before the listing, because the listing cannot answer it. A
-    // `$JAVA_HOME` inside the store that is simply *gone* is what `jlo
-    // remove` on the live JDK leaves behind, and reporting that as a JDK set
-    // outside jlo would be wrong - the install was ours.
-    //
-    // Existence is the whole of the test, and it has to be asked of
-    // `$JAVA_HOME` itself rather than inferred from the listing, for two
-    // reasons that pull in opposite directions. A directory the listing
-    // cannot name may be perfectly present: a vendor-named entry
-    // (`temurin-21.0.1`), which is what the IDE's own downloads land as,
-    // shares the store by design and is deliberately unlistable - `jlo list
-    // --offline` calls it foreign, and this has to agree. And a version the
-    // listing *can* name may be gone: on macOS `$JAVA_HOME` is the bundle's
-    // `Contents/Home`, and `owns` matches that spelling without asking the
-    // filesystem anything - deliberately, since it is also the guard that
-    // refuses to delete the live JDK and must not be switchable off by a
-    // directory that cannot be stat'd.
+    // A `$JAVA_HOME` inside the store that is *gone* was ours, not foreign.
+    // Asked of `$JAVA_HOME` itself, not inferred from the listing: an IDE's
+    // `temurin-21.0.1` is present but unlistable (foreign), and a listed
+    // bundle's `Contents/Home` may be gone, since `owns` never asks the
+    // filesystem.
     if is_inside(store.base(), &java_home) && !java_home.exists() {
         return Err(CommandError::with_hint(
             anyhow!(
@@ -321,9 +235,7 @@ pub(crate) fn provenance(
     let installed = store.list().context("could not list installed JDKs")?;
 
     let Some(version) = store.active_version(&installed, Some(&java_home)) else {
-        // A JDK jlo does not manage. No config is consulted: whatever is
-        // pinned, jlo is not what put this here, and the path says that
-        // completely.
+        // Not jlo's: no config is consulted, whatever is pinned.
         return Ok(Active {
             path: java_home,
             version: None,
@@ -333,17 +245,10 @@ pub(crate) fn provenance(
         });
     };
 
-    // Whether the active JDK is the *exact* install stage 3 of the cascade
-    // would pick, not merely one of its name. The distinction matters because
-    // the cascade resolves a name and `jlo env` then takes the newest build of
-    // it: a shell on 21.0.5 with 21.0.6 sitting beside it agrees on the name
-    // but is not what a bare `jlo env` would hand back, so calling it "the
-    // newest installed JDK" would claim more than is true. Asked of the
-    // selector rather than re-derived, so this says "from the newest installed
-    // JDK" exactly when a bare `jlo env` would hand back this build - which
-    // puts both of the selector's rules here too: a shell on a pre-release
-    // with a released build installed is not the cascade's answer, and a shell
-    // below the version floor never was.
+    // Stage 3 is credited only to the *exact* build a bare `jlo env` would
+    // hand back: a shell on 21.0.5 beside 21.0.6 agrees on the name but is
+    // not it. Asked of `newest_ga` rather than re-derived, so its GA-only and
+    // floor rules apply here too.
     let newest = store::newest_ga(&installed);
     let stage_3 = newest.map(|jdk| conf::Resolved {
         request: jdk.request,
@@ -361,19 +266,10 @@ pub(crate) fn provenance(
         pinned_elsewhere: None,
     };
 
-    // The same cascade `jlo env` resolves through, stopped after stage 3:
-    // this command never touches the network, so "download the latest
-    // release" is not an answer it can give - and it would be a strange one
-    // anyway, since something is demonstrably active already.
-    //
-    // A config that fails to load is still a failure: it is a file the user
-    // wrote and meant, and answering around it would hide the mistake.
+    // A config that fails to load is still a failure: answering around a
+    // file the user wrote would hide the mistake.
     match on_disk(configured()?, || stage_3) {
-        // Stage 3, credited only to the exact build a bare `jlo env` would
-        // hand back - not merely to the name, which `newest` alone would give
-        // it. No mismatch counterpart: nobody asked for the newest installed
-        // JDK, so a shell that is on something else is not wrong about
-        // anything and gets no warning - it reads as "nothing pinned".
+        // No mismatch warning: nobody asked for the newest installed JDK.
         // Not collapsible into the guard: a name match on a build that is not
         // the exact newest one must fall through to nothing, not to the next
         // arm's by-name comparison, which would credit it anyway.
@@ -394,12 +290,9 @@ pub(crate) fn provenance(
     Ok(active)
 }
 
-/// Whether `path` lies under `base`.
-///
-/// `$JAVA_HOME` is normally spelled exactly as the store spelled it, because
-/// `jlo env` is what set it; the canonicalized retry covers a `$HOME` that
-/// reaches the store through a symlink. `path` itself is deliberately not
-/// canonicalized - the case this decides is the one where it no longer exists.
+/// The canonicalized retry covers a `$HOME` reached through a symlink. `path`
+/// is deliberately not canonicalized: the case this decides is the one where
+/// it no longer exists.
 fn is_inside(base: &Path, path: &Path) -> bool {
     path.starts_with(base)
         || base
