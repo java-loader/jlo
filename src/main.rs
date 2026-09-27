@@ -1,5 +1,4 @@
-// Linux and macOS are the whole of the supported surface: `exec` and the
-// executable bits the installers rely on are Unix, and a build that compiled
+// `exec` and the installers' executable bits are Unix; a build that compiled
 // elsewhere would only fail at run time.
 #[cfg(not(unix))]
 compile_error!("jlo supports Linux and macOS only");
@@ -29,17 +28,12 @@ use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::process::exit;
 
-/// Name of J'Lo's state directory under `$HOME`, used when `JLO_HOME` is unset.
-/// Must stay in sync with `install.sh`.
+/// Used when `JLO_HOME` is unset. Must stay in sync with `install.sh`.
 pub(crate) const JLO_HOME_DIR_NAME: &str = ".jlo";
 
-/// A failed command: the error to report, plus the advice line that belongs
-/// *under* it, if any.
-///
-/// Reporting an error is `main`'s job alone, so a command that wants to add a
-/// hint has to hand it over rather than print it. Carrying it keeps the two
-/// lines in the order the user has always seen - the error first, the dimmed
-/// advice second - which printing at the failure site would invert.
+/// A failed command: the error, plus the advice line that belongs *under* it.
+/// Carried to `main` because printing the hint at the failure site would put
+/// it above the error.
 #[derive(Debug)]
 pub(crate) struct CommandError {
     error: anyhow::Error,
@@ -61,14 +55,10 @@ impl From<anyhow::Error> for CommandError {
     }
 }
 
-/// `JdkStore::remove` refuses with a typed error whose variant picks the
-/// advice line under it (`ui::remove_refusal_hint`), so the conversion is the whole of
-/// `cmd_remove`'s error handling - no matching on message text.
 impl From<RemoveError> for CommandError {
     fn from(error: RemoveError) -> Self {
         let hint = ui::remove_refusal_hint(&error);
-        // Only the store variant carries a context chain worth preserving;
-        // the refusals are a single sentence this type formats itself.
+        // Only the store variant carries a context chain worth preserving.
         let error = match error {
             RemoveError::Store(e) => e,
             refusal => anyhow!("{refusal}"),
@@ -80,11 +70,9 @@ impl From<RemoveError> for CommandError {
     }
 }
 
-/// The one place a command failure turns into a message and a non-zero exit
-/// status. Every `cmd_*` below hands its error back rather than ending the
-/// process. The remaining exits are `shellenv::exec_command`, which cannot
-/// return and so reports its own PATH/launch failures, and `ui`'s
-/// `print_lines`, which fails on the very stream it is writing the output to.
+/// The one place a command failure becomes a message and exit 1. The other
+/// exits: `shellenv::exec_command`, which cannot return, and `ui::print_lines`,
+/// which fails on the stream it writes to.
 fn main() {
     if let Err(e) = run() {
         ui::error!("{:#}", e.error);
@@ -104,21 +92,14 @@ fn run() -> Result<(), CommandError> {
     }
     let first = argv.get(1).map(String::as_str);
 
-    // The easter egg is deliberately not a clap subcommand: `hide = true`
-    // only suppresses it from `--help`. `clap_complete` still emits hidden
-    // subcommands into generated completion scripts, and clap's "did you
-    // mean" suggestion engine still offers it for typos (e.g. `jlo sng`).
-    // Intercepting the raw token before `Cli::parse()` keeps it out of
-    // help, completions, and typo suggestions in one move.
+    // Not a clap subcommand: `hide = true` would still leak it into generated
+    // completions and "did you mean" suggestions.
     if first == Some("sing") {
         eprintln!("There are no Easter Eggs in this program. Trust me. 💃");
         return Ok(());
     }
 
-    // The install verb is intercepted here for the same reason, and the reason
-    // is sharper still: it writes the shell layout, so it must not show up in
-    // the completions it generates. `install.sh` and `install-local.sh` are its
-    // only callers.
+    // Likewise: it must not show up in the completions it writes.
     if first == Some(install::VERB) {
         return install::cmd_install(&argv[2..]);
     }
@@ -127,9 +108,8 @@ fn run() -> Result<(), CommandError> {
         env::var("JLO_ADOPTIUM_API_URL").unwrap_or_else(|_| adoptium::ADOPTIUM_API_URL.to_string());
     let client = AdoptiumClient::new(api_url);
 
-    // clap's `trailing_var_arg` eats a `--` that is the first token after
-    // `exec`, and `--` is the separator `exec` requires, so it gets the real
-    // tokens instead.
+    // clap's `trailing_var_arg` eats a `--` right after `exec`, the separator
+    // `exec` requires.
     if first == Some("exec") {
         return cmd_exec(&client, &argv[2..]);
     }
@@ -169,33 +149,21 @@ fn run() -> Result<(), CommandError> {
     }
 }
 
-/// Write a shell completion script to stdout.
-///
-/// The completion function registers against the command word `jlo`, which
-/// resolves to the shell function the installer generates, so the wrapper is
-/// transparent to completion.
 fn cmd_completions(shell: cli::CompletionShell) {
     use std::io::Write as _;
 
-    // The script is built once and written once, because `install.rs` needs
-    // the same bytes to write into `$JLO_HOME/completions`. A closed stdout
-    // (`jlo completions bash | head`) is not an error worth reporting - the
-    // rule `print_lines` already follows.
+    // A closed stdout (`| head`) is not an error worth reporting.
     let _ = std::io::stdout().write_all(&cli::completion_script(shell.into()));
 }
 
-/// Nothing is written to stderr on success, even when the environment does
-/// change: the autoload hook calls this from `PROMPT_COMMAND`/`chpwd`, so any
-/// status line here would print on every new shell and every `cd`. Exporting a
-/// variable lasts only as long as the shell and is implied by the command the
-/// user ran - it is the install (a JDK on disk) that earns a line, not this.
+/// Silent on success: the autoload hook calls this on every new shell and
+/// every `cd`.
 ///
-/// `offline` is the whole of the "a `cd` must not start a download" rule, and
-/// deciding it in `resolve::java_home` rather than in `jlo-autoload.sh` keeps
-/// it decided once, in Rust, instead of once per shell dialect.
+/// `offline` is the whole of the "a `cd` must not start a download" rule,
+/// decided in Rust rather than in the shell hook.
 ///
-/// Resolution fails before anything reaches stdout: the hook sources that
-/// stream, and a partial export would be worse than none.
+/// Resolution fails before anything reaches stdout: a partial export would be
+/// worse than none.
 fn cmd_env(
     client: &AdoptiumClient,
     version: Option<String>,
@@ -212,10 +180,8 @@ fn cmd_env(
     )?;
     shellenv::emit(&exports, wrapped)?;
 
-    // The exports on stdout are the whole effect of this command. If stdout is
-    // a terminal nothing captured them, so the exit code says success while
-    // nothing happened - the failure shape that sends a CI step, a Makefile
-    // recipe or an agent looking for the problem somewhere else entirely.
+    // On a terminal nothing captured the exports: exit 0 with nothing changed
+    // would send a CI step or an agent looking elsewhere for the problem.
     if std::io::stdout().is_terminal() {
         ui::hint!("{}", ui::unsourced_env_hint(&target.request.to_string()));
     }
@@ -230,20 +196,14 @@ fn cmd_home(
 ) -> Result<(), CommandError> {
     let store = JdkStore::discover()?;
     let java_home = resolve::java_home(client, &store, version, offline, Verb::Home)?.java_home;
-    // The bare path on stdout, for `$(jlo home 21)`. Lossy would hand the
-    // caller a path that does not exist; see `shellenv::path_str`.
+    // Lossy would hand `$(jlo home 21)` a path that does not exist.
     println!("{}", shellenv::path_str(&java_home)?);
     Ok(())
 }
 
 /// Diverges on success: `shellenv::exec_command` replaces the process image.
-/// The `Result` is for the argument and resolution errors that can still be
-/// reported the ordinary way, before that happens.
 fn cmd_exec(client: &AdoptiumClient, args: &[String]) -> Result<(), CommandError> {
-    // clap never sees these tokens, so help is handled here - but only for
-    // tokens before the `--`: anything after it belongs to the child command
-    // and must be passed through untouched (see
-    // `exec_passes_hyphen_args_through_to_the_child`).
+    // Help only before the `--`: anything after it belongs to the child.
     let separator = args.iter().position(|a| a == "--").unwrap_or(args.len());
     // `--help` wins over `-h` wherever each appears: `true` sorts above `false`.
     let help = args[..separator]
@@ -262,24 +222,17 @@ fn cmd_exec(client: &AdoptiumClient, args: &[String]) -> Result<(), CommandError
     let (version, command) = parse_exec_args(args)
         .map_err(|e| CommandError::with_hint(e, format!("Usage: {}", cli::EXEC_USAGE)))?;
 
-    // No --offline flag on `exec`: the command's whole job is to run
-    // something on that JDK, so declining to fetch it would only move the
-    // failure. The cascade may therefore reach its last stage here.
+    // Never offline: declining to fetch the JDK would only move the failure.
     let store = JdkStore::discover()?;
-    // `verb` only matters offline, and `exec` is never offline.
+    // `verb` only matters offline.
     let target = resolve::java_home(client, &store, version, false, Verb::Home)?;
     shellenv::exec_command(&target.java_home, &command)
 }
 
-/// Print the JDKs Adoptium offers for this machine, newest first, annotated
-/// with what is installed locally. `--offline` skips the network and lists only
-/// what is already installed. The tables themselves are `ui`'s.
 fn cmd_list(client: &AdoptiumClient, offline: bool) -> Result<(), CommandError> {
     let store = JdkStore::discover()?;
     let installed = store.list().context("could not list installed JDKs")?;
 
-    // Resolved once, before either listing: the gutter marks a row by version
-    // name, and the path-to-version step is the store's job, not the UI's.
     let active = store.active_version(&installed, active_java_home().as_deref());
     let groups = store::group_by_name(&installed);
 
@@ -298,19 +251,11 @@ fn cmd_list(client: &AdoptiumClient, offline: bool) -> Result<(), CommandError> 
     Ok(())
 }
 
-/// `jlo current`: what is active in this shell, and why.
+/// Starts from the live `$JAVA_HOME`, not `.jlorc`: the two can disagree, and
+/// saying so is most of what this command is for.
 ///
-/// Starts from the live `$JAVA_HOME` rather than from `.jlorc`, because the
-/// two can legitimately disagree and saying so is most of what this command is
-/// for. Never touches the network - every fact it reports is on disk or in the
-/// environment - so there is no `--offline` flag to pass.
-///
-/// stdout carries the one answer line, stderr any advisory: the same split
-/// `jlo list` makes, and safe here because the `jlo` shell function sources
-/// stdout for `env`/`use` alone.
-///
-/// The exit status is 1 exactly when stdout is empty, so
-/// `VER=$(jlo current)` never hands back an empty string over a success code.
+/// Exit 1 exactly when stdout is empty, so `VER=$(jlo current)` never hands
+/// back an empty string over a success code.
 fn cmd_current() -> Result<(), CommandError> {
     let Some(java_home) = active_java_home() else {
         return Err(CommandError::with_hint(
@@ -323,11 +268,8 @@ fn cmd_current() -> Result<(), CommandError> {
     let active = resolve::provenance(&store, java_home, conf::find)?;
     ui::print_lines([ui::provenance_line(&active)]);
 
-    // After the answer, so it reads as a footnote to it rather than in place
-    // of it. The question asked was "what is active", and it has an answer -
-    // hence exit 0, which is what keeps this command usable in exactly the
-    // situation you most want to read the version: a stale shell inside a
-    // pinned project.
+    // After the answer and with exit 0: "what is active" has an answer, and a
+    // stale shell in a pinned project is when it is most wanted.
     if let Some(pinned) = &active.pinned_elsewhere {
         ui::pin_mismatch(pinned);
     }
@@ -335,21 +277,12 @@ fn cmd_current() -> Result<(), CommandError> {
     Ok(())
 }
 
-/// Delete installed JDKs, selected either by name or by the superseded rule.
-///
-/// One verb, two selectors: clap guarantees exactly one of them arrives, so
-/// the split here is the whole difference between them. One report shape
-/// covers both; they differ in what fills it - an install jlo did not make is
-/// passed over by the rule and refused by name.
 fn cmd_remove(versions: &[String], superseded: bool) -> Result<(), CommandError> {
     let store = JdkStore::discover()?;
     let active = active_java_home();
 
-    // Both selectors report what they did and then fail on the same
-    // condition. A deletion that could not be made is the one outcome that
-    // must not exit 0: the report has already named each failure, but a
-    // script chaining `jlo remove ... && ...` reads the status, not the
-    // lines, and would go on believing the store had been reduced.
+    // A failed deletion must not exit 0: `jlo remove ... && ...` reads the
+    // status, not the report.
     let report = if superseded {
         store
             .prune(active.as_deref())
@@ -362,7 +295,6 @@ fn cmd_remove(versions: &[String], superseded: bool) -> Result<(), CommandError>
     removal_failed(report.failures.len(), "JDK")
 }
 
-/// The error a run ends on when some deletions failed.
 fn removal_failed(failures: usize, noun: &str) -> Result<(), CommandError> {
     if failures == 0 {
         return Ok(());
@@ -374,12 +306,8 @@ fn removal_failed(failures: usize, noun: &str) -> Result<(), CommandError> {
     .into())
 }
 
-/// The directory `$JAVA_HOME` currently points at, if the variable is set to
-/// anything.
-///
-/// Read here rather than in `JdkStore` so the store stays a filesystem
-/// module: `remove` takes the live JDK as an argument, which is also what
-/// makes its refusal testable without mutating the process environment.
+/// Read here rather than in `JdkStore`, so the store's guards are testable
+/// without mutating the process environment.
 fn active_java_home() -> Option<PathBuf> {
     env::var_os("JAVA_HOME")
         .filter(|value| !value.is_empty())
@@ -387,13 +315,10 @@ fn active_java_home() -> Option<PathBuf> {
 }
 
 fn cmd_init(version: &str, global: bool, force: bool) -> Result<(), CommandError> {
-    // Parsed rather than merely checked, so what lands in the file is the
-    // name jlo itself would print: `jlo init 28-ea` writes `28-ea`, and
-    // `jlo init 28-EA` fails before anything is written.
+    // Parsed rather than checked, so the file holds the name jlo would print.
     let request = Request::parse(version)?;
 
     conf::init(request, global, force).map_err(|e| {
-        // `--force` answers exactly one of the failures below.
         let already_exists = e.is::<conf::AlreadyExists>();
         let e = e.context("could not create config file");
         if already_exists {
@@ -404,12 +329,7 @@ fn cmd_init(version: &str, global: bool, force: bool) -> Result<(), CommandError
     })
 }
 
-/// `jlo install`: the names given, or the one the cascade resolves.
-///
-/// The same operation as `update` - see [`install_names`]. Without an
-/// argument it answers "make sure the JDK this directory wants is here", the
-/// same resolution `env`, `home` and `exec` do, so it works on a machine with
-/// nothing installed yet.
+/// The names given, or the one the cascade resolves.
 fn cmd_install(
     client: &AdoptiumClient,
     versions: Vec<String>,
@@ -420,12 +340,9 @@ fn cmd_install(
     install_names(client, &store, requests, wrapped)
 }
 
-/// `jlo update`, and then the one question about J'Lo itself.
-///
-/// Asked after the update whatever its outcome - a failed one included, since
-/// a newer J'Lo may be the fix - and before `main` reports that outcome, so
-/// the payload already written stays the update's own. Not in
-/// `install_names`, which `install` shares: `update` is the one verb that asks.
+/// Asks about a newer J'Lo after the update whatever its outcome - a newer
+/// J'Lo may be the fix - and after the payload is written, so it stays the
+/// update's own.
 fn cmd_update(
     client: &AdoptiumClient,
     versions: Vec<String>,
@@ -436,17 +353,7 @@ fn cmd_update(
     result
 }
 
-/// `jlo update`: the names given, or every installed name.
-///
-/// The same operation as `install` - see [`install_names`]. Without an
-/// argument it answers "bring what is here up to date", which is why it does
-/// not go through the cascade: that would pick one name, and "update" with
-/// nothing named means all of them.
-///
-/// Pre-release streams included: leaving them out would be the special case.
-/// Someone who installed `28-ea` wants it current, and the stream's weekly
-/// builds are replaced rather than piling up, so following it costs a
-/// download, not the disk.
+/// The names given, or every installed name, pre-release streams included.
 fn update_jdks(
     client: &AdoptiumClient,
     versions: Vec<String>,
@@ -467,14 +374,8 @@ fn update_jdks(
     install_names(client, &store, requests, wrapped)
 }
 
-/// Bring each name to its latest build, deleting the builds each new one
-/// supersedes - the one operation behind `install` and `update`, which differ
-/// only in what an empty version list means.
-///
-/// The build `$JAVA_HOME` points at goes too only when `wrapped`: then the
-/// wrapper evaluates stdout, which carries the `export` lines that move the
-/// shell onto the replacement, written before anything is deleted. Unwrapped,
-/// nothing is known to evaluate them, so that build stays.
+/// The build `$JAVA_HOME` points at goes too only when `wrapped`: only then is
+/// stdout known to be evaluated, moving the shell before anything is deleted.
 fn install_names(
     client: &AdoptiumClient,
     store: &JdkStore,
@@ -497,29 +398,19 @@ fn install_names(
     removal_failed(run.failure_count(), "superseded JDK")
 }
 
-/// J'Lo's own state directory — where `default.jlorc` lives.
-///
-/// The fallback must match what `install.sh` exports (`$HOME/.jlo`), not bare
-/// `$HOME`: interactive shells get `JLO_HOME` from the generated `jlo.sh`, but scripts
-/// and CI invoking `jlo-bin` directly do not, and those two must resolve the
-/// same file.
+/// The fallback must match what `install.sh` exports: scripts calling
+/// `jlo-bin` directly have no `JLO_HOME` and must resolve the same files.
 pub(crate) fn jlo_home_dir() -> anyhow::Result<PathBuf> {
-    // An empty `JLO_HOME` is treated as unset, as `$JAVA_HOME` is: an
-    // exported-but-empty variable is how a shell spells "I did not set this",
-    // and taking it literally roots the whole layout at `/`.
+    // Empty is unset: taken literally it roots the whole layout at `/`.
     let path = env::var_os("JLO_HOME")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .or_else(|| env::home_dir().map(|home| home.join(JLO_HOME_DIR_NAME)))
         .context("could not determine home directory.")?;
 
-    // A relative `JLO_HOME` does not name one directory, it names a different
-    // one from every working directory - and the installed layout is full of
-    // paths that outlive the process that wrote them: the `~/.local/bin/jlo`
-    // symlink target, which a relative path resolves against the *link's*
-    // directory, and the generated stubs, which the user sources from
-    // wherever they happen to be. Refuse it rather than write an install that
-    // works only from the directory it was made in.
+    // The layout is full of paths that outlive this process (the symlink
+    // target, the stubs), and a relative one names a different directory
+    // from everywhere they are used.
     if !path.is_absolute() {
         return Err(anyhow!(
             "JLO_HOME must be an absolute path, but is '{}'",
@@ -527,12 +418,8 @@ pub(crate) fn jlo_home_dir() -> anyhow::Result<PathBuf> {
         ));
     }
 
-    // Checked once, here, rather than at each of the places that write it
-    // out. `install` spells this path into the generated stubs with
-    // `display()`, which substitutes U+FFFD for bytes it cannot decode: the
-    // files would land at the real path while naming a different one, leaving
-    // a wrapper pointing at a directory that does not exist. There is nothing
-    // jlo can do with a home it cannot write down.
+    // The stubs spell this path with `display()`, which substitutes U+FFFD:
+    // the files would name a directory that does not exist.
     if path.to_str().is_none() {
         return Err(anyhow!(
             "JLO_HOME is not valid UTF-8, so jlo cannot write it into the shell code it generates: '{}'",
@@ -540,9 +427,8 @@ pub(crate) fn jlo_home_dir() -> anyhow::Result<PathBuf> {
         ));
     }
 
-    // `install` spells this path into the profile lines the user copies and
-    // into generated shell files, where a newline would split a copied line
-    // or end a comment early. No quoting survives that, so the value is refused.
+    // A newline would split a copied profile line or end a generated comment
+    // early, and no quoting survives that.
     if path.to_string_lossy().chars().any(char::is_control) {
         return Err(anyhow!(
             "JLO_HOME must not contain control characters (a newline, say): '{}'",
