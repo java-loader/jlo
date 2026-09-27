@@ -2613,6 +2613,472 @@ mod tests {
         );
     }
 
+    // -- the install run --
+
+    /// A package as far as the store looks at one: a tar.gz whose one root
+    /// directory holds `bin/java`.
+    fn jdk_archive(semver: &str) -> Vec<u8> {
+        let mut builder = tar::Builder::new(flate2::write::GzEncoder::new(
+            Vec::new(),
+            flate2::Compression::fast(),
+        ));
+        let mut header = tar::Header::new_gnu();
+        header.set_size(0);
+        header.set_mode(0o755);
+        header.set_cksum();
+        builder
+            .append_data(
+                &mut header,
+                format!("jdk-{semver}/bin/java"),
+                std::io::empty(),
+            )
+            .unwrap();
+        builder.into_inner().unwrap().finish().unwrap()
+    }
+
+    /// Adoptium on a local server: what it offers per major, and how often
+    /// each package must be downloaded by the time [`Self::assert`] runs.
+    struct Adoptium {
+        server: mockito::ServerGuard,
+        downloads: Vec<mockito::Mock>,
+    }
+
+    impl Adoptium {
+        fn new() -> Self {
+            Self {
+                server: mockito::Server::new(),
+                downloads: Vec::new(),
+            }
+        }
+
+        fn lookup(&mut self, major: &str) -> mockito::Mock {
+            self.server
+                .mock(
+                    "GET",
+                    mockito::Matcher::Regex(format!(r"^/v3/assets/latest/{major}/hotspot")),
+                )
+                .match_query(mockito::Matcher::Any)
+        }
+
+        /// `semver` as the latest build of `major`, downloaded `downloads`
+        /// times. `intact: false` serves a package that fails its checksum.
+        fn offer(mut self, major: &str, semver: &str, downloads: usize, intact: bool) -> Self {
+            use sha2::Digest;
+            let archive = jdk_archive(semver);
+            let checksum = if intact {
+                hex::encode(sha2::Sha256::digest(&archive))
+            } else {
+                "00".to_string()
+            };
+            let link = format!("{}/jdk-{major}.tar.gz", self.server.url());
+            self.lookup(major)
+                .with_body(format!(
+                    r#"[{{"version":{{"semver":"{semver}"}},"binary":{{"package":{{"name":"jdk.tar.gz","link":"{link}","checksum":"{checksum}"}}}}}}]"#
+                ))
+                .create();
+            let download = self
+                .server
+                .mock("GET", format!("/jdk-{major}.tar.gz").as_str())
+                .with_body(archive)
+                .expect(downloads)
+                .create();
+            self.downloads.push(download);
+            self
+        }
+
+        /// Adoptium's `200 []`: no build of `major` for this platform.
+        fn not_offered(mut self, major: &str) -> Self {
+            self.lookup(major).with_body("[]").create();
+            self
+        }
+
+        /// A lookup of `major` that fails outright.
+        fn failing(mut self, major: &str) -> Self {
+            self.lookup(major).with_status(500).create();
+            self
+        }
+
+        fn client(&self) -> AdoptiumClient {
+            AdoptiumClient::new(self.server.url())
+        }
+
+        fn assert(&self) {
+            for download in &self.downloads {
+                download.assert();
+            }
+        }
+    }
+
+    fn names(names: &[&str]) -> HashSet<Request> {
+        names.iter().map(|name| request(name)).collect()
+    }
+
+    /// A run nothing evaluates: no payload is written.
+    fn run_unwrapped(
+        adoptium: &Adoptium,
+        store: &JdkStore,
+        requests: &[&str],
+        active: Option<&Path>,
+    ) -> InstallRun {
+        install_each(
+            &adoptium.client(),
+            store,
+            names(requests),
+            active,
+            false,
+            |_| Ok(()),
+        )
+    }
+
+    /// A wrapped run whose payload goes to `out`.
+    fn run_wrapped(
+        adoptium: &Adoptium,
+        store: &JdkStore,
+        requests: &[&str],
+        active: Option<&Path>,
+        out: &mut impl std::io::Write,
+    ) -> InstallRun {
+        install_each(
+            &adoptium.client(),
+            store,
+            names(requests),
+            active,
+            true,
+            |repointed| {
+                if let Some(java_home) = repointed {
+                    writeln!(out, "export JAVA_HOME='{}'", java_home.display())?;
+                }
+                writeln!(out, "# jlo'end")?;
+                out.flush()?;
+                Ok(())
+            },
+        )
+    }
+
+    /// A payload reader that looks at the store when the payload is flushed:
+    /// whether `watched` was still there when the shell was told to move.
+    struct Witness {
+        watched: PathBuf,
+        written: Vec<u8>,
+        present_at_flush: Option<bool>,
+    }
+
+    impl Witness {
+        fn new(watched: PathBuf) -> Self {
+            Self {
+                watched,
+                written: Vec::new(),
+                present_at_flush: None,
+            }
+        }
+
+        fn payload(&self) -> String {
+            String::from_utf8(self.written.clone()).unwrap()
+        }
+    }
+
+    impl std::io::Write for Witness {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.written.write(buf)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.present_at_flush = Some(self.watched.exists());
+            Ok(())
+        }
+    }
+
+    /// A payload reader that went away: every write fails, or with
+    /// `writes: true` only the final flush.
+    struct Gone {
+        writes: bool,
+    }
+
+    impl std::io::Write for Gone {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if self.writes {
+                Ok(buf.len())
+            } else {
+                Err(std::io::ErrorKind::BrokenPipe.into())
+            }
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err(std::io::ErrorKind::BrokenPipe.into())
+        }
+    }
+
+    /// A catalogue behind the store - a rolled-back release, or an install
+    /// from elsewhere - is not followed: the older build would land beside
+    /// the newer one, which it does not supersede.
+    #[test]
+    fn the_run_never_moves_a_name_back() {
+        let dir = tempdir().unwrap();
+        create_jdk_dir(dir.path(), "21.0.10+5", true);
+        create_jdk_dir(dir.path(), "21.0.12+7", true);
+        let adoptium = Adoptium::new().offer("21", "21.0.11+9", 0, true);
+
+        let run = run_unwrapped(&adoptium, &JdkStore::at(dir.path()), &["21"], None);
+
+        adoptium.assert();
+        assert!(run.error.is_none(), "{:?}", run.error);
+        assert!(run.replaced.is_empty());
+        assert!(!dir.path().join("21.0.11+9").exists());
+        assert!(dir.path().join("21.0.10+5").exists());
+    }
+
+    /// Two spellings of one version are one version: an unmanaged
+    /// `v21.0.11+9` is the offer already present.
+    #[test]
+    fn the_run_takes_another_spelling_of_the_offer_as_current() {
+        let dir = tempdir().unwrap();
+        create_jdk_dir(dir.path(), "v21.0.11+9", false);
+        let adoptium = Adoptium::new().offer("21", "21.0.11+9", 0, true);
+
+        let run = run_unwrapped(&adoptium, &JdkStore::at(dir.path()), &["21"], None);
+
+        adoptium.assert();
+        assert!(run.error.is_none(), "{:?}", run.error);
+        assert!(!dir.path().join("21.0.11+9").exists());
+    }
+
+    /// Only builds of the name are measured against: a `21-ea` build newer
+    /// than the offer must not make `21` read as up to date, nor be replaced
+    /// by it.
+    #[test]
+    fn a_newer_pre_release_does_not_hold_back_its_release() {
+        let dir = tempdir().unwrap();
+        create_jdk_dir(dir.path(), "21.0.5+11", true);
+        create_jdk_dir(dir.path(), "21.0.10-beta+3", true);
+        let adoptium = Adoptium::new().offer("21", "21.0.9+10", 1, true);
+
+        let run = run_unwrapped(&adoptium, &JdkStore::at(dir.path()), &["21"], None);
+
+        adoptium.assert();
+        assert!(run.error.is_none(), "{:?}", run.error);
+        assert_eq!(
+            run.replaced,
+            vec![(request("21"), vec!["21.0.5+11".to_string()])]
+        );
+        assert!(dir.path().join("21.0.9+10").exists());
+        assert!(dir.path().join("21.0.10-beta+3").exists());
+    }
+
+    /// `jlo install 8 21` on Apple silicon installs 21: a name Adoptium does
+    /// not offer here is a fact about the name, not a reason to stop.
+    #[test]
+    fn a_name_adoptium_does_not_offer_is_skipped() {
+        let dir = tempdir().unwrap();
+        let adoptium = Adoptium::new()
+            .not_offered("8")
+            .offer("21", "21.0.9+10", 1, true);
+
+        let run = run_unwrapped(&adoptium, &JdkStore::at(dir.path()), &["8", "21"], None);
+
+        adoptium.assert();
+        assert!(run.error.is_none(), "{:?}", run.error);
+        assert!(dir.path().join("21.0.9+10").exists());
+    }
+
+    /// With no name left, a command told to install something must not
+    /// succeed having done nothing - and nothing reaches the shell.
+    #[test]
+    fn only_names_adoptium_does_not_offer_is_an_error() {
+        let dir = tempdir().unwrap();
+        let adoptium = Adoptium::new().not_offered("8").not_offered("30");
+        let mut out = Vec::new();
+
+        let run = run_wrapped(
+            &adoptium,
+            &JdkStore::at(dir.path()),
+            &["8", "30"],
+            None,
+            &mut out,
+        );
+
+        let error = run.error.expect("nothing was offered");
+        assert!(
+            format!("{:#}", error.error).contains("offers no build of '30' or '8'"),
+            "{error:?}"
+        );
+        assert!(out.is_empty());
+        assert!(fs::read_dir(dir.path()).unwrap().next().is_none());
+    }
+
+    /// A lookup that fails says nothing about the name, so it stops the run -
+    /// and every name is looked up first, so 21, processed ahead of the
+    /// failing 17, is neither downloaded nor replaced.
+    #[test]
+    fn a_failed_lookup_stops_the_run_before_any_download() {
+        let dir = tempdir().unwrap();
+        create_jdk_dir(dir.path(), "17.0.5+8", true);
+        create_jdk_dir(dir.path(), "21.0.5+11", true);
+        let adoptium = Adoptium::new()
+            .offer("21", "21.0.9+10", 0, true)
+            .failing("17");
+        let mut out = Vec::new();
+
+        let run = run_wrapped(
+            &adoptium,
+            &JdkStore::at(dir.path()),
+            &["17", "21"],
+            None,
+            &mut out,
+        );
+
+        adoptium.assert();
+        let error = run.error.expect("the lookup failed");
+        assert!(
+            format!("{:#}", error.error).contains("HTTP 500"),
+            "{error:?}"
+        );
+        assert!(out.is_empty(), "the shell was told something");
+        assert!(dir.path().join("21.0.5+11").exists());
+        assert!(!dir.path().join("21.0.9+10").exists());
+    }
+
+    /// Unwrapped, nothing is known to evaluate stdout, so the shell cannot
+    /// follow: the build `JAVA_HOME` points at stays, and is named.
+    #[test]
+    fn an_unwrapped_run_keeps_the_live_build() {
+        let dir = tempdir().unwrap();
+        create_jdk_dir(dir.path(), "21.0.5+11", true);
+        let live = dir.path().join("21.0.5+11");
+        let adoptium = Adoptium::new().offer("21", "21.0.9+10", 1, true);
+
+        let run = run_unwrapped(&adoptium, &JdkStore::at(dir.path()), &["21"], Some(&live));
+
+        adoptium.assert();
+        assert!(run.error.is_none(), "{:?}", run.error);
+        assert!(live.exists());
+        assert_eq!(run.kept_active.as_deref(), Some("21.0.5+11"));
+        assert!(run.repointed.is_none());
+        assert!(dir.path().join("21.0.9+10").exists());
+    }
+
+    /// Wrapped, the live build goes too - but only after the payload that
+    /// moves the shell off it has been written and flushed.
+    #[test]
+    fn a_wrapped_run_deletes_the_live_build_only_after_the_payload() {
+        let dir = tempdir().unwrap();
+        create_jdk_dir(dir.path(), "21.0.5+11", true);
+        let live = dir.path().join("21.0.5+11");
+        let adoptium = Adoptium::new().offer("21", "21.0.9+10", 1, true);
+        let mut witness = Witness::new(live.clone());
+
+        let run = run_wrapped(
+            &adoptium,
+            &JdkStore::at(dir.path()),
+            &["21"],
+            Some(&live),
+            &mut witness,
+        );
+
+        adoptium.assert();
+        assert!(run.error.is_none(), "{:?}", run.error);
+        assert_eq!(witness.present_at_flush, Some(true));
+        assert!(!live.exists());
+        // The package is flat, so its java home is the entry itself.
+        let new = dir.path().join("21.0.9+10");
+        assert_eq!(run.repointed.as_deref(), Some(new.as_path()));
+        assert!(run.kept_active.is_none());
+        let payload = witness.payload();
+        assert!(
+            payload.contains(&format!("export JAVA_HOME='{}'", new.display())),
+            "{payload}"
+        );
+        assert!(payload.ends_with("# jlo'end\n"), "{payload}");
+    }
+
+    /// A payload that did not arrive whole is one the shell did not apply,
+    /// so nothing is deleted - whether the writes fail or only the flush.
+    #[test]
+    fn a_payload_that_cannot_be_written_deletes_nothing() {
+        for writes in [false, true] {
+            let dir = tempdir().unwrap();
+            create_jdk_dir(dir.path(), "17.0.5+8", true);
+            create_jdk_dir(dir.path(), "21.0.5+11", true);
+            let live = dir.path().join("21.0.5+11");
+            let adoptium = Adoptium::new()
+                .offer("21", "21.0.9+10", 1, true)
+                .offer("17", "17.0.9+1", 1, true);
+
+            let run = run_wrapped(
+                &adoptium,
+                &JdkStore::at(dir.path()),
+                &["17", "21"],
+                Some(&live),
+                &mut Gone { writes },
+            );
+
+            adoptium.assert();
+            assert!(run.error.is_some(), "writes: {writes}");
+            assert!(live.exists(), "writes: {writes}");
+            assert!(dir.path().join("17.0.5+8").exists(), "writes: {writes}");
+            assert!(run.repointed.is_none(), "writes: {writes}");
+        }
+    }
+
+    /// A failed download stops the run, but the names before it stay
+    /// updated and replaced - and it is that failure the run reports, not a
+    /// payload failure after it.
+    #[test]
+    fn a_failed_download_keeps_what_the_names_before_it_did() {
+        let dir = tempdir().unwrap();
+        create_jdk_dir(dir.path(), "17.0.5+8", true);
+        create_jdk_dir(dir.path(), "21.0.5+11", true);
+        let adoptium = Adoptium::new()
+            .offer("21", "21.0.9+10", 1, true)
+            .offer("17", "17.0.9+1", 1, false);
+        let mut out = Vec::new();
+
+        let run = run_wrapped(
+            &adoptium,
+            &JdkStore::at(dir.path()),
+            &["17", "21"],
+            None,
+            &mut out,
+        );
+
+        adoptium.assert();
+        let error = run.error.expect("the download failed");
+        assert!(
+            format!("{:#}", error.error).contains("checksum"),
+            "{error:?}"
+        );
+        assert!(!dir.path().join("21.0.5+11").exists());
+        assert!(dir.path().join("21.0.9+10").exists());
+        assert!(dir.path().join("17.0.5+8").exists());
+        assert!(!dir.path().join("17.0.9+1").exists());
+        assert_eq!(String::from_utf8(out).unwrap(), "# jlo'end\n");
+    }
+
+    /// The download failure is the error the user sees, even when the
+    /// payload after it cannot be written either.
+    #[test]
+    fn an_earlier_error_survives_a_failed_payload() {
+        let dir = tempdir().unwrap();
+        create_jdk_dir(dir.path(), "21.0.5+11", true);
+        let adoptium = Adoptium::new()
+            .offer("21", "21.0.9+10", 1, true)
+            .offer("17", "17.0.9+1", 1, false);
+
+        let run = run_wrapped(
+            &adoptium,
+            &JdkStore::at(dir.path()),
+            &["17", "21"],
+            None,
+            &mut Gone { writes: false },
+        );
+
+        let error = run.error.expect("the download failed");
+        assert!(
+            format!("{:#}", error.error).contains("checksum"),
+            "{error:?}"
+        );
+        assert!(dir.path().join("21.0.5+11").exists());
+    }
+
     // -- install --
 
     /// Install a mock JDK into a fresh store and hand back both halves of the
