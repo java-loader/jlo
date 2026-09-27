@@ -19,7 +19,7 @@ platform — from 8 on Linux, from 11 on macOS.
 ## Installing
 
 ```shell
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/java-loader/jlo/refs/heads/main/install.sh)"
+/bin/bash -c "$(curl -fsSL https://github.com/java-loader/jlo/releases/latest/download/install.sh)"
 ```
 
 The installer ends by printing what to do next: one line to add to your shell profile (plus two optional ones —
