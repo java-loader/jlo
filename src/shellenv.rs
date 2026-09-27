@@ -1,10 +1,5 @@
-//! The shell side of what jlo does: the `PATH` algebra behind `jlo env`, the
-//! quoting that makes an `export` line safe to source, and the argument
-//! plumbing and `execvp` behind `jlo exec`.
-//!
-//! Split out of dispatch because none of it is dispatch: every function here
-//! answers a question about a string or a process, and none of them knows
-//! which subcommand asked.
+//! The shell side: the `PATH` algebra behind `jlo env`, the quoting that makes
+//! an `export` line safe to source, the wrapper's payload, and `jlo exec`.
 
 use crate::ui;
 use anyhow::{Context, anyhow, bail};
@@ -14,37 +9,31 @@ use std::process::exit;
 
 /// Quote a value so the shell assigns it rather than interpreting it.
 ///
-/// stdout is the environment channel: the `jlo` shell function evaluates what
-/// arrives there, so a value carrying `$`, a backtick, a backslash or a double
-/// quote would be expanded - or executed - instead of stored. `PATH` is the
-/// sharp case: it is echoed back from the caller's own environment, so a
-/// `$(...)` anywhere in it would run in the user's shell.
+/// stdout is evaluated, so a `$`, backtick, backslash or double quote would
+/// be expanded - or executed - instead of stored. `PATH` is the sharp case: it
+/// is echoed back from the caller's environment, so a `$(...)` in it would run
+/// in the user's shell. Anything else printed to stdout must come through here
+/// too.
 ///
-/// The hazard belongs to the channel, not to these two variables: anything
-/// else this function's callers ever print must go through here too.
-///
-/// Single quotes suppress every expansion. The one character they cannot hold
-/// is a single quote, which is spliced in as `'\''`: close, backslash-escaped
-/// quote, reopen.
+/// A single quote is spliced in as `'\''`: close, escaped quote, reopen.
 pub(crate) fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', r"'\''"))
 }
 
 /// The argv prefix by which the `jlo` shell function says it will evaluate
-/// stdout. Intercepted before clap, so it never reaches help, completions or
-/// typo suggestions - and an older binary rejects it as an unknown subcommand
-/// before doing any work, so a newer wrapper over it evaluates nothing.
+/// stdout. An older binary rejects it as an unknown subcommand before doing
+/// any work, so a newer wrapper over it evaluates nothing. Its meaning is a
+/// cross-version contract: a new payload format needs a new prefix.
 pub(crate) const WRAPPED: &str = "__wrapped";
 
-/// The last line of every payload written for the wrapper, which evaluates
-/// only output ending in it: help text, an older binary's output and a
-/// payload cut short all lack it. Data cannot forge it, because
-/// [`shell_quote`] spells every `'` in a value as `'\''` and everything
-/// outside quotes is code jlo writes.
+/// The last line of every payload; the wrapper evaluates only output ending
+/// in it, which help text, an older binary's output and a cut-short payload
+/// lack. Data cannot forge it: [`shell_quote`] spells every `'` as `'\''`.
+/// Never changed: an older wrapper would print, not evaluate, a payload whose
+/// binary had already deleted the live JDK.
 const END: &str = "# jlo'end";
 
-/// Write shell statements to stdout: as a [`Payload`] for the wrapper, one
-/// statement per line for anyone else, as always.
+/// As a [`Payload`] for the wrapper, one statement per line for anyone else.
 pub(crate) fn emit(statements: &[String], wrapped: bool) -> anyhow::Result<()> {
     if !wrapped {
         ui::print_lines(statements.iter().cloned());
@@ -53,15 +42,14 @@ pub(crate) fn emit(statements: &[String], wrapped: bool) -> anyhow::Result<()> {
     Payload::stdout().write(statements)
 }
 
-/// The stdout of a *wrapped call*: what the `jlo` shell function evaluates.
+/// The stdout of a *wrapped call*. Owning one is knowing the calling shell
+/// follows what is written here, which is what lets `install` and `update`
+/// delete the build it is on.
 ///
-/// Owning one is knowing that the calling shell follows what is written here,
-/// which is what lets `install` and `update` delete the build it is on. It is
-/// written once - both methods consume it - and always whole: the statements
-/// joined with `&&`, so the first one that fails stops the rest and fails the
-/// `eval`, then [`END`] - also when there are none, so "nothing to do" is told
-/// apart from "cut short" - then flushed. Any write or flush failure is an
-/// error: a payload that did not arrive whole is one the shell did not apply.
+/// Written once and whole: the statements joined with `&&`, so the first that
+/// fails fails the `eval`; then [`END`], also when there are none, so "nothing
+/// to do" is told apart from "cut short"; then flushed. Any write or flush
+/// failure is an error: the shell did not apply it.
 pub(crate) struct Payload<W: std::io::Write> {
     out: W,
 }
@@ -84,8 +72,7 @@ impl<W: std::io::Write> Payload<W> {
         write_payload(&mut self.out, statements).context("could not write to stdout")
     }
 
-    /// Move the shell to `java_home` - the [`export_lines`] `env` would
-    /// print - or, with `None`, tell it there is nothing to do.
+    /// The [`export_lines`] `env` would print, or with `None` nothing to do.
     pub(crate) fn follow(
         self,
         java_home: Option<&Path>,
@@ -109,14 +96,9 @@ fn write_payload(out: &mut impl std::io::Write, statements: &[String]) -> std::i
     out.flush()
 }
 
-/// The `export` lines that point this shell at `java_home`: `JAVA_HOME` when
-/// it differs from `active`, `PATH` when the JDK's `bin` is not already where
-/// it belongs in `current_path`.
-///
-/// Both current values arrive as arguments rather than being read here, so the
-/// decision is testable without mutating the process environment. Collected
-/// rather than printed as they are decided: both lines are one environment,
-/// written in one go by [`emit`] or a [`Payload`].
+/// `JAVA_HOME` when it differs from `active`, `PATH` when the JDK's `bin` is
+/// not already where it belongs. Current values passed in, so the decision is
+/// testable without mutating the process environment.
 pub(crate) fn export_lines(
     java_home: &Path,
     active: Option<&Path>,
@@ -140,22 +122,16 @@ pub(crate) fn export_lines(
     Ok(exports)
 }
 
-/// A path as a `&str`, or an error naming it.
-///
-/// Every path jlo hands out - on stdout, into an `export`, or to `execvp` -
-/// goes through here rather than through `to_string_lossy`, which silently
-/// replaces undecodable bytes and so answers with a path that does not exist.
-/// There is no useful thing jlo can do with a JDK it cannot name.
+/// Every path jlo hands out goes through here, not `to_string_lossy`, which
+/// silently answers with a path that does not exist.
 pub(crate) fn path_str(path: &Path) -> anyhow::Result<&str> {
     path.to_str()
         .with_context(|| format!("path is not valid UTF-8: {}", path.display()))
 }
 
-/// Prepend `java_path` to `current_path`, dropping any entry already under
-/// `jdk_base`, or `None` when that changes nothing. `jdk_base` must be the JDK
-/// install directory ([`crate::store::JdkStore::base`]) — the only tree whose
-/// PATH entries J'Lo owns. Passing a broader directory (the home directory,
-/// say) would strip unrelated user entries.
+/// Prepend `java_path`, dropping entries under `jdk_base`; `None` when that
+/// changes nothing. `jdk_base` must be the JDK store, the only tree whose PATH
+/// entries jlo owns: a broader one would strip the user's own entries.
 fn update_path(
     java_path: &str,
     current_path: &str,
@@ -165,22 +141,16 @@ fn update_path(
     Ok((new_path != current_path).then_some(new_path))
 }
 
-/// `java_path` followed by the entries of `current_path` that `keep` accepts.
 fn prepend(
     java_path: &str,
     current_path: &str,
     keep: impl Fn(&Path) -> bool,
 ) -> anyhow::Result<String> {
-    // An empty `PATH` is *no* entries, not one empty entry. `split_paths("")`
-    // yields the latter, which would leave `<jdk>/bin:` - and an empty `PATH`
-    // component means the working directory, so the shell would search
-    // whatever the user happened to have cd'd into. `env -i` in a CI step is
-    // the ordinary way to arrive here.
+    // An empty `PATH` is *no* entries: `split_paths("")` yields one empty
+    // entry, and `<jdk>/bin:` would search the working directory.
     //
-    // Skipping the split rather than the join: `join_paths` is also what
-    // refuses a `java_path` containing a `:`, which would otherwise be handed
-    // to the shell as two entries. That check has to apply whether or not the
-    // caller had a `PATH`.
+    // Skipping the split, not the join: `join_paths` also refuses a
+    // `java_path` containing a `:`, which must apply either way.
     let inherited: Vec<PathBuf> = if current_path.is_empty() {
         Vec::new()
     } else {
@@ -197,26 +167,16 @@ fn prepend(
         .to_string())
 }
 
-/// The caller's `PATH`, or an error when it is not valid UTF-8.
-///
-/// `env::var(..).unwrap_or_default()` is the wrong shape here, and quietly so:
-/// it maps a non-UTF-8 `PATH` to the empty string, and the empty string is a
-/// legitimate value meaning "nothing on PATH". The JDK's `bin` would then be
-/// the only entry `jlo env` emits - the user's whole `PATH` replaced, with a
-/// trailing empty component that makes the shell search the working
-/// directory. Unset really does mean empty; undecodable does not, and is the
-/// one case that has to stop before anything reaches stdout.
-///
-/// This is also what makes the `PATH contains non-UTF-8 characters` context
-/// below reachable in principle; by the time a `&str` has been taken, the
-/// question has already been answered.
+/// The caller's `PATH`, or an error when it is not valid UTF-8. Not
+/// `unwrap_or_default()`: a non-UTF-8 `PATH` read as empty would have
+/// `jlo env` replace the user's whole `PATH`. Unset means empty; undecodable
+/// does not.
 pub(crate) fn current_path() -> anyhow::Result<String> {
     classify_path(env::var("PATH"))
 }
 
-/// The decision behind [`current_path`], taking the lookup's result rather
-/// than making it, so the three arms are testable without mutating the
-/// process environment.
+/// Takes the lookup's result, so it is testable without mutating the process
+/// environment.
 fn classify_path(looked_up: Result<String, env::VarError>) -> anyhow::Result<String> {
     match looked_up {
         Ok(path) => Ok(path),
@@ -227,15 +187,12 @@ fn classify_path(looked_up: Result<String, env::VarError>) -> anyhow::Result<Str
     }
 }
 
-/// The child's `PATH`: the caller's with the JDK's `bin` directory prepended.
 fn child_path(java_home: &Path) -> anyhow::Result<String> {
     let java_bin = java_home.join("bin");
     prepend(path_str(&java_bin)?, &current_path()?, |_| true)
 }
 
-/// Split the arguments following `exec` into an optional version and the command
-/// to run. The literal `--` separates them; everything before it is the version
-/// (zero or one token), everything after is the command.
+/// `[<version>] -- <command>...`
 pub(crate) fn parse_exec_args(args: &[String]) -> anyhow::Result<(Option<String>, Vec<String>)> {
     let sep = args
         .iter()
@@ -256,9 +213,8 @@ pub(crate) fn parse_exec_args(args: &[String]) -> anyhow::Result<(Option<String>
     Ok((version, command))
 }
 
-/// Replace the current process with `command`, having set `JAVA_HOME` and
-/// prepended the JDK's `bin` to `PATH`. A real `execvp`, so the child's exit
-/// code and signals propagate transparently.
+/// A real `execvp`, so the child's exit code and signals propagate
+/// transparently.
 pub(crate) fn exec_command(java_home: &Path, command: &[String]) -> ! {
     use std::os::unix::process::CommandExt;
     use std::process::Command;
@@ -283,8 +239,7 @@ pub(crate) fn exec_command(java_home: &Path, command: &[String]) -> ! {
     exit(exec_failure_code(err.kind()));
 }
 
-/// Map a launch failure to a shell-conventional exit code: 126 for a command
-/// that exists but can't be run (e.g. not executable), 127 otherwise.
+/// Shell convention: 126 for a command that exists but cannot run, else 127.
 fn exec_failure_code(kind: std::io::ErrorKind) -> i32 {
     match kind {
         std::io::ErrorKind::PermissionDenied => 126,
