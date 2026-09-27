@@ -14,16 +14,12 @@ use std::path::Path;
 use std::process::exit;
 use std::time::{Duration, Instant};
 
-/// The live progress region for one JDK installation.
+/// The live progress region for one JDK installation: download, extraction
+/// and the move share one line, erased on success, leaving one summary line.
 ///
-/// Download, extraction and the final move share a *single* progress line that
-/// is erased once the install succeeds, leaving exactly one summary line behind.
-///
-/// The rule the whole module follows: output persists in proportion to how
-/// durable the side effect is. A JDK on disk survives until it is removed, so
-/// earns a line. Exporting `JAVA_HOME` lasts until the shell exits and is fully
-/// implied by the command the user typed, so it prints nothing at all - which
-/// matters because the autoload hook runs on every `cd`.
+/// Output persists in proportion to how durable the side effect is: a JDK on
+/// disk earns a line; exporting `JAVA_HOME` prints nothing, which matters
+/// because the autoload hook runs on every `cd`.
 #[derive(Debug)]
 pub(crate) struct InstallUi {
     bar: ProgressBar,
@@ -37,16 +33,13 @@ impl InstallUi {
         let tty = supports_live_region();
         let bar = if tty {
             // Styled via the builder, which does not draw: a bar configured
-            // after construction flashes indicatif's default style on the first
-            // redraw. "connecting" is literally true here - the caller has the
-            // metadata but has not yet opened the download response.
+            // after construction flashes indicatif's default style first.
             ProgressBar::new(0)
                 .with_style(spinner_style())
                 .with_prefix(version.to_string())
                 .with_message("connecting")
         } else {
-            // Without a terminal there is nothing to redraw over; the plain
-            // phase lines below carry the progress instead.
+            // Plain phase lines carry the progress instead.
             ProgressBar::hidden()
         };
         if tty {
@@ -89,9 +82,8 @@ impl InstallUi {
         self.bar.set_position(bytes);
     }
 
-    /// Extraction deliberately gets a spinner rather than a bar: the only figure
-    /// available is compressed bytes read, which runs ahead of the files
-    /// actually written and so would show a bar completing before the work does.
+    /// A spinner, not a bar: compressed bytes read run ahead of the files
+    /// written, so a bar would complete before the work does.
     pub(crate) fn start_extract(&self) {
         self.phase("extracting");
     }
@@ -107,13 +99,11 @@ impl InstallUi {
         }
     }
 
-    /// Drive the spinner from the archive reader so it keeps moving during a
-    /// long extraction without the caller having to tick it.
+    /// Drives the spinner from the archive reader.
     pub(crate) fn wrap_read<R: Read>(&self, read: R) -> ProgressBarIter<R> {
         self.bar.wrap_read(read)
     }
 
-    /// Erase the live region and leave the one line that records what landed.
     pub(crate) fn finish(&self, dest: &Path) {
         self.bar.finish_and_clear();
         eprintln!(
@@ -126,17 +116,12 @@ impl InstallUi {
         );
     }
 
-    /// Erase the live region without a summary. The caller reports the error;
-    /// a half-drawn bar above it would only be in the way.
+    /// Erase the live region without a summary, before the caller's error.
     pub(crate) fn abandon(&self) {
         self.bar.finish_and_clear();
     }
 }
 
-/// `jlo install` and `jlo update` exist to answer "is anything newer
-/// available?", so the answer is their output - unlike `jlo env`, where
-/// silence is the answer.
-///
 /// `version` is the newest build installed.
 fn up_to_date(name: &str, version: &str) {
     eprintln!(
@@ -147,10 +132,8 @@ fn up_to_date(name: &str, version: &str) {
     );
 }
 
-/// That Adoptium offers no build of any of `requests` for this machine - the
-/// error when nothing else is left to do. Names the platform because that is
-/// the half of the fact the user may not know: Adoptium does publish JDK 8,
-/// just not for macOS on Apple silicon.
+/// Names the platform, the half of the fact the user may not know: Adoptium
+/// publishes JDK 8, just not for macOS on Apple silicon.
 pub(crate) fn not_offered(requests: &[Request]) -> String {
     let names: Vec<String> = requests.iter().map(ToString::to_string).collect();
     format!(
@@ -160,9 +143,8 @@ pub(crate) fn not_offered(requests: &[Request]) -> String {
     )
 }
 
-/// A name `install`/`update` passes over because Adoptium offers no build of
-/// it here, while other names still go ahead. Worded like the warning for a
-/// version that does not parse, which is skipped the same way.
+/// Worded like the warning for a version that does not parse, which is
+/// skipped the same way.
 fn skipping_not_offered(request: Request) {
     warning!(
         "skipping '{request}': Adoptium offers no build of it for {}",
@@ -170,15 +152,10 @@ fn skipping_not_offered(request: Request) {
     );
 }
 
-/// The advice under the error when Adoptium offers none of the names asked
-/// for: the listing is what it does offer for this machine.
 pub(crate) const NOT_OFFERED_HINT: &str = "Run 'jlo list' to see what is available.";
 
-/// What a new build replaced, printed under its install summary.
-///
-/// A pre-release says so. Its stream publishes weekly and a bare `jlo update`
-/// moves it, so these lines recur on every run - one that did not read as a
-/// preview being swapped for the next would pass for a patch release.
+/// What a new build replaced. A pre-release says so: its stream publishes
+/// weekly, and the line would otherwise pass for a patch release.
 fn replaced(request: Request, removed: &[String], failures: &[String]) {
     if !removed.is_empty() {
         note(replaced_line(request, removed));
@@ -194,12 +171,9 @@ fn replaced_line(request: Request, removed: &[String]) -> String {
     )
 }
 
-/// Everything `install` and `update` say but the live progress of each
-/// download: per name, then how many builds they deleted, and whether the
-/// shell moved - or why the build it is on was kept.
-///
-/// Grouped by kind rather than per name in order, because the `replaced`
-/// lines belong directly under the install summaries the downloads left.
+/// Everything `install` and `update` say but the live progress. Grouped by
+/// kind, not per name, because the `replaced` lines belong directly under the
+/// install summaries the downloads left.
 pub(crate) fn update_report(run: &InstallRun) {
     for (request, result) in &run.names {
         if let NameResult::Installed {
@@ -239,9 +213,6 @@ pub(crate) fn update_report(run: &InstallRun) {
     }
 }
 
-/// Said when `install` or `update` kept a superseded build because
-/// `JAVA_HOME` points at it: only the `jlo` shell function can move a shell,
-/// and it did not run this command.
 fn kept_active_hint(version: &str) -> String {
     format!(
         "Kept {version}, which JAVA_HOME points at. {}",
@@ -249,14 +220,12 @@ fn kept_active_hint(version: &str) -> String {
     )
 }
 
-/// The advice wherever J'Lo left a JDK alone because `JAVA_HOME` points at
-/// it - one wording, so `remove` and `install`/`update` cannot drift apart.
+/// One wording for every JDK left alone because `JAVA_HOME` points at it.
 /// `then` is what to do once the shell has moved.
 fn switch_shell_hint(then: &str) -> String {
     format!("Switch the shell to another JDK first, e.g. 'jlo env 21', then {then}.")
 }
 
-/// The advice line under a `jlo remove` that deleted nothing, if any.
 pub(crate) fn remove_refusal_hint(refusal: &RemoveError) -> Option<String> {
     let advice = match refusal {
         RemoveError::NotInstalled(_) => {
@@ -271,32 +240,18 @@ pub(crate) fn remove_refusal_hint(refusal: &RemoveError) -> Option<String> {
     Some(format!("Nothing was removed. {advice}"))
 }
 
-/// Diagnostic prefixes.
+/// Message conventions, so diagnostics read as one voice:
 ///
-/// Message conventions, so diagnostics from different commands read as one
-/// voice:
+/// - Text after `Error:`/`Warning:` starts lowercase with no trailing period,
+///   as cargo and rustc phrase theirs; `anyhow` contexts too, since they
+///   compose into a chain after that label.
+/// - Say "could not `<verb>`" - not "Failed to", "Can't" or "Error `<verb>`ing".
+/// - Do not restate the chain's first clause in the top-level message.
+/// - Hints are advice, not a label: sentence-cased with a full stop.
 ///
-/// - Text after `Error:`/`Warning:` starts lowercase and carries no trailing
-///   period, the way cargo and rustc phrase theirs. It is a clause following a
-///   label, not a sentence.
-/// - `anyhow` contexts follow the same rule: they compose into a chain printed
-///   after that label, so a context that says "Error opening archive" renders
-///   as "Error: Error opening archive".
-/// - Say "could not <verb>" - not "Failed to", "Can't" or "Error <verb>ing".
-/// - Do not restate the chain's first clause in the top-level message;
-///   `ui::error!("{e:#}")` is right when the context already names the
-///   operation.
-/// - Hints are the exception: they are advice rather than a label, so they stay
-///   sentence-cased with a full stop.
-///
-/// All four write to stderr and all four are `.for_stderr()`: `console::style`
-/// decides whether to emit colour by looking at *stdout*, and the `jlo` shell
-/// function runs `. <(jlo-bin env)`, so stdout is a pipe exactly when a user is
-/// sitting at a terminal watching stderr.
-///
-/// `Error:` is bold as well as red so it still stands out in a terminal theme
-/// that is already red-heavy - on a failed run it is the one line the user is
-/// looking for.
+/// Every style here is `.for_stderr()`: `console::style` checks *stdout* for
+/// colour support, and the `jlo` wrapper captures stdout, so it is a pipe
+/// exactly when a user is watching stderr.
 pub(crate) fn print_error(args: std::fmt::Arguments) {
     eprintln!("{} {args}", style("Error:").red().bold().for_stderr());
 }
@@ -305,35 +260,28 @@ pub(crate) fn print_warning(args: std::fmt::Arguments) {
     eprintln!("{} {args}", style("Warning:").yellow().bold().for_stderr());
 }
 
-/// Advice printed *alongside* an error (a usage line, a suggested flag), so it
-/// is dimmed rather than labelled - it must not read as a second failure.
+/// Dimmed rather than labelled: advice must not read as a second failure.
 pub(crate) fn print_hint(args: std::fmt::Arguments) {
     note(args);
 }
 
-/// A secondary line - a note under a result, or advice: dim, so it never
-/// competes with the line it follows.
 fn note(text: impl std::fmt::Display) {
     eprintln!("{}", dim(text));
 }
 
-/// Dim, for stderr: the one weight every secondary piece of output shares -
-/// a note, a hint, and the installer's headings and footnotes.
+/// The one weight every secondary piece of output shares.
 pub(crate) fn dim(text: impl std::fmt::Display) -> String {
     style(text).dim().for_stderr().to_string()
 }
 
-/// `s` unless there is exactly one.
 pub(crate) fn plural(n: usize) -> &'static str {
     if n == 1 { "" } else { "s" }
 }
 
-/// The green tick that closes a run which deleted `count` builds.
 fn print_removed(count: usize, noun: &str) {
     print_created(format_args!("Removed {count} {noun}{}", plural(count)));
 }
 
-/// One `!` line per deletion that failed.
 fn print_failures(failures: &[String]) {
     for failure in failures {
         eprintln!("{} {}", style("!").red().for_stderr(), failure);
@@ -344,42 +292,26 @@ pub(crate) fn print_created(args: std::fmt::Arguments) {
     eprintln!("{} {args}", style("✓").green().for_stderr());
 }
 
-/// A command offered for copying.
+/// A command offered for copying; the caller prints it at column 0, since
+/// terminal selection takes a leading indent with it.
 ///
-/// Bright green, and yes: green also marks the `✓` that says the run
-/// succeeded. The two readings are told apart by shape rather than by hue -
-/// the marker is a single character at the head of a line of prose, this is a
-/// whole line of shell standing alone under a heading. Blue was tried first
-/// and is the correct choice on paper; ANSI 34 is illegible on a dark
-/// background and the bright slot was not much better in practice, which is
-/// worth more than the tidier rule.
-///
-/// The colour is only half of it. The caller must print this at column 0 -
-/// double-click and shift-select take a leading indent with them, so an
-/// indented command is one a user cannot copy cleanly, which is exactly what
-/// these blocks exist for. A command merely *named* in a sentence is not this;
-/// it keeps that line's weight and stays out of green.
-///
-/// Returns a styled string rather than printing, because the caller owns the
-/// blank lines around it.
+/// Green, like the `✓`, told apart by shape: blue (ANSI 34) is illegible on a
+/// dark background.
 pub(crate) fn command(line: &str) -> String {
     style(line).green().bright().for_stderr().to_string()
 }
 
-// The help helpers below render escape codes unconditionally, unlike every
-// other helper here. Help text is not printed by jlo but handed to clap, which
-// decides on colour by its own check of stdout and strips escape codes from
-// the strings it renders when it decides against - a `console` style would
-// make that decision a second time, against stderr.
+// The help helpers render escape codes unconditionally: clap decides on
+// colour itself and strips them when it decides against, where a `console`
+// style would decide a second time, against stderr.
 
-/// A section heading in help text, in clap's heading style so the sections jlo
-/// adds cannot drift from the ones clap draws.
+/// In clap's heading style, so the sections jlo adds cannot drift from clap's.
 pub(crate) fn help_heading(text: &str) -> String {
     let style = *Styles::styled().get_header();
     format!("{style}{text}{style:#}")
 }
 
-/// A command mentioned in help text: clap's literal style, which is bold.
+/// A command mentioned in help text, in clap's literal style.
 pub(crate) fn help_literal(text: &str) -> String {
     let style = *Styles::styled().get_literal();
     format!("{style}{text}{style:#}")
@@ -403,9 +335,8 @@ macro_rules! created {
 
 pub(crate) use {created, error, hint, warning};
 
-/// The line that replaces the green tick when some deletions went and others
-/// failed: what did go, so the `!` lines above are read as the remainder
-/// rather than as the whole run.
+/// Replaces the green tick when some deletions failed, so the `!` lines above
+/// read as the remainder rather than as the whole run.
 fn partial_line(removed: usize, failures: usize) -> String {
     format!(
         "  removed {removed} JDK{} before the failure{}",
@@ -414,12 +345,8 @@ fn partial_line(removed: usize, failures: usize) -> String {
     )
 }
 
-/// Report a `jlo remove` run, by name or `--superseded`.
-///
-/// Deletion is the one thing jlo does that cannot be undone, so unlike `jlo
-/// env` it always says what it did - including when the answer is "nothing",
-/// which only `--superseded` can reach: a run by name that would delete
-/// nothing is an error before it gets here.
+/// Deletion cannot be undone, so it always says what it did - including
+/// "nothing", which only `--superseded` reaches.
 pub(crate) fn remove_report(report: &RemoveReport) {
     for version in &report.removed {
         eprintln!("{}  {}", dim("removed"), version);
@@ -427,20 +354,16 @@ pub(crate) fn remove_report(report: &RemoveReport) {
 
     print_failures(&report.failures);
 
-    // The green tick is reserved for a run that did what it was asked, so a
-    // run whose deletions all failed gets neither it nor "Nothing to remove" -
-    // that line would be a false claim about a store still holding every one
-    // of them. The caller turns the same condition into a non-zero exit.
+    // No green tick and no "Nothing to remove" after a failure: either would
+    // be a false claim about a store still holding those builds.
     let count = report.removed.len();
     if !report.failures.is_empty() {
         if count > 0 {
             note(partial_line(count, report.failures.len()));
         }
     } else if count == 0 {
-        // The parenthetical is the *reason* nothing went, so it cannot be
-        // printed when the reason was the in-use skip below - the store is
-        // then holding a superseded build, and saying otherwise would
-        // contradict the warning two lines later.
+        // The parenthetical is the *reason* nothing went, which is false when
+        // the in-use skip below kept a superseded build.
         eprintln!(
             "{} Nothing to remove{}",
             style("✓").green().for_stderr(),
@@ -457,15 +380,13 @@ pub(crate) fn remove_report(report: &RemoveReport) {
         print_removed(count, "JDK");
     }
 
-    // Listed, not counted: the user named these, so anything they expected
-    // to go and which did not is worth a line of its own.
+    // Listed, not counted: the user named these.
     for version in &report.skipped_unmanaged {
         note(format!("  left {version} alone (not managed by jlo)"));
     }
 
-    // Not a failure - the JDK is already absent, which is what was asked for
-    // - so this is a dim note under a successful run rather than a warning.
-    // It is still said, because it is usually a typo.
+    // Not a failure - already absent is what was asked for - but usually a
+    // typo, so still said.
     if !report.not_installed.is_empty() {
         note(format!(
             "  nothing installed matched {}",
@@ -473,21 +394,15 @@ pub(crate) fn remove_report(report: &RemoveReport) {
         ));
     }
 
-    // Last, and a warning rather than a dim note: of the skips this is the
-    // only one the user can act on, so it is the line the run should end on -
-    // not something buried among the notes above it.
+    // Last, and a warning: the only skip the user can act on.
     if let Some(version) = &report.skipped_in_use {
         warning!("left {version} alone: JAVA_HOME points at it");
         hint!("{}", switch_shell_hint("run it again"));
     }
 }
 
-/// The `jlo list --offline` listing: the JDKs already installed.
-///
-/// The same rows and the same status vocabulary as the networked listing,
-/// minus the catalogue - so a build reads the same way whichever listing you
-/// found it in. Colours switch themselves off when stdout is not a terminal,
-/// so a pipe sees plain text.
+/// The `jlo list --offline` listing: the networked listing's rows, minus the
+/// catalogue.
 pub(crate) fn offline_list(groups: &[NameGroup], active_version: Option<&str>, base: &Path) {
     if groups.is_empty() {
         eprintln!("No JDKs installed in {}.", base.display());
@@ -497,14 +412,9 @@ pub(crate) fn offline_list(groups: &[NameGroup], active_version: Option<&str>, b
     print_listing(&build_rows(&[], groups, active_version));
 }
 
-/// The `jlo list` listing: what Adoptium offers for this machine, merged with
-/// what is installed locally.
-///
-/// One row per name - what `install`, `update` and `env` take. Since every
-/// verb keeps one build per name, a row per *build* was mostly the same name
-/// twice; the builds that do still sit beside the newest - a leftover, an
-/// unmanaged install - get an indented line of their own, so
-/// `jlo remove <build>` still finds its argument here.
+/// The `jlo list` listing: what Adoptium offers, merged with what is
+/// installed. One row per name; any other build of it gets an indented line
+/// of its own, so `jlo remove <build>` still finds its argument here.
 pub(crate) fn remote_list(
     available: &[RemoteJdk],
     groups: &[NameGroup],
@@ -512,8 +422,7 @@ pub(crate) fn remote_list(
 ) {
     if available.is_empty() {
         eprintln!("Adoptium offers no JDKs for this OS and architecture.");
-        // Not a return: installs still present are still removable, and
-        // hiding them here is the bug this listing exists to fix.
+        // Not a return: installs still present are still removable.
         if groups.is_empty() {
             return;
         }
@@ -522,13 +431,10 @@ pub(crate) fn remote_list(
     print_listing(&build_rows(available, groups, active_version));
 }
 
-/// The installed section, the available one, then at most one line of
-/// advice.
 fn print_listing(rows: &[NameRow]) {
     let listing = render_rows(rows);
 
-    // The section headings and the tip go to stderr, so a pipe sees only the
-    // rows - `jlo list | grep` should not have to step over a heading.
+    // Headings and the tip go to stderr, so a pipe sees only the rows.
     let installed_any = !listing.installed.is_empty();
     if installed_any {
         eprintln!("{}", style("Installed").bold().for_stderr());
@@ -547,15 +453,10 @@ fn print_listing(rows: &[NameRow]) {
     }
 }
 
-/// The one line that answers "which JDK, and why".
-///
-/// `jlo current`'s whole stdout line. A formatter rather than a `println!` at
-/// the call site so it can be unit-tested against every state it
-/// distinguishes: pure - no filesystem, no environment.
+/// `jlo current`'s stdout line: which JDK, and why.
 pub(crate) fn provenance_line(active: &Active) -> String {
-    // A JDK jlo did not install has no version to name, so the path is the
-    // answer: it says "not mine" completely, and the version is usually in it
-    // anyway.
+    // A JDK jlo did not install has no version to name; the path says "not
+    // mine", and usually holds the version anyway.
     let subject = match &active.version {
         Some(version) => version.clone(),
         None => active.path.display().to_string(),
@@ -564,8 +465,7 @@ pub(crate) fn provenance_line(active: &Active) -> String {
     let note = match &active.source {
         Some(Source::Foreign) => "$JAVA_HOME, set outside jlo".to_string(),
         Some(source) => format!("from {}", source.label()),
-        // Active, and a config pins something else. The stdout line still
-        // answers the question asked; the disagreement is the warning below.
+        // A config pins something else: that is the warning, not this line.
         None if active.pinned_elsewhere.is_some() => "active".to_string(),
         None => "active, nothing pinned".to_string(),
     };
@@ -573,11 +473,8 @@ pub(crate) fn provenance_line(active: &Active) -> String {
     format!("{subject}  ({note})")
 }
 
-/// The active JDK is not the one the config pins.
-///
-/// Unconditional - deliberately not gated on `is_terminal()` the way the
-/// unsourced-`env` hint is. That gate exists because the autoload hook sources
-/// the `env` path; nothing hooks this.
+/// Not gated on `is_terminal()` like the unsourced-`env` hint: that gate exists
+/// because the autoload hook runs `env`, and nothing hooks this.
 pub(crate) fn pin_mismatch(pinned: &Resolved) {
     warning!(
         "{} pins Java {}; run 'jlo env' to switch.",
@@ -586,22 +483,12 @@ pub(crate) fn pin_mismatch(pinned: &Resolved) {
     );
 }
 
-/// The advice line under both of the states in which `jlo current` has no
-/// answer to print. Naming `jlo env` is the whole of it: that is the command
-/// that puts a JDK back in this shell.
 pub(crate) const NO_ACTIVE_JDK_HINT: &str = "Run 'jlo env' to activate a JDK in this shell.";
 
-/// The line `jlo env` ends on when its exports went nowhere.
-///
-/// Keyed on stdout being a terminal, which is a reliable enough negative: the
-/// `jlo` shell function captures the exports in a command substitution and
-/// evals them (`out="$(jlo-bin env ...)"; eval "$out"` - deliberately not a
-/// process substitution, which is a silent no-op under bash 3.2 and discards
-/// the exit status everywhere), and the autoload hook calls that same
-/// function, so on the sourced path stdout is a pipe and this never fires -
-/// not even on the `cd` hook that runs on every directory change.
-/// `jlo-bin env 21 > file` stays silent too - an accepted gap, since the case
-/// that actually misleads is the interactive/agent one.
+/// The line `jlo env` ends on when its exports went nowhere. Keyed on stdout
+/// being a terminal: the wrapper and the autoload hook capture stdout, so on
+/// the sourced path this never fires. `jlo-bin env 21 > file` stays silent
+/// too, an accepted gap.
 pub(crate) fn unsourced_env_hint(java_version: &str) -> String {
     format!(
         "jlo env prints exports for a shell to source; it did not change anything. \
@@ -610,21 +497,15 @@ pub(crate) fn unsourced_env_hint(java_version: &str) -> String {
     )
 }
 
-/// Under `jlo update`'s report when a newer J'Lo is out.
 pub(crate) fn newer_jlo_hint(latest: &str) -> String {
     format!("J'Lo {latest} is available. Run 'jlo selfupdate' to install it.")
 }
 
-/// Said after a pre-release install whose major has since shipped.
-///
-/// `-ea` is literal: it asks for the unreleased stream, and Adoptium keeps one
-/// running after a major goes GA - so the pin keeps delivering previews of the
-/// *next patch*. That is deliberately not changed under the user's feet; it is
-/// announced instead.
-///
-/// Also said on every bare `jlo update` while such a stream is installed,
-/// since it moves pre-release names too - so it names the way to stop that as
-/// well as the way to switch.
+/// Said after a pre-release install whose major has since shipped. `-ea` is
+/// literal: Adoptium keeps that stream running after GA, so the pin keeps
+/// delivering previews of the *next patch* - announced, not changed under the
+/// user's feet. Repeats on every bare `jlo update`, so it also names the way
+/// to stop.
 pub(crate) fn ea_is_now_released(request: Request) -> String {
     format!(
         "{request} still tracks pre-release builds; Java {major} has since been released. \
@@ -635,10 +516,7 @@ pub(crate) fn ea_is_now_released(request: Request) -> String {
 }
 
 /// The pre-release names among `requests` whose major has since shipped,
-/// deduplicated and in the order given.
-///
-/// Split out from the printing so the rule is testable without a server: it is
-/// the *selection* that is easy to get wrong, not the sentence.
+/// deduplicated, in the order given.
 fn released_ea_names(requests: &[Request], released: &[i64]) -> Vec<Request> {
     let mut names: Vec<Request> = Vec::new();
     for request in requests.iter().filter(|r| r.is_ea()) {
@@ -649,10 +527,6 @@ fn released_ea_names(requests: &[Request], released: &[i64]) -> Vec<Request> {
     names
 }
 
-/// Say, once per name, that a pre-release pin is still a pre-release pin.
-///
-/// Pure: the caller supplies the released majors from whatever it already
-/// holds, so the emit site owes this no extra request.
 fn announce_released_ea(requests: &[Request], released: &[i64]) {
     for request in released_ea_names(requests, released) {
         hint!("{}", ea_is_now_released(request));
@@ -660,7 +534,7 @@ fn announce_released_ea(requests: &[Request], released: &[i64]) {
 }
 
 /// `println!` panics when the reader goes away, and this output is meant to be
-/// piped (`jlo list | head`), so treat a closed pipe as a normal end of output.
+/// piped (`jlo list | head`), so a closed pipe is a normal end of output.
 pub(crate) fn print_lines(lines: impl IntoIterator<Item = String>) {
     use std::io::Write;
 
@@ -678,8 +552,7 @@ pub(crate) fn print_lines(lines: impl IntoIterator<Item = String>) {
     }
 }
 
-/// An installed build that is not the one its name reports, on a line of its
-/// own so its exact version is there to pass to `jlo remove`.
+/// An installed build that is not the one its name reports.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Build {
     version: String,
@@ -688,15 +561,13 @@ struct Build {
     active: bool,
 }
 
-/// One name - `27` or `28-ea` - and what jlo knows about it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct NameRow {
     name: Request,
     /// The newest managed build of the name, as shown in the column.
     installed: Option<String>,
-    /// The build Adoptium offers, only when that exact build is not installed
-    /// under the name. Usually newer than what is; older when the catalogue
-    /// sits behind the store.
+    /// The build Adoptium offers, when that exact build is not installed.
+    /// Older than what is when the catalogue sits behind the store.
     latest: Option<String>,
     /// `latest` is newer than every install of this name.
     update: bool,
@@ -706,7 +577,6 @@ struct NameRow {
     others: Vec<Build>,
 }
 
-/// Merge the remote catalogue and the local installs into one row per name.
 fn build_rows(
     available: &[RemoteJdk],
     groups: &[NameGroup],
@@ -730,13 +600,9 @@ fn build_rows(
         .collect()
 }
 
-/// The line for one name: what Adoptium offers of it, what is installed of
-/// it, or both.
-///
-/// Only builds of this name are compared, never the other stream of the same
-/// major: a pre-release sorts above the release it previews, so across
-/// streams an offered beta would read as an update to an installed release,
-/// and following it would change streams - which `jlo update` never does.
+/// Only builds of this name are compared, never the other stream: a
+/// pre-release sorts above the release it previews, so an offered beta would
+/// read as an update to an installed release.
 fn name_row(
     name: Request,
     offered: Option<&RemoteJdk>,
@@ -745,11 +611,9 @@ fn name_row(
 ) -> NameRow {
     let builds = group.map(NameGroup::builds).unwrap_or_default();
 
-    // LATEST and `update` answer different questions. LATEST is anything
-    // Adoptium offers that is not already on disk, so a catalogue that sits
-    // behind the store is still visible; only `update` claims the offer is
-    // an improvement - by the rule `jlo update` downloads by. Presence is the
-    // exact directory name.
+    // `latest` is any offer not already on disk, so a catalogue behind the
+    // store stays visible; only `update` claims an improvement, by the rule
+    // `jlo update` downloads by.
     let latest = offered
         .filter(|jdk| !builds.iter().any(|build| build.version == jdk.version))
         .map(|jdk| jdk.version.clone());
@@ -782,15 +646,12 @@ fn name_row(
     }
 }
 
-/// A listing rendered: the lines of the installed section, and the one line
-/// naming everything else Adoptium offers.
 struct Listing {
     installed: Vec<String>,
     available: Option<String>,
 }
 
-/// The gutter glyph of a line, which says the one thing about it that calls
-/// for attention. Plain characters, not colour, carry the distinction, so it
+/// The gutter glyph. Characters, not colour, carry the distinction, so it
 /// survives `NO_COLOR` and a pipe.
 #[derive(Clone, Copy)]
 enum Mark {
@@ -813,26 +674,22 @@ impl Mark {
     }
 }
 
-/// One printed line before padding: a name with its build, or a build of the
-/// name above.
+/// One printed line before padding.
 struct Cells<'a> {
     mark: Mark,
     /// Empty on a build line: the blank is what ties it to the name above.
     name: String,
     version: &'a str,
     active: bool,
-    /// What follows the version, already styled: the offered build, or the
-    /// status word of a build line.
+    /// Already styled.
     tail: String,
 }
 
-/// A name is installed when anything of it is on disk - a managed build or
-/// only unmanaged ones.
+/// Anything of the name on disk, managed or not.
 fn is_installed(row: &NameRow) -> bool {
     row.installed.is_some() || !row.others.is_empty()
 }
 
-/// A name's line, then its other builds.
 fn push_name<'a>(out: &mut Vec<Cells<'a>>, row: &'a NameRow) {
     let mark = if row.active {
         Mark::Active
@@ -841,9 +698,7 @@ fn push_name<'a>(out: &mut Vec<Cells<'a>>, row: &'a NameRow) {
     } else {
         Mark::None
     };
-    // `update` and `offered` are words as well as a colour so `jlo list |
-    // grep update` works; the second is a catalogue sitting behind the store,
-    // shown so it is not mistaken for nothing on offer.
+    // Words as well as a colour, so `jlo list | grep update` works.
     let tail = match (&row.latest, row.update) {
         (Some(latest), true) => format!("{} {}", style(latest).yellow(), style("update").dim()),
         (Some(latest), false) => style(format!("{latest} offered")).dim().to_string(),
@@ -872,11 +727,6 @@ fn push_name<'a>(out: &mut Vec<Cells<'a>>, row: &'a NameRow) {
     }
 }
 
-/// Render the rows as two sections: every installed name, one line each plus
-/// a line per other build of it, then the names not installed on one line.
-///
-/// Pre-release names get a line of their own like any other: the section,
-/// not an indent, now says whether a name is on disk.
 fn render_rows(rows: &[NameRow]) -> Listing {
     let (on_disk, not_installed): (Vec<&NameRow>, Vec<&NameRow>) =
         rows.iter().partition(|row| is_installed(row));
@@ -907,10 +757,8 @@ fn render_rows(rows: &[NameRow]) -> Listing {
     }
 }
 
-/// One line of the installed section. Each field is padded only when
-/// something follows it, so no line ends in spaces - and padded as a plain
-/// string before it is styled, because the escape bytes `console::style` adds
-/// are invisible but still counted by the formatter.
+/// Each field is padded only when something follows it, so no line ends in
+/// spaces, and before it is styled: the formatter counts escape bytes.
 fn render_line(c: &Cells, name_width: usize, version_width: usize) -> String {
     let pad = |text: &str, width: usize, last: bool| {
         if last {
@@ -940,9 +788,8 @@ fn render_line(c: &Cells, name_width: usize, version_width: usize) -> String {
     format!("  {} {}", c.mark.render(), fields.join("  "))
 }
 
-/// The one word an indented build line ends on. Each is a single token - no
-/// spaces, no parentheses - so `jlo list | grep superseded` stays a usable
-/// way to ask which installs `jlo remove --superseded` would take.
+/// A single token each, so `jlo list | grep superseded` shows what
+/// `jlo remove --superseded` would take.
 fn render_status(status: Status) -> String {
     match status {
         Status::Installed => String::new(),
@@ -951,16 +798,11 @@ fn render_status(status: Status) -> String {
     }
 }
 
-/// The single advice line under a listing, or `None` when there is nothing to
-/// advise.
-///
 /// One line whatever applies: this prints on every `jlo list`, and a stack of
-/// suggestions under every listing reads as nagging rather than as help.
+/// suggestions reads as nagging.
 fn tip_line(rows: &[NameRow]) -> Option<String> {
     let outdated = rows.iter().filter(|name| name.update).count();
-    // A superseded build of a name with an update on offer is not advertised:
-    // `jlo update` deletes it along with the build it replaces, so offering
-    // `jlo remove --superseded` as well would be two commands for one job.
+    // Not counted where an update is on offer: `jlo update` deletes it too.
     let superseded = rows
         .iter()
         .filter(|name| !name.update)
@@ -981,17 +823,12 @@ fn tip_line(rows: &[NameRow]) -> Option<String> {
         return None;
     }
 
-    // Dim, like every other hint: advice, not a finding.
     Some(dim(format!("run {}", offers.join(" \u{b7} "))))
 }
 
-/// Whether stderr can carry a bar that redraws over itself.
-///
-/// Being a terminal is not enough. Under `TERM=dumb` - Emacs `shell-mode`, some
-/// CI runners, several IDE consoles - there is no cursor addressing, and
-/// indicatif silently suppresses the bar. Trusting `is_terminal` alone there
-/// would leave a 20-second install printing nothing whatsoever, so treat a dumb
-/// or unset `TERM` as "no live region" and fall back to plain phase lines.
+/// Whether stderr can carry a bar that redraws over itself. A terminal is not
+/// enough: under a dumb or unset `TERM` indicatif silently suppresses the bar,
+/// and an install would print nothing at all.
 fn supports_live_region() -> bool {
     if !stderr().is_terminal() {
         return false;
@@ -1004,19 +841,11 @@ fn supports_live_region() -> bool {
 
 const TICK: Duration = Duration::from_millis(100);
 
-/// Sized to fit an 80-column terminal even for Adoptium's longest version
-/// strings (`21.0.12+101.0.LTS`). A line that wraps turns the live region into
-/// two rows, and the redraw then clears and repaints both - the stacked,
-/// flickering output this module exists to avoid.
+/// Fits 80 columns even for the longest versions (`21.0.12+101.0.LTS`): a
+/// wrapped line makes the redraw repaint two rows and flicker.
 ///
-/// No phase word here: the bar and the byte counts already say "downloading".
-/// The transfer rate is dropped for the same reason - the spinner answers "is
-/// it stuck?", and the ETA answers the question the rate was standing in for.
-/// The live region carries no colour that means anything elsewhere. It is
-/// erased when the install succeeds, and a colour that disappears teaches the
-/// reader that it never meant much - a cyan spinner beside the cyan "this one
-/// is active" gutter costs that gutter its meaning. Dim is what is left: the
-/// bar is secondary to the line it leaves behind.
+/// Dim only: the region is erased on success, and a colour that disappears
+/// would cost the same colour its meaning elsewhere.
 fn download_style() -> ProgressStyle {
     ProgressStyle::default_bar()
         .template("{spinner:.dim} JDK {prefix}  [{bar:20.dim}]  {bytes}/{total_bytes}  {eta}")
@@ -1030,13 +859,7 @@ fn spinner_style() -> ProgressStyle {
         .expect("spinner template is a valid literal")
 }
 
-/// One line per durable side effect, e.g.
-/// `✓ JDK 21.0.8+9 → ~/Library/Java/JavaVirtualMachines/21.0.8  (18s)`.
-///
-/// Every styled piece is `.for_stderr()`. `console::style` decides whether to
-/// emit colour by looking at *stdout*, and the `jlo` shell function runs
-/// `. <(jlo-bin env)` - so stdout is a pipe on the one path that matters and
-/// the default targeting silently strips every colour from this line.
+/// E.g. `✓ JDK 21.0.8+9 → ~/Library/Java/JavaVirtualMachines/21.0.8  (18s)`.
 fn format_summary(version: &str, dest: &str, elapsed: Duration) -> String {
     format!(
         "{} JDK {version} {} {}  {}",
@@ -1047,7 +870,6 @@ fn format_summary(version: &str, dest: &str, elapsed: Duration) -> String {
     )
 }
 
-/// Compact enough to sit at the end of a line without drawing the eye.
 fn format_elapsed(elapsed: Duration) -> String {
     let secs = elapsed.as_secs();
     if secs >= 60 {
@@ -1057,10 +879,8 @@ fn format_elapsed(elapsed: Duration) -> String {
     }
 }
 
-/// Collapse the home directory so install paths stay readable. Only for
-/// prose: never used where a shell reads the line back, and only printed on
-/// success, so unlike the Debug-quoted paths in error messages there is no odd
-/// whitespace to expose.
+/// Collapse the home directory. Prose only: never where a shell reads the
+/// line back.
 pub(crate) fn tilde(path: &Path, home: Option<&Path>) -> String {
     match home.and_then(|h| path.strip_prefix(h).ok()) {
         Some(rest) => format!("~/{}", rest.display()),
