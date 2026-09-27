@@ -2,11 +2,11 @@ use crate::CommandError;
 use crate::adoptium::{AdoptiumClient, JdkMetadata};
 use crate::extract;
 use crate::request::{OLDEST_MAJOR, Request, Stream};
+use crate::shellenv::Payload;
 use crate::ui::{self, InstallUi};
 use crate::version::{cmp_desc, compare};
 use anyhow::{Context, anyhow, bail};
 use std::cmp::Ordering;
-use std::collections::HashSet;
 use std::env;
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -29,11 +29,6 @@ fn sibling_marker(base: &Path, version: &str) -> PathBuf {
 /// directory. Named once because two rules depend on it and they must not
 /// drift: [`java_home_in`] hands this path out, [`owns`] refuses to delete it.
 const BUNDLE_HOME: [&str; 2] = ["Contents", "Home"];
-
-/// How many builds a `(name, removed version names)` list deleted.
-fn removed_count(removed: &[(Request, Vec<String>)]) -> usize {
-    removed.iter().map(|(_, v)| v.len()).sum()
-}
 
 /// What a `jlo remove` run did, by name ([`JdkStore::remove`]) or by the
 /// superseded rule ([`JdkStore::prune`]), so the caller owns the presentation
@@ -396,15 +391,10 @@ impl JdkStore {
     /// names. A missing base directory is an empty store, so a bare
     /// `jlo update` before the first install says there is nothing to update.
     pub(crate) fn installed_requests(&self) -> anyhow::Result<Vec<Request>> {
-        let requests: HashSet<Request> = self
-            .scan_existing()?
+        Ok(group_by_name(&self.list()?)
             .into_iter()
-            .filter_map(|candidate| candidate.request)
-            .collect();
-
-        let mut requests: Vec<Request> = requests.into_iter().collect();
-        requests.sort_unstable_by_key(|request| request.listing_order());
-        Ok(requests)
+            .map(|group| group.request)
+            .collect())
     }
 
     /// The managed builds of `request` strictly older than `installed` - the
@@ -701,16 +691,34 @@ impl JdkStore {
     }
 }
 
+/// What became of one name in an install run.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum NameResult {
+    /// Adoptium offers no build of the name for this machine; skipped.
+    NotOffered,
+    /// Nothing on offer supersedes every install of the name. Carries the
+    /// newest build installed.
+    UpToDate(String),
+    /// A new build landed. `replaced` are the builds of the name it
+    /// superseded and deleted, `failures` one message per build that could
+    /// not be deleted.
+    Installed {
+        replaced: Vec<String>,
+        failures: Vec<String>,
+    },
+}
+
 /// What [`install_each`] did, handed back whole rather than as a `Result`: a
 /// failure on the third name must not hide that the first one deleted the
-/// build the shell was on.
+/// build the shell was on. The store prints none of it but the live progress
+/// of each download; `ui::update_report` renders the rest.
 #[derive(Debug, Default)]
 pub(crate) struct InstallRun {
-    /// `(name, removed version names)`, one entry per name whose superseded
-    /// builds were deleted, in processing order.
-    pub(crate) replaced: Vec<(Request, Vec<String>)>,
-    /// One message per superseded build that could not be deleted.
-    pub(crate) failures: Vec<String>,
+    /// Every name the run got to: the ones Adoptium does not offer, then the
+    /// ones already current, then the ones that got a new build - each kind
+    /// in processing order. A name the run stopped before, or
+    /// a new build whose payload could not be written, has no entry.
+    pub(crate) names: Vec<(Request, NameResult)>,
     /// The java home of the new build, when the build `$JAVA_HOME` pointed
     /// at was among those deleted and the shell was told to follow.
     pub(crate) repointed: Option<PathBuf>,
@@ -723,44 +731,61 @@ pub(crate) struct InstallRun {
     /// the shell's payload that could not be written, after which nothing is
     /// deleted.
     pub(crate) error: Option<CommandError>,
+    /// The majors Adoptium has released, asked only when a pre-release name
+    /// is in play and the run succeeded: a `28-ea` pin whose major is out
+    /// is worth a note. Empty otherwise, and when the lookup failed.
+    pub(crate) released: Vec<i64>,
 }
 
 impl InstallRun {
+    fn replacements(&self) -> impl Iterator<Item = (&[String], &[String])> {
+        self.names.iter().filter_map(|(_, result)| match result {
+            NameResult::Installed { replaced, failures } => Some((&replaced[..], &failures[..])),
+            _ => None,
+        })
+    }
+
     pub(crate) fn removed_count(&self) -> usize {
-        removed_count(&self.replaced)
+        self.replacements()
+            .map(|(replaced, _)| replaced.len())
+            .sum()
+    }
+
+    pub(crate) fn failure_count(&self) -> usize {
+        self.replacements()
+            .map(|(_, failures)| failures.len())
+            .sum()
     }
 }
 
 /// The one operation behind both `install` and `update`: per name, download
 /// the latest build if it supersedes every install of the name, then delete
 /// the builds of that name it supersedes. A name moves forward, never back.
-/// The two verbs differ only in how they arrive at this set of names. The
-/// on-demand install behind `env`, `home` and `exec` does not come through
-/// here: it only fills a missing name, so it has nothing to supersede.
+/// The two verbs differ only in how they arrive at `requests`, which may come
+/// in any order and repeat: they are processed once each, in `jlo list`'s
+/// order. The on-demand install behind `env`, `home` and `exec` does not come
+/// through here: it only fills a missing name, so it has nothing to supersede.
 ///
-/// `active` is `$JAVA_HOME` of the calling shell, if set. Its build is
-/// deleted only when `shell_follows`; otherwise it is kept and named in
-/// [`InstallRun::kept_active`]. `emit` is called once, after every download
-/// and before any deletion, with the java home the shell has to move to, if
-/// any: a run killed before it returns has deleted nothing, and one killed
-/// after has already told the shell where to go. When it fails, nothing is
-/// deleted.
-pub(crate) fn install_each(
+/// `active` is `$JAVA_HOME` of the calling shell, if set. `payload` is that
+/// shell's stdout when it evaluates it - and only then may the build `active`
+/// points at be deleted; without one it is kept and named in
+/// [`InstallRun::kept_active`]. The payload is written once, after every
+/// download and before any deletion, moving the shell to the new build when
+/// its old one is among those to go: a run killed before it is written has
+/// deleted nothing, and one killed after has already told the shell where to
+/// go. When it cannot be written, nothing is deleted.
+pub(crate) fn install_each<W: std::io::Write>(
     client: &AdoptiumClient,
     store: &JdkStore,
-    requests: HashSet<Request>,
+    mut requests: Vec<Request>,
     active: Option<&Path>,
-    shell_follows: bool,
-    emit: impl FnOnce(Option<&Path>) -> anyhow::Result<()>,
+    payload: Option<Payload<W>>,
 ) -> InstallRun {
-    // Sorted for a stable processing order, rather than whatever order the
-    // hash set happens to iterate in - `jlo list`'s, so the names are
-    // reported the way the listing shows them.
-    let mut requests: Vec<Request> = requests.into_iter().collect();
     requests.sort_unstable_by_key(|request| request.listing_order());
+    requests.dedup();
 
     let mut run = InstallRun::default();
-    let offered = match resolve_offered(client, &requests) {
+    let offered = match resolve_offered(client, &requests, &mut run) {
         Ok(offered) => offered,
         Err(e) => {
             run.error = Some(e);
@@ -771,8 +796,12 @@ pub(crate) fn install_each(
     let mut installed = Vec::new();
     for (request, metadata) in offered {
         match install_latest(client, store, request, &metadata) {
-            Ok(Some(java_home)) => installed.push((request, metadata.semver, java_home)),
-            Ok(None) => {}
+            Ok(Latest::Installed(java_home)) => {
+                installed.push((request, metadata.semver, java_home));
+            }
+            Ok(Latest::Current(newest)) => {
+                run.names.push((request, NameResult::UpToDate(newest)));
+            }
             Err(e) => {
                 // Stop, as a failed download always has - but keep what the
                 // names before it did.
@@ -790,7 +819,7 @@ pub(crate) fn install_each(
                 active.is_some_and(|active| owns(&store.base.join(&old.version), active))
             });
             if let Some(at) = live {
-                if shell_follows {
+                if payload.is_some() {
                     repointed = Some(java_home.clone());
                 } else {
                     run.kept_active = Some(builds.remove(at).version);
@@ -801,55 +830,42 @@ pub(crate) fn install_each(
         doomed.push((*request, superseded));
     }
 
-    if let Err(e) = emit(repointed.as_deref()) {
+    if let Some(payload) = payload
+        && let Err(e) = payload.follow(repointed.as_deref(), active, store.base())
+    {
         run.error.get_or_insert(e.into());
         return run;
     }
     run.repointed = repointed;
 
     for (request, superseded) in doomed {
-        replace(store, request, superseded, &mut run);
-    }
-
-    if run.error.is_some() {
-        return run;
+        run.names.push((request, replace(store, superseded)));
     }
 
     // Only when a pre-release name is in play, and then once for the whole
     // run: it is one document, the same for every major. A failed lookup is
-    // swallowed, as the superseded count below is - a note is not worth
-    // failing an otherwise successful command over.
-    if requests.iter().any(|request| request.is_ea()) {
-        let released = client.released_majors().unwrap_or_default();
-        ui::announce_released_ea(&requests, &released);
+    // swallowed - a note is not worth failing an otherwise successful
+    // command over.
+    if run.error.is_none() && requests.iter().any(|request| request.is_ea()) {
+        run.released = client.released_majors().unwrap_or_default();
     }
 
     run
 }
 
-/// Delete the builds of `request` its new build has superseded, and record
-/// the outcome in `run`.
-fn replace(
-    store: &JdkStore,
-    request: Request,
-    superseded: anyhow::Result<Vec<InstalledJdk>>,
-    run: &mut InstallRun,
-) {
-    let mut removed = Vec::new();
+/// Delete the builds its new build has superseded.
+fn replace(store: &JdkStore, superseded: anyhow::Result<Vec<InstalledJdk>>) -> NameResult {
+    let mut replaced = Vec::new();
     let mut failures = Vec::new();
     match superseded {
         Err(e) => failures.push(format!("{e:#}")),
         Ok(builds) => {
             for old in builds {
-                remove_recorded(&store.base, old.version, &mut removed, &mut failures);
+                remove_recorded(&store.base, old.version, &mut replaced, &mut failures);
             }
         }
     }
-    ui::replaced(request, &removed, &failures);
-    if !removed.is_empty() {
-        run.replaced.push((request, removed));
-    }
-    run.failures.extend(failures);
+    NameResult::Installed { replaced, failures }
 }
 
 /// The first phase of [`install_each`]: what Adoptium offers for every name,
@@ -868,6 +884,7 @@ fn replace(
 fn resolve_offered(
     client: &AdoptiumClient,
     requests: &[Request],
+    run: &mut InstallRun,
 ) -> Result<Vec<(Request, JdkMetadata)>, CommandError> {
     let mut offered = Vec::new();
     let mut not_offered = Vec::new();
@@ -884,16 +901,24 @@ fn resolve_offered(
             ui::NOT_OFFERED_HINT,
         ));
     }
-    // Said only when something is left to do: with nothing left, the error
-    // above names every skipped name in one line instead.
-    for &request in &not_offered {
-        ui::skipping_not_offered(request);
-    }
+    // Recorded only when something is left to do: with nothing left, the
+    // error above names every skipped name in one line instead.
+    run.names.extend(
+        not_offered
+            .into_iter()
+            .map(|request| (request, NameResult::NotOffered)),
+    );
     Ok(offered)
 }
 
-/// The java home of the build installed, or `None` when the name was already
-/// current - so the caller can tell a real update from a no-op.
+/// What [`install_latest`] found: the name already current, with its newest
+/// build, or a new build installed, with its java home.
+enum Latest {
+    Current(String),
+    Installed(PathBuf),
+}
+
+/// Bring one name to the build on offer, or find it current already.
 ///
 /// Downloads only an offer that supersedes every install of the name. Asking
 /// "is this exact build on disk?" instead would follow a catalogue that sits
@@ -905,7 +930,7 @@ fn install_latest(
     store: &JdkStore,
     request: Request,
     jdk_metadata: &JdkMetadata,
-) -> anyhow::Result<Option<PathBuf>> {
+) -> anyhow::Result<Latest> {
     let installed = store.list()?;
     // Only this name: a pre-release sorts above the release it previews, so
     // measured against `21-ea` an offer for `21` would never be newer.
@@ -917,13 +942,12 @@ fn install_latest(
     match builds.first() {
         // `list` is newest first.
         Some(newest) if !supersedes_every_install(&jdk_metadata.semver, &builds) => {
-            ui::up_to_date(&request.to_string(), &newest.version);
-            Ok(None)
+            Ok(Latest::Current(newest.version.clone()))
         }
         _ => {
             let java_home =
                 install_jdk(client, store, jdk_metadata).context("could not install JDK")?;
-            Ok(Some(java_home))
+            Ok(Latest::Installed(java_home))
         }
     }
 }
@@ -2636,18 +2660,19 @@ mod tests {
         builder.into_inner().unwrap().finish().unwrap()
     }
 
-    /// Adoptium on a local server: what it offers per major, and how often
-    /// each package must be downloaded by the time [`Self::assert`] runs.
+    /// Adoptium on a local server: what it offers per major. By the time
+    /// [`Self::assert`] runs, every major must have been looked up once and
+    /// each package downloaded as often as its offer says.
     struct Adoptium {
         server: mockito::ServerGuard,
-        downloads: Vec<mockito::Mock>,
+        mocks: Vec<mockito::Mock>,
     }
 
     impl Adoptium {
         fn new() -> Self {
             Self {
                 server: mockito::Server::new(),
-                downloads: Vec::new(),
+                mocks: Vec::new(),
             }
         }
 
@@ -2671,30 +2696,33 @@ mod tests {
                 "00".to_string()
             };
             let link = format!("{}/jdk-{major}.tar.gz", self.server.url());
-            self.lookup(major)
+            let lookup = self.lookup(major)
                 .with_body(format!(
                     r#"[{{"version":{{"semver":"{semver}"}},"binary":{{"package":{{"name":"jdk.tar.gz","link":"{link}","checksum":"{checksum}"}}}}}}]"#
                 ))
                 .create();
+            self.mocks.push(lookup);
             let download = self
                 .server
                 .mock("GET", format!("/jdk-{major}.tar.gz").as_str())
                 .with_body(archive)
                 .expect(downloads)
                 .create();
-            self.downloads.push(download);
+            self.mocks.push(download);
             self
         }
 
         /// Adoptium's `200 []`: no build of `major` for this platform.
         fn not_offered(mut self, major: &str) -> Self {
-            self.lookup(major).with_body("[]").create();
+            let lookup = self.lookup(major).with_body("[]").create();
+            self.mocks.push(lookup);
             self
         }
 
         /// A lookup of `major` that fails outright.
         fn failing(mut self, major: &str) -> Self {
-            self.lookup(major).with_status(500).create();
+            let lookup = self.lookup(major).with_status(500).create();
+            self.mocks.push(lookup);
             self
         }
 
@@ -2703,13 +2731,13 @@ mod tests {
         }
 
         fn assert(&self) {
-            for download in &self.downloads {
-                download.assert();
+            for mock in &self.mocks {
+                mock.assert();
             }
         }
     }
 
-    fn names(names: &[&str]) -> HashSet<Request> {
+    fn names(names: &[&str]) -> Vec<Request> {
         names.iter().map(|name| request(name)).collect()
     }
 
@@ -2720,14 +2748,7 @@ mod tests {
         requests: &[&str],
         active: Option<&Path>,
     ) -> InstallRun {
-        install_each(
-            &adoptium.client(),
-            store,
-            names(requests),
-            active,
-            false,
-            |_| Ok(()),
-        )
+        install_each::<std::io::Sink>(&adoptium.client(), store, names(requests), active, None)
     }
 
     /// A wrapped run whose payload goes to `out`.
@@ -2743,15 +2764,7 @@ mod tests {
             store,
             names(requests),
             active,
-            true,
-            |repointed| {
-                if let Some(java_home) = repointed {
-                    writeln!(out, "export JAVA_HOME='{}'", java_home.display())?;
-                }
-                writeln!(out, "# jlo'end")?;
-                out.flush()?;
-                Ok(())
-            },
+            Some(Payload::new(out)),
         )
     }
 
@@ -2822,7 +2835,10 @@ mod tests {
 
         adoptium.assert();
         assert!(run.error.is_none(), "{:?}", run.error);
-        assert!(run.replaced.is_empty());
+        assert_eq!(
+            run.names,
+            vec![(request("21"), NameResult::UpToDate("21.0.12+7".to_string()))]
+        );
         assert!(!dir.path().join("21.0.11+9").exists());
         assert!(dir.path().join("21.0.10+5").exists());
     }
@@ -2839,6 +2855,13 @@ mod tests {
 
         adoptium.assert();
         assert!(run.error.is_none(), "{:?}", run.error);
+        assert_eq!(
+            run.names,
+            vec![(
+                request("21"),
+                NameResult::UpToDate("v21.0.11+9".to_string())
+            )]
+        );
         assert!(!dir.path().join("21.0.11+9").exists());
     }
 
@@ -2856,10 +2879,7 @@ mod tests {
 
         adoptium.assert();
         assert!(run.error.is_none(), "{:?}", run.error);
-        assert_eq!(
-            run.replaced,
-            vec![(request("21"), vec!["21.0.5+11".to_string()])]
-        );
+        assert_eq!(run.names, vec![(request("21"), installed(&["21.0.5+11"]))]);
         assert!(dir.path().join("21.0.9+10").exists());
         assert!(dir.path().join("21.0.10-beta+3").exists());
     }
@@ -2877,6 +2897,13 @@ mod tests {
 
         adoptium.assert();
         assert!(run.error.is_none(), "{:?}", run.error);
+        assert_eq!(
+            run.names,
+            vec![
+                (request("8"), NameResult::NotOffered),
+                (request("21"), installed(&[]))
+            ]
+        );
         assert!(dir.path().join("21.0.9+10").exists());
     }
 
@@ -2901,6 +2928,8 @@ mod tests {
             format!("{:#}", error.error).contains("offers no build of '30' or '8'"),
             "{error:?}"
         );
+        // Named in the error, so not skipped one by one as well.
+        assert!(run.names.is_empty());
         assert!(out.is_empty());
         assert!(fs::read_dir(dir.path()).unwrap().next().is_none());
     }
@@ -2932,6 +2961,7 @@ mod tests {
             format!("{:#}", error.error).contains("HTTP 500"),
             "{error:?}"
         );
+        assert!(run.names.is_empty());
         assert!(out.is_empty(), "the shell was told something");
         assert!(dir.path().join("21.0.5+11").exists());
         assert!(!dir.path().join("21.0.9+10").exists());
@@ -3077,6 +3107,26 @@ mod tests {
             "{error:?}"
         );
         assert!(dir.path().join("21.0.5+11").exists());
+    }
+
+    /// A name given twice is one lookup and one download.
+    #[test]
+    fn the_run_takes_each_name_once() {
+        let dir = tempdir().unwrap();
+        let adoptium = Adoptium::new().offer("21", "21.0.9+10", 1, true);
+
+        let run = run_unwrapped(&adoptium, &JdkStore::at(dir.path()), &["21", "21"], None);
+
+        adoptium.assert();
+        assert!(run.error.is_none(), "{:?}", run.error);
+        assert_eq!(run.names, vec![(request("21"), installed(&[]))]);
+    }
+
+    fn installed(replaced: &[&str]) -> NameResult {
+        NameResult::Installed {
+            replaced: replaced.iter().map(ToString::to_string).collect(),
+            failures: Vec::new(),
+        }
     }
 
     // -- install --

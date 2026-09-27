@@ -43,19 +43,61 @@ pub(crate) const WRAPPED: &str = "__wrapped";
 /// outside quotes is code jlo writes.
 const END: &str = "# jlo'end";
 
-/// Write shell statements to stdout.
-///
-/// For the wrapper they are joined with `&&`, so the first one that fails
-/// stops the rest and fails the `eval`, and end with [`END`] - also when there
-/// are none, so "nothing to do" is told apart from "cut short". Any write
-/// failure is an error: a payload that did not arrive whole is one the shell
-/// did not apply. Anyone else gets one statement per line, as always.
+/// Write shell statements to stdout: as a [`Payload`] for the wrapper, one
+/// statement per line for anyone else, as always.
 pub(crate) fn emit(statements: &[String], wrapped: bool) -> anyhow::Result<()> {
     if !wrapped {
         ui::print_lines(statements.iter().cloned());
         return Ok(());
     }
-    write_payload(&mut std::io::stdout().lock(), statements).context("could not write to stdout")
+    Payload::stdout().write(statements)
+}
+
+/// The stdout of a *wrapped call*: what the `jlo` shell function evaluates.
+///
+/// Owning one is knowing that the calling shell follows what is written here,
+/// which is what lets `install` and `update` delete the build it is on. It is
+/// written once - both methods consume it - and always whole: the statements
+/// joined with `&&`, so the first one that fails stops the rest and fails the
+/// `eval`, then [`END`] - also when there are none, so "nothing to do" is told
+/// apart from "cut short" - then flushed. Any write or flush failure is an
+/// error: a payload that did not arrive whole is one the shell did not apply.
+pub(crate) struct Payload<W: std::io::Write> {
+    out: W,
+}
+
+impl Payload<std::io::Stdout> {
+    pub(crate) fn stdout() -> Self {
+        Self {
+            out: std::io::stdout(),
+        }
+    }
+}
+
+impl<W: std::io::Write> Payload<W> {
+    #[cfg(test)]
+    pub(crate) fn new(out: W) -> Self {
+        Self { out }
+    }
+
+    pub(crate) fn write(mut self, statements: &[String]) -> anyhow::Result<()> {
+        write_payload(&mut self.out, statements).context("could not write to stdout")
+    }
+
+    /// Move the shell to `java_home` - the [`export_lines`] `env` would
+    /// print - or, with `None`, tell it there is nothing to do.
+    pub(crate) fn follow(
+        self,
+        java_home: Option<&Path>,
+        active: Option<&Path>,
+        jdk_base: &Path,
+    ) -> anyhow::Result<()> {
+        let exports = match java_home {
+            Some(java_home) => export_lines(java_home, active, &current_path()?, jdk_base)?,
+            None => Vec::new(),
+        };
+        self.write(&exports)
+    }
 }
 
 fn write_payload(out: &mut impl std::io::Write, statements: &[String]) -> std::io::Result<()> {
@@ -74,7 +116,7 @@ fn write_payload(out: &mut impl std::io::Write, statements: &[String]) -> std::i
 /// Both current values arrive as arguments rather than being read here, so the
 /// decision is testable without mutating the process environment. Collected
 /// rather than printed as they are decided: both lines are one environment,
-/// written in one go by [`emit`].
+/// written in one go by [`emit`] or a [`Payload`].
 pub(crate) fn export_lines(
     java_home: &Path,
     active: Option<&Path>,

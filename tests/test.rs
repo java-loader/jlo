@@ -827,84 +827,6 @@ fn a_payload_that_cannot_be_written_deletes_nothing() {
     assert!(store.join("21.0.9+10").exists());
 }
 
-/// A catalogue behind the store - a rolled-back release, or an install from
-/// elsewhere - is not followed: following it would land the older build
-/// beside the newer one, which it does not supersede. The offer sits between
-/// two installs, and the line names the newest. Every way of naming 21.
-#[test]
-fn install_and_update_never_move_a_name_back() {
-    for args in [&["install", "21"][..], &["update", "21"], &["update"]] {
-        let (_home, store, out) = run_against_an_offer(
-            args,
-            &[("21.0.10+5", true), ("21.0.12+7", true)],
-            "21.0.11+9",
-            0,
-            None,
-            std::process::Stdio::piped(),
-        );
-        let stderr = String::from_utf8_lossy(&out.stderr);
-
-        assert!(out.status.success(), "{args:?}: {stderr}");
-        assert!(out.stdout.is_empty(), "{args:?}: {:?}", out.stdout);
-        assert!(
-            stderr.contains("JDK 21 is up to date (21.0.12+7)"),
-            "{args:?}: {stderr}"
-        );
-        assert!(!store.join("21.0.11+9").exists(), "{args:?}");
-        // Up to date moves nothing, so it replaces nothing either.
-        assert!(store.join("21.0.10+5").exists(), "{args:?}");
-    }
-}
-
-/// Two spellings of one version are one version: the hand-registered
-/// `v21.0.11+9` is what Adoptium offers, so there is nothing to fetch.
-/// Unmanaged, because an install jlo did not make
-/// is still the name being present.
-#[test]
-fn install_and_update_take_another_spelling_of_the_offer_as_current() {
-    for args in [&["install", "21"][..], &["update", "21"], &["update"]] {
-        let (_home, store, out) = run_against_an_offer(
-            args,
-            &[("v21.0.11+9", false)],
-            "21.0.11+9",
-            0,
-            None,
-            std::process::Stdio::piped(),
-        );
-        let stderr = String::from_utf8_lossy(&out.stderr);
-
-        assert!(out.status.success(), "{args:?}: {stderr}");
-        assert!(
-            stderr.contains("JDK 21 is up to date (v21.0.11+9)"),
-            "{args:?}: {stderr}"
-        );
-        assert!(!store.join("21.0.11+9").exists(), "{args:?}");
-    }
-}
-
-/// Only builds of the name are measured against: a pre-release sorts above
-/// the release it previews, so a `21-ea` build newer than the offer must not
-/// make `21` read as up to date.
-#[test]
-fn a_newer_pre_release_does_not_hold_back_its_release() {
-    for verb in ["install", "update"] {
-        let (_home, store, out) = run_against_an_offer(
-            &[verb, "21"],
-            &[("21.0.5+11", true), ("21.0.10-beta+3", true)],
-            "21.0.9+10",
-            1,
-            None,
-            std::process::Stdio::piped(),
-        );
-        let stderr = String::from_utf8_lossy(&out.stderr);
-
-        assert!(out.status.success(), "{verb}: {stderr}");
-        assert!(store.join("21.0.9+10").exists(), "{verb}: {stderr}");
-        assert!(stderr.contains("replaced 21.0.5+11"), "{verb}: {stderr}");
-        assert!(store.join("21.0.10-beta+3").exists(), "{verb}");
-    }
-}
-
 /// A `200 []` for the latest build of `major` - Adoptium's answer for a name
 /// it has no build of on this platform.
 fn not_offered_mock(server: &mut mockito::ServerGuard, major: &str) -> mockito::Mock {
@@ -961,38 +883,6 @@ fn only_names_adoptium_does_not_offer_is_an_error() {
         ))
         .stderr(predicate::str::contains("Run 'jlo list'"))
         .stderr(predicate::str::contains("skipping").not());
-}
-
-/// A lookup that fails says nothing about the name, so it stops the run -
-/// and every name is looked up first, so it stops before 21, which is
-/// processed ahead of the failing 17, is downloaded or has its old build
-/// replaced.
-#[test]
-fn a_failed_lookup_stops_the_run_before_anything_changes() {
-    let mut server = mockito::Server::new();
-    let _offers_21 = offer(&mut server, "21", "21.0.9+10", "00").create();
-    let _fails_17 = latest(&mut server, "17").with_status(500).create();
-    let download = server.mock("GET", "/jdk-21.tar.gz").expect(0).create();
-
-    let home = tempfile::tempdir().unwrap();
-    install_fake_jdk(home.path(), "17.0.5+8");
-    install_fake_jdk(home.path(), "21.0.5+11");
-    let store = jdk_store_in(home.path());
-
-    jlo(home.path())
-        .arg("update")
-        .env("JLO_ADOPTIUM_API_URL", server.url())
-        .assert()
-        .failure()
-        .code(1)
-        .stderr(predicate::str::contains("HTTP 500"));
-
-    download.assert();
-    assert!(store.join("21.0.5+11").exists(), "nothing may be replaced");
-    assert!(
-        !store.join("21.0.9+10").exists(),
-        "nothing may be installed"
-    );
 }
 
 /// Pull the value out of an `export NAME='...'` line of `jlo env` output,

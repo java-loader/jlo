@@ -3,7 +3,7 @@ use crate::conf::{Resolved, Source};
 use crate::request::Request;
 use crate::resolve::Active;
 use crate::store::{
-    InstallRun, NameGroup, RemoveReport, Status, quoted_list, supersedes_every_install,
+    InstallRun, NameGroup, NameResult, RemoveReport, Status, quoted_list, supersedes_every_install,
 };
 use clap::builder::styling::Styles;
 use console::style;
@@ -137,7 +137,7 @@ impl InstallUi {
 /// silence is the answer.
 ///
 /// `version` is the newest build installed.
-pub(crate) fn up_to_date(name: &str, version: &str) {
+fn up_to_date(name: &str, version: &str) {
     eprintln!(
         "{} JDK {} is up to date {}",
         style("✓").green().for_stderr(),
@@ -162,7 +162,7 @@ pub(crate) fn not_offered(requests: &[Request]) -> String {
 /// A name `install`/`update` passes over because Adoptium offers no build of
 /// it here, while other names still go ahead. Worded like the warning for a
 /// version that does not parse, which is skipped the same way.
-pub(crate) fn skipping_not_offered(request: Request) {
+fn skipping_not_offered(request: Request) {
     warning!(
         "skipping '{request}': Adoptium offers no build of it for {}",
         platform()
@@ -178,7 +178,7 @@ pub(crate) const NOT_OFFERED_HINT: &str = "Run 'jlo list' to see what is availab
 /// A pre-release says so. Its stream publishes weekly and a bare `jlo update`
 /// moves it, so these lines recur on every run - one that did not read as a
 /// preview being swapped for the next would pass for a patch release.
-pub(crate) fn replaced(request: Request, removed: &[String], failures: &[String]) {
+fn replaced(request: Request, removed: &[String], failures: &[String]) {
     if !removed.is_empty() {
         note(replaced_line(request, removed));
     }
@@ -193,9 +193,36 @@ fn replaced_line(request: Request, removed: &[String]) -> String {
     )
 }
 
-/// The lines `install` and `update` end on: how many builds they deleted,
-/// and whether the shell moved - or why the build it is on was kept.
+/// Everything `install` and `update` say but the live progress of each
+/// download: per name, then how many builds they deleted, and whether the
+/// shell moved - or why the build it is on was kept.
+///
+/// Grouped by kind rather than per name in order, because the `replaced`
+/// lines belong directly under the install summaries the downloads left.
 pub(crate) fn update_report(run: &InstallRun) {
+    for (request, result) in &run.names {
+        if let NameResult::Installed {
+            replaced: removed,
+            failures,
+        } = result
+        {
+            replaced(*request, removed, failures);
+        }
+    }
+    for (request, result) in &run.names {
+        if *result == NameResult::NotOffered {
+            skipping_not_offered(*request);
+        }
+    }
+    for (request, result) in &run.names {
+        if let NameResult::UpToDate(newest) = result {
+            up_to_date(&request.to_string(), newest);
+        }
+    }
+    let mut requests: Vec<Request> = run.names.iter().map(|(request, _)| *request).collect();
+    requests.sort_unstable_by_key(|request| request.listing_order());
+    announce_released_ea(&requests, &run.released);
+
     let count = run.removed_count();
     if count > 0 {
         print_removed(count, "superseded JDK");
@@ -603,7 +630,7 @@ fn released_ea_names(requests: &[Request], released: &[i64]) -> Vec<Request> {
 ///
 /// Pure: the caller supplies the released majors from whatever it already
 /// holds, so the emit site owes this no extra request.
-pub(crate) fn announce_released_ea(requests: &[Request], released: &[i64]) {
+fn announce_released_ea(requests: &[Request], released: &[i64]) {
     for request in released_ea_names(requests, released) {
         hint!("{}", ea_is_now_released(request));
     }

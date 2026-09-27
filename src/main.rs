@@ -24,7 +24,6 @@ use crate::shellenv::parse_exec_args;
 use crate::store::{JdkStore, RemoveError};
 use anyhow::{Context, anyhow};
 use clap::Parser;
-use std::collections::HashSet;
 use std::env;
 use std::io::IsTerminal;
 use std::path::PathBuf;
@@ -461,7 +460,7 @@ fn update_jdks(
         if installed.is_empty() {
             return Err(anyhow!("no installed JDKs to update").into());
         }
-        installed.into_iter().collect()
+        installed
     } else {
         requested_versions(versions, "update", &store, client)?
     };
@@ -479,7 +478,7 @@ fn update_jdks(
 fn install_names(
     client: &AdoptiumClient,
     store: &JdkStore,
-    requests: HashSet<Request>,
+    requests: Vec<Request>,
     wrapped: bool,
 ) -> Result<(), CommandError> {
     let active = active_java_home();
@@ -488,26 +487,14 @@ fn install_names(
         store,
         requests,
         active.as_deref(),
-        wrapped,
-        |repointed| {
-            let exports = match repointed {
-                Some(java_home) => shellenv::export_lines(
-                    java_home,
-                    active.as_deref(),
-                    &shellenv::current_path()?,
-                    store.base(),
-                )?,
-                None => Vec::new(),
-            };
-            shellenv::emit(&exports, wrapped)
-        },
+        wrapped.then(shellenv::Payload::stdout),
     );
     ui::update_report(&run);
 
     if let Some(e) = run.error {
         return Err(e);
     }
-    removal_failed(run.failures.len(), "superseded JDK")
+    removal_failed(run.failure_count(), "superseded JDK")
 }
 
 /// J'Lo's own state directory — where `default.jlorc` lives.

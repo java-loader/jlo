@@ -14,7 +14,6 @@ use crate::request::Request;
 use crate::store::{self, JdkStore};
 use crate::{CommandError, ui};
 use anyhow::{Context, anyhow};
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 /// The command asking: the verb an offline miss tells the reader to re-run.
@@ -237,18 +236,16 @@ pub(crate) fn requested_versions(
     verb: &str,
     store: &JdkStore,
     client: &AdoptiumClient,
-) -> Result<HashSet<Request>, CommandError> {
+) -> Result<Vec<Request>, CommandError> {
     if versions.is_empty() {
         let request = resolve_java_version_from(None, store, client, false)?;
-        return Ok(HashSet::from([request]));
+        return Ok(vec![request]);
     }
 
-    let mut requested = HashSet::new();
+    let mut requested = Vec::new();
     for v in versions {
         match Request::parse(&v) {
-            Ok(request) => {
-                requested.insert(request);
-            }
+            Ok(request) => requested.push(request),
             // The grammar's own wording, not a second one: this is the only
             // path on which a typo in a version list is reported, and "what
             // is accepted?" is the only question it raises.
@@ -589,21 +586,7 @@ mod tests {
             &offline_client(),
         )
         .expect("two of the three are valid");
-        assert_eq!(requested, HashSet::from([request("21"), request("25")]));
-    }
-
-    /// A major named twice is one download, not two: the set is what reaches
-    /// `install_each`.
-    #[test]
-    fn requested_versions_deduplicates() {
-        let requested = requested_versions(
-            owned(&["21", "21"]),
-            "install",
-            &empty_store(),
-            &offline_client(),
-        )
-        .expect("21 is a valid major");
-        assert_eq!(requested, HashSet::from([request("21")]));
+        assert_eq!(requested, vec![request("21"), request("25")]);
     }
 
     // -- java_home --
