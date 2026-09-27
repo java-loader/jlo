@@ -1,9 +1,7 @@
 //! The command-line contract.
 //!
 //! Every command, argument and line of help text lives here, so the help
-//! output and the dispatch are the same declaration. They used to be two
-//! hand-maintained strings, which drifted: the shell wrapper accepted `use` as an
-//! alias the binary had never heard of.
+//! output and the dispatch are the same declaration and cannot drift.
 
 use crate::ui;
 use clap::{Parser, Subcommand, ValueEnum};
@@ -141,12 +139,8 @@ impl From<CompletionShell> for clap_complete::Shell {
     }
 }
 
-/// The completion script for `shell`, as bytes.
-///
-/// Built here rather than at each call site because there are two: `jlo
-/// completions <shell>` writes it to stdout, and the install verb writes it
-/// into `$JLO_HOME/completions`. Both must see the same clap tree, or a
-/// generated file offers flags the binary beside it no longer has.
+/// One builder for `jlo completions` and the install verb, so a generated file
+/// never offers flags the binary beside it no longer has.
 pub(crate) fn completion_script(shell: clap_complete::Shell) -> Vec<u8> {
     use clap::CommandFactory;
 
@@ -156,39 +150,27 @@ pub(crate) fn completion_script(shell: clap_complete::Shell) -> Vec<u8> {
     out
 }
 
-/// Print the top-level help, exactly as `jlo -h` does.
 pub(crate) fn print_help() {
     use clap::CommandFactory;
 
-    // A closed stdout (`jlo | head`) is not an error worth reporting.
-    // `print_help` already ends its output with a newline; an extra
-    // `println!()` here would double it and desync `jlo` from `jlo --help`.
+    // A closed stdout is not an error worth reporting. No extra `println!()`:
+    // `print_help` already ends in a newline.
     let _ = Cli::command().print_help();
 }
 
-/// Print `jlo exec`'s own help, exactly as `jlo exec -h`/`jlo exec --help`
-/// would.
-///
-/// `exec` is intercepted from raw argv before clap parses, so clap never sees
-/// its `-h`/`--help`; `cmd_exec` calls this directly instead. `long` selects
-/// between the short (`-h`) and long (`--help`) renderings, matching clap's
-/// own convention.
+/// `exec` is intercepted before clap, so clap never sees its `-h`/`--help`.
+/// `long` is `--help`.
 pub(crate) fn print_exec_help(long: bool) {
     use clap::CommandFactory;
 
     let mut cmd = Cli::command();
-    // Propagates `bin_name` ("jlo" -> "jlo exec") and other derived state
-    // down to subcommands; without it the extracted `exec` Command doesn't
-    // know its own usage line starts with "jlo ".
+    // Without it the extracted `exec` does not know its usage line starts
+    // with "jlo ".
     cmd.build();
     let exec = cmd
         .find_subcommand_mut("exec")
         .expect("the `exec` subcommand is always registered");
-    // A closed stdout (`jlo exec 21 --help | head`) is not an error worth
-    // reporting.
-    // `print_help`/`print_long_help` already end their output with a
-    // newline; an extra `println!()` here would double it (see the
-    // corresponding comment in `print_help`).
+    // As in `print_help`: a closed stdout is fine, no extra newline.
     let _ = if long {
         exec.print_long_help()
     } else {
@@ -198,15 +180,10 @@ pub(crate) fn print_exec_help(long: bool) {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
-    // `about`/`long_about` are given explicitly here rather than as a doc
-    // comment: `clippy::doc_markdown` (part of `clippy::pedantic`, which is
-    // on for this crate) requires bare identifiers like JAVA_HOME to be
-    // backtick-quoted in rustdoc, but clap renders doc-comment backticks
-    // *literally* in terminal help - there is no markdown stripping. Plain
-    // attribute strings are not rustdoc, so the lint doesn't apply to them,
-    // and the help text can say JAVA_HOME without stray backticks leaking
-    // into what the user sees. (No backticks appear anywhere below, in any
-    // command's about/long_about or doc comment, for the same reason.)
+    // `about`/`long_about` are attribute strings, not doc comments:
+    // `clippy::doc_markdown` wants JAVA_HOME backtick-quoted in rustdoc, and
+    // clap renders doc-comment backticks literally. No backticks anywhere
+    // below, for the same reason.
     #[command(
         visible_alias = "use",
         about = "Set JAVA_HOME and PATH in the current shell",
@@ -296,10 +273,6 @@ the child only; the current shell is untouched.",
         args: Vec<String>,
     },
 
-    // No --check flag: a CI gate wanting "is this shell on the pinned JDK?"
-    // is exactly that, and the name is reserved for it. It is not built,
-    // because one asker is not yet a case - until a second turns up, the
-    // exit code stays "is there an answer at all".
     #[command(
         about = "Show which JDK is active in this shell, and why",
         long_about = "\
@@ -442,10 +415,8 @@ an install J'Lo did not make alone without calling it an error."
     /// falls back to when no .jlorc is found, ahead of the newest JDK
     /// already installed.
     Init {
-        // Required, with no "latest release" default: a .jlorc is committed
-        // and read by everyone on the project, so what it pins has to be a
-        // choice, not whatever was newest when someone ran init. A default
-        // can still be added after 1.0; taking one back would break users.
+        // No default: a committed .jlorc pins a choice, not whatever was
+        // newest. A default can be added after 1.0; taking one back cannot.
         /// Java version: a major (21) or a pre-release stream (28-ea)
         version: String,
 
@@ -482,6 +453,4 @@ under the bash 3.2 macOS ships, and still exits 0."
         /// Shell to generate completions for
         shell: CompletionShell,
     },
-    // The `sing` easter egg is deliberately NOT a variant here - see
-    // `main`'s comment for why.
 }
