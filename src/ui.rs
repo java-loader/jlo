@@ -456,6 +456,29 @@ fn print_foreign(foreign: &Foreign, after_section: bool) {
             .iter()
             .map(|name| format!("    {}", style(name).dim())),
     );
+    eprintln!();
+    for line in foreign_reasons(foreign.names) {
+        note(line);
+    }
+}
+
+/// Why jlo leaves the listed directories alone - without it, a JDK that works
+/// but is never used, updated or deleted reads as a bug. A bare version gets a
+/// line of its own: it is what an upgrade from 0.6.0 or earlier leaves behind.
+fn foreign_reasons(names: &[String]) -> Vec<String> {
+    let mut lines = vec![
+        "jlo only manages jlo-temurin-<version> directories and never touches these.".to_string(),
+    ];
+    if let Some(bare) = names
+        .iter()
+        .find(|name| crate::version::parse(name).is_ok())
+    {
+        lines.push(format!(
+            "Bare versions ({bare}) are from jlo 0.6.0 or earlier: \
+             delete them, then 'jlo install' what you need."
+        ));
+    }
+    lines
 }
 
 fn print_listing(rows: &[NameRow], foreign: &Foreign) {
@@ -1398,6 +1421,18 @@ mod tests {
     fn plain() {
         console::set_colors_enabled(false);
         console::set_colors_enabled_stderr(false);
+    }
+
+    /// The bare-version line only when there is a bare version to explain.
+    #[test]
+    fn foreign_reasons_explain_an_old_install_only_when_there_is_one() {
+        let ide = vec!["temurin-21.0.5".to_string()];
+        assert_eq!(foreign_reasons(&ide).len(), 1);
+
+        let old = vec!["17.0.20+101".to_string(), "temurin-21.0.5".to_string()];
+        let reasons = foreign_reasons(&old);
+        assert_eq!(reasons.len(), 2);
+        assert!(reasons[1].contains("17.0.20+101"), "{reasons:?}");
     }
 
     #[test]

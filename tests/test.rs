@@ -438,7 +438,11 @@ fn list_offline_names_the_directories_jlo_does_not_manage() {
         .success()
         .stdout("    21.0.5+11\n    temurin-21.0.1\n")
         .stderr(predicate::str::contains("No JDKs installed"))
-        .stderr(predicate::str::contains("Not managed by jlo"));
+        .stderr(predicate::str::contains("Not managed by jlo"))
+        .stderr(predicate::str::contains(
+            "jlo-temurin-<version> directories",
+        ))
+        .stderr(predicate::str::contains("Bare versions (21.0.5+11)"));
 
     install_fake_jdk(home.path(), "21.0.9+10");
 
