@@ -312,7 +312,7 @@ jobs:
           # The caveats' profile line gives a shell the 'jlo' function.
           share="$(brew --prefix)/opt/jlo/share/jlo"
           for sh in zsh bash; do
-            "$sh" -c "[ -r '$share/jlo.sh' ] && . '$share/jlo.sh' && typeset -f jlo >/dev/null && jlo --version"
+            "$sh" -c "if [ -r '$share/jlo.sh' ]; then . '$share/jlo.sh'; fi && typeset -f jlo >/dev/null && jlo --version"
           done
 
       # Plain shell and git, no third-party action: the one step that holds the

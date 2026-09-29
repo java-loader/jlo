@@ -27,9 +27,9 @@ class Jlo < Formula
   def caveats
     <<~EOS
       To use J'Lo, add this line to ~/.zshrc or ~/.bashrc:
-        [ -r #{opt_pkgshare}/jlo.sh ] && . #{opt_pkgshare}/jlo.sh
+        if [ -r #{opt_pkgshare}/jlo.sh ]; then . #{opt_pkgshare}/jlo.sh; fi
       Optional, to switch JDK on cd, add this line after it:
-        [ -r #{opt_pkgshare}/autoload.sh ] && . #{opt_pkgshare}/autoload.sh
+        if [ -r #{opt_pkgshare}/autoload.sh ]; then . #{opt_pkgshare}/autoload.sh; fi
       A login bash (what macOS terminals start) skips ~/.bashrc: there, use the
       first of ~/.bash_profile, ~/.bash_login, ~/.profile that exists, else
       ~/.bash_profile.
