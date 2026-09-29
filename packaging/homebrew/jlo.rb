@@ -26,13 +26,17 @@ class Jlo < Formula
 
   def caveats
     <<~EOS
-      To use J'Lo, add this line to ~/.zshrc or ~/.bashrc:
-        if [ -r #{opt_pkgshare}/jlo.sh ]; then . #{opt_pkgshare}/jlo.sh; fi
+      To use J'Lo, add this line to ~/.zshrc (bash: ~/.bash_profile):
+
+      [ -s #{opt_pkgshare}/jlo.sh ] && . #{opt_pkgshare}/jlo.sh
+
       Optional, to switch JDK on cd, add this line after it:
-        if [ -r #{opt_pkgshare}/autoload.sh ]; then . #{opt_pkgshare}/autoload.sh; fi
-      A login bash (what macOS terminals start) skips ~/.bashrc: there, use the
-      first of ~/.bash_profile, ~/.bash_login, ~/.profile that exists, else
-      ~/.bash_profile.
+
+      [ -s #{opt_pkgshare}/autoload.sh ] && . #{opt_pkgshare}/autoload.sh
+
+      Then open a new shell. A login bash (what macOS terminals start) skips
+      ~/.bashrc and reads only the first of ~/.bash_profile, ~/.bash_login,
+      ~/.profile that exists - put the lines there.
 
       Tab completion comes from Homebrew's shell completion setup.
 

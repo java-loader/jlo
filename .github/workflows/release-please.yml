@@ -312,7 +312,7 @@ jobs:
           # The profile lines exactly as the caveats print them: they give a
           # shell the 'jlo' function, and once uninstalled they must still let
           # a profile under set -eu finish.
-          lines=$(brew info java-loader/tap/jlo | sed -n 's/^  \(if \[ -r .*; fi\)$/\1/p')
+          lines=$(brew info java-loader/tap/jlo | grep -E '^\[ -s .+ \] && \. .+$')
           if [ "$(printf '%s\n' "$lines" | grep -c .)" -ne 2 ]; then
             echo "::error::the caveats do not print the two profile lines" >&2
             exit 1
