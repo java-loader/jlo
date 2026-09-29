@@ -309,10 +309,22 @@ jobs:
           brew audit --strict --online java-loader/tap/jlo
           brew install java-loader/tap/jlo
           brew test java-loader/tap/jlo
-          # The caveats' profile line gives a shell the 'jlo' function.
-          share="$(brew --prefix)/opt/jlo/share/jlo"
+          # The profile lines exactly as the caveats print them: they give a
+          # shell the 'jlo' function, and once uninstalled they must still let
+          # a profile under set -eu finish.
+          lines=$(brew info java-loader/tap/jlo | sed -n 's/^  \(if \[ -r .*; fi\)$/\1/p')
+          if [ "$(printf '%s\n' "$lines" | grep -c .)" -ne 2 ]; then
+            echo "::error::the caveats do not print the two profile lines" >&2
+            exit 1
+          fi
           for sh in zsh bash; do
-            "$sh" -c "if [ -r '$share/jlo.sh' ]; then . '$share/jlo.sh'; fi && typeset -f jlo >/dev/null && jlo --version"
+            "$sh" -euc "$lines
+          typeset -f jlo >/dev/null && jlo --version"
+          done
+          brew uninstall jlo
+          for sh in zsh bash; do
+            "$sh" -euc "$lines
+          echo 'profile finished after uninstall'"
           done
 
       # Plain shell and git, no third-party action: the one step that holds the
