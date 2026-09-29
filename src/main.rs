@@ -29,13 +29,14 @@ use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::process::exit;
 
-/// A failed command: the error, plus the advice line that belongs *under* it.
-/// Carried to `main` because printing the hint at the failure site would put
-/// it above the error.
+/// A failed command: the error, plus the advice line that belongs *under* it
+/// and, last, a line for the user to copy. Carried to `main` because printing
+/// the hint at the failure site would put it above the error.
 #[derive(Debug)]
 pub(crate) struct CommandError {
     error: anyhow::Error,
     hint: Option<String>,
+    command: Option<String>,
 }
 
 impl CommandError {
@@ -43,13 +44,25 @@ impl CommandError {
         Self {
             error,
             hint: Some(hint.into()),
+            command: None,
         }
+    }
+
+    /// Printed on a line of its own, at column 0 and styled as a command:
+    /// dimmed inside the hint it would be the easiest line to miss.
+    pub(crate) fn with_command(mut self, command: String) -> Self {
+        self.command = Some(command);
+        self
     }
 }
 
 impl From<anyhow::Error> for CommandError {
     fn from(error: anyhow::Error) -> Self {
-        Self { error, hint: None }
+        Self {
+            error,
+            hint: None,
+            command: None,
+        }
     }
 }
 
@@ -76,6 +89,9 @@ fn main() {
         ui::error!("{:#}", e.error);
         if let Some(hint) = e.hint {
             ui::hint!("{hint}");
+        }
+        if let Some(command) = e.command {
+            eprintln!("{}", ui::command(&command));
         }
         exit(1);
     }
@@ -168,22 +184,30 @@ fn cmd_env(
     offline: bool,
     wrapped: bool,
 ) -> Result<(), CommandError> {
+    // On a terminal nothing captures the exports: the 'jlo' shell function is
+    // missing, almost always because its profile line is. Refused before
+    // anything is resolved or downloaded, and naming that line, since exit 0
+    // with nothing changed reads as "it worked".
+    if !wrapped && std::io::stdout().is_terminal() {
+        let line = install::profile_line();
+        let error = CommandError::with_hint(
+            anyhow!("{}", ui::UNSOURCED_ENV_ERROR),
+            ui::unsourced_env_hint(version.as_deref(), line.is_some()),
+        );
+        return Err(match line {
+            Some(line) => error.with_command(line),
+            None => error,
+        });
+    }
     let store = JdkStore::discover()?;
-    let target = resolve::java_home(client, &store, version, offline, Verb::Env)?;
+    let java_home = resolve::java_home(client, &store, version, offline, Verb::Env)?;
     let exports = shellenv::export_lines(
-        &target.java_home,
+        &java_home,
         active_java_home().as_deref(),
         &shellenv::current_path()?,
         store.base(),
     )?;
     shellenv::emit(&exports, wrapped)?;
-
-    // On a terminal nothing captured the exports: exit 0 with nothing changed
-    // would send a CI step or an agent looking elsewhere for the problem.
-    if std::io::stdout().is_terminal() {
-        ui::hint!("{}", ui::unsourced_env_hint(&target.request.to_string()));
-    }
-
     Ok(())
 }
 
@@ -193,7 +217,7 @@ fn cmd_home(
     offline: bool,
 ) -> Result<(), CommandError> {
     let store = JdkStore::discover()?;
-    let java_home = resolve::java_home(client, &store, version, offline, Verb::Home)?.java_home;
+    let java_home = resolve::java_home(client, &store, version, offline, Verb::Home)?;
     // Lossy would hand `$(jlo home 21)` a path that does not exist.
     println!("{}", shellenv::path_str(&java_home)?);
     Ok(())
@@ -223,8 +247,8 @@ fn cmd_exec(client: &AdoptiumClient, args: &[String]) -> Result<(), CommandError
     // Never offline: declining to fetch the JDK would only move the failure.
     let store = JdkStore::discover()?;
     // `verb` only matters offline.
-    let target = resolve::java_home(client, &store, version, false, Verb::Home)?;
-    shellenv::exec_command(&target.java_home, &command)
+    let java_home = resolve::java_home(client, &store, version, false, Verb::Home)?;
+    shellenv::exec_command(&java_home, &command)
 }
 
 fn cmd_list(client: &AdoptiumClient, offline: bool) -> Result<(), CommandError> {

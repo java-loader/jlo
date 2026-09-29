@@ -756,6 +756,46 @@ fn source_line(path: &str) -> String {
     format!("[ -s {path} ] && . {path}")
 }
 
+/// The profile line that loads the `jlo.sh` belonging to this binary, when an
+/// install wrote one for it: the installer's under `$JLO_HOME`, or a Homebrew
+/// keg's, named by the `opt` path the caveats print. `None` for any other
+/// binary - a build in `target/`, say - which has no such line.
+pub(crate) fn profile_line() -> Option<String> {
+    if let Ok(home) = crate::home::jlo_home_dir() {
+        let layout = Layout::curl(home);
+        if is_current_exe(layout.binary()) && layout.entry(&JLO_SH).is_file() {
+            let home_dir = std::env::home_dir();
+            return Some(source_line(&snippet(&layout, home_dir.as_deref(), &JLO_SH)));
+        }
+    }
+    let exe = std::env::current_exe().ok()?.canonicalize().ok()?;
+    keg_jlo_sh(&exe).map(|jlo_sh| source_line(&shell_word(&display(&jlo_sh))))
+}
+
+/// A keg's binary is `<prefix>/Cellar/jlo/<version>/libexec/jlo-bin`; its
+/// `jlo.sh`, as a profile names it, is `<prefix>/opt/jlo/share/jlo/jlo.sh` -
+/// the path that survives `brew upgrade`. `None` unless both hold.
+fn keg_jlo_sh(exe: &Path) -> Option<PathBuf> {
+    let libexec = exe.parent()?;
+    let formula = libexec.parent()?.parent()?;
+    let cellar = formula.parent()?;
+    let named = |dir: &Path, name: &str| dir.file_name().is_some_and(|n| n == name);
+    if !(named(libexec, "libexec") && named(formula, "jlo") && named(cellar, "Cellar")) {
+        return None;
+    }
+    let jlo_sh = cellar.parent()?.join("opt/jlo/share/jlo").join(JLO_SH.name);
+    jlo_sh.is_file().then_some(jlo_sh)
+}
+
+/// `path` bare when no shell would read anything into it, so the line matches
+/// the one the caveats print; quoted otherwise.
+fn shell_word(path: &str) -> String {
+    let plain = path
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || "/._-+".contains(c));
+    if plain { path.to_string() } else { sq(path) }
+}
+
 /// Every value written into generated shell code is quoted: a `$`, a backtick
 /// or a quote in a `JLO_HOME` path would otherwise be code.
 use crate::shellenv::shell_quote as sq;
@@ -826,6 +866,31 @@ mod tests {
         let home = Path::new("/home/u");
         let layout = layout_at(Path::new("/opt/jlo"));
         assert_eq!(snippet(&layout, Some(home), &JLO_SH), "'/opt/jlo/jlo.sh'");
+    }
+
+    /// The keg's `jlo.sh` is found from the binary's real path and named by
+    /// the `opt` path, which outlives the versioned directory.
+    #[test]
+    fn a_keg_binary_names_the_opt_jlo_sh() {
+        let prefix = tempfile::tempdir().expect("tempdir");
+        let exe = prefix.path().join("Cellar/jlo/0.7.0/libexec/jlo-bin");
+        let jlo_sh = prefix.path().join("opt/jlo/share/jlo/jlo.sh");
+        assert_eq!(keg_jlo_sh(&exe), None, "no jlo.sh yet");
+        fs::create_dir_all(jlo_sh.parent().expect("parent")).expect("mkdir");
+        fs::write(&jlo_sh, "").expect("write");
+        assert_eq!(keg_jlo_sh(&exe), Some(jlo_sh));
+        let elsewhere = prefix.path().join("Cellar/other/0.7.0/libexec/jlo-bin");
+        assert_eq!(keg_jlo_sh(&elsewhere), None, "another formula's binary");
+    }
+
+    #[test]
+    fn a_path_is_quoted_only_when_a_shell_would_read_into_it() {
+        assert_eq!(
+            shell_word("/opt/homebrew/opt/jlo/share/jlo/jlo.sh"),
+            "/opt/homebrew/opt/jlo/share/jlo/jlo.sh"
+        );
+        assert_eq!(shell_word("/opt/my brew/jlo.sh"), "'/opt/my brew/jlo.sh'");
+        assert_eq!(shell_word("/opt/$x/jlo.sh"), "'/opt/$x/jlo.sh'");
     }
 
     #[test]

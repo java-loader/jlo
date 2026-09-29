@@ -191,3 +191,33 @@ pub(crate) fn squote(value: impl AsRef<Path>) -> String {
         value.as_ref().display().to_string().replace('\'', r"'\''")
     )
 }
+
+/// Run `program args` with stdout and stderr on a pseudo-terminal, the way a
+/// user's shell runs it; both come back merged, in `stdout`. python3 because
+/// `script` takes different flags on macOS and Linux - and not `pty.spawn`,
+/// which relays stdin and did not return under the test harness.
+#[allow(dead_code)]
+pub(crate) fn on_a_terminal(home: &Path, program: &Path, args: &[&str]) -> std::process::Output {
+    const RUN: &str = "\
+import os, subprocess, sys
+leader, follower = os.openpty()
+child = subprocess.Popen(sys.argv[1:], stdin=subprocess.DEVNULL, stdout=follower, stderr=follower)
+os.close(follower)
+while True:
+    try:
+        chunk = os.read(leader, 4096)
+    except OSError:
+        break
+    if not chunk:
+        break
+    sys.stdout.buffer.write(chunk)
+sys.exit(child.wait())
+";
+    hermetic("python3", home)
+        .arg("-c")
+        .arg(RUN)
+        .arg(program)
+        .args(args)
+        .output()
+        .unwrap()
+}

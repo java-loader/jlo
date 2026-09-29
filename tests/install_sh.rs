@@ -2148,3 +2148,35 @@ fn the_sweep_spares_the_staging_directory_the_running_binary_came_from() {
         "the staging directory the binary came from was not cleared"
     );
 }
+
+/// The installer's channel of the same rule: `jlo use 21` from a terminal
+/// without the function fails, naming the portable `$HOME/.jlo` line the
+/// installer itself prints. A binary no install wrote a `jlo.sh` for gets the
+/// refusal without a line.
+#[test]
+fn env_on_a_terminal_without_the_function_names_the_profile_line() {
+    let home = tempfile::tempdir().unwrap();
+    let home = home.path();
+    let bin = home.join(".jlo/bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::copy(jlo_bin(), bin.join("jlo-bin")).unwrap();
+    let out = hermetic(bin.join("jlo-bin"), home)
+        .arg("__install")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+
+    let out = common::on_a_terminal(home, &bin.join("jlo-bin"), &["use", "21"]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(1), "{text}");
+    assert!(
+        text.lines()
+            .any(|l| l.contains(r#"[ -s "$HOME/.jlo/jlo.sh" ] && . "$HOME/.jlo/jlo.sh""#)),
+        "the profile line is missing: {text}"
+    );
+
+    let out = common::on_a_terminal(home, &jlo_bin(), &["use", "21"]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(1), "{text}");
+    assert!(!text.contains("jlo.sh"), "a build names a line: {text}");
+}

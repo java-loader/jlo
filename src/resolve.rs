@@ -26,12 +26,6 @@ impl Verb {
     }
 }
 
-#[derive(Debug)]
-pub(crate) struct Target {
-    pub request: Request,
-    pub java_home: PathBuf,
-}
-
 /// What is active in this shell, and why. Wider than any one caller needs, so
 /// machine-readable output can report the same facts under the same names.
 #[derive(Debug)]
@@ -56,14 +50,13 @@ pub(crate) fn java_home(
     explicit: Option<String>,
     offline: bool,
     verb: Verb,
-) -> Result<Target, CommandError> {
+) -> Result<PathBuf, CommandError> {
     let request = resolve_java_version_from(explicit, store, client, offline)?;
-    let java_home = if offline {
-        offline_java_home(store, request, verb)?
+    if offline {
+        offline_java_home(store, request, verb)
     } else {
-        resolve_java_home(client, store, request)?
-    };
-    Ok(Target { request, java_home })
+        Ok(resolve_java_home(client, store, request)?)
+    }
 }
 
 fn resolve_java_version_from(
@@ -319,7 +312,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let store = store_with(dir.path(), "21.0.3+9");
 
-        let target = java_home(
+        let home = java_home(
             &offline_client(),
             &store,
             Some("21".into()),
@@ -327,8 +320,7 @@ mod tests {
             Verb::Home,
         )
         .expect("21 is installed");
-        assert_eq!(target.java_home, entry(dir.path(), "21.0.3+9"));
-        assert_eq!(target.request, request("21"));
+        assert_eq!(home, entry(dir.path(), "21.0.3+9"));
     }
 
     /// Online, an installed JDK is answered before the client is used: the
@@ -338,7 +330,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let store = store_with(dir.path(), "21.0.3+9");
 
-        let target = java_home(
+        let home = java_home(
             &offline_client(),
             &store,
             Some("21".into()),
@@ -346,7 +338,7 @@ mod tests {
             Verb::Home,
         )
         .expect("21 is installed");
-        assert_eq!(target.java_home, entry(dir.path(), "21.0.3+9"));
+        assert_eq!(home, entry(dir.path(), "21.0.3+9"));
     }
 
     // -- cascade --

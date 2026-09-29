@@ -11,7 +11,7 @@
 
 mod common;
 
-use common::{INTERPRETERS, chmod, hermetic, jlo_bin, shells};
+use common::{INTERPRETERS, chmod, hermetic, jlo_bin, on_a_terminal, shells};
 use std::path::{Path, PathBuf};
 use std::process::Output;
 
@@ -256,4 +256,49 @@ fn a_malformed_keg_call_writes_nothing() {
         );
         assert!(files(&home).is_empty(), "{args:?} wrote to HOME");
     }
+}
+
+/// A user who skipped the caveats runs `jlo use 21` - the plain binary, from a
+/// terminal. It must fail before resolving anything, and print the caveats'
+/// line for the keg it belongs to, with the `opt` path. Found from the
+/// binary's real path, so a keg is laid out the way brew lays it out.
+#[test]
+fn env_on_a_terminal_without_the_function_names_the_keg_line() {
+    let prefix = tempfile::tempdir().unwrap();
+    let prefix = prefix.path().canonicalize().unwrap();
+    let keg = prefix.join("Cellar/jlo/0.7.0");
+    let binary = keg.join("libexec/jlo-bin");
+    std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
+    std::fs::copy(jlo_bin(), &binary).unwrap();
+    let out = install_keg(
+        &[
+            "--keg",
+            keg.join("share/jlo").to_str().unwrap(),
+            "--binary",
+            prefix.join("opt/jlo/libexec/jlo-bin").to_str().unwrap(),
+        ],
+        &prefix,
+    );
+    assert!(out.status.success(), "{out:?}");
+    std::fs::create_dir_all(prefix.join("opt")).unwrap();
+    std::os::unix::fs::symlink(&keg, prefix.join("opt/jlo")).unwrap();
+
+    let out = on_a_terminal(
+        &prefix,
+        &prefix.join("opt/jlo/libexec/jlo-bin"),
+        &["use", "21"],
+    );
+    let text = String::from_utf8_lossy(&out.stdout);
+    let jlo_sh = prefix.join("opt/jlo/share/jlo/jlo.sh");
+    let line = format!("[ -s {0} ] && . {0}", jlo_sh.display());
+    assert_eq!(out.status.code(), Some(1), "{text}");
+    assert!(
+        text.lines()
+            .any(|l| l.contains(&line) && !l.starts_with(' ')),
+        "the keg's line is not printed on a line of its own: {text}"
+    );
+    assert!(
+        !text.contains("export PATH"),
+        "exports reached the terminal: {text}"
+    );
 }

@@ -517,16 +517,30 @@ pub(crate) fn pin_mismatch(pinned: &Resolved) {
 
 pub(crate) const NO_ACTIVE_JDK_HINT: &str = "Run 'jlo env' to activate a JDK in this shell.";
 
-/// The line `jlo env` ends on when its exports went nowhere. Keyed on stdout
-/// being a terminal: the wrapper and the autoload hook capture stdout, so on
-/// the sourced path this never fires. `jlo-bin env 21 > file` stays silent
-/// too, an accepted gap.
-pub(crate) fn unsourced_env_hint(java_version: &str) -> String {
-    format!(
-        "jlo env prints exports for a shell to source; it did not change anything. \
-         Use 'jlo exec {java_version} -- <command>' or \
-         'export JAVA_HOME=\"$(jlo home {java_version})\"'."
-    )
+/// `jlo env` with stdout on a terminal: nothing is there to evaluate its
+/// exports. Keyed on the terminal, not on the wrapped prefix alone: the wrapper
+/// and the autoload hook capture stdout, and `jlo-bin env 21 > file` is a
+/// deliberate use, so neither is refused.
+pub(crate) const UNSOURCED_ENV_ERROR: &str =
+    "this shell has no 'jlo' function, so jlo env cannot change it.";
+
+/// Under [`UNSOURCED_ENV_ERROR`]: the commands that work without the function,
+/// and - when this install has a profile line to name - where it goes. The
+/// line itself follows on its own, as a command.
+pub(crate) fn unsourced_env_hint(version: Option<&str>, has_profile_line: bool) -> String {
+    let v = version.map(|v| format!(" {v}")).unwrap_or_default();
+    let alternatives = format!(
+        "For one command instead: 'jlo exec{v} -- <command>', or \
+         'export JAVA_HOME=\"$(jlo home{v})\"'."
+    );
+    if has_profile_line {
+        format!(
+            "{alternatives}\nThe function comes from a line in your shell profile. Add it to \
+             ~/.zshrc, or for bash to ~/.bash_profile, then open a new shell:"
+        )
+    } else {
+        alternatives
+    }
 }
 
 pub(crate) fn newer_jlo_hint(latest: &str) -> String {
@@ -986,15 +1000,19 @@ mod tests {
 
     // -- unsourced_env_hint --
 
-    /// Both commands the hint hands over carry the version the user asked for.
+    /// Both commands the hint hands over carry the version the user asked
+    /// for, and without one they resolve it the way env would have.
     #[test]
     fn unsourced_env_hint_names_both_alternatives() {
-        let hint = unsourced_env_hint("21");
-        assert!(hint.contains("jlo exec 21 -- <command>"), "{hint}");
+        let hint = unsourced_env_hint(Some("21"), false);
+        assert!(hint.contains("'jlo exec 21 -- <command>'"), "{hint}");
         assert!(
-            hint.contains("export JAVA_HOME=\"$(jlo home 21)\""),
+            hint.contains("'export JAVA_HOME=\"$(jlo home 21)\"'"),
             "{hint}"
         );
+        let bare = unsourced_env_hint(None, false);
+        assert!(bare.contains("'jlo exec -- <command>'"), "{bare}");
+        assert!(bare.contains("\"$(jlo home)\""), "{bare}");
     }
 
     // -- provenance_line --
