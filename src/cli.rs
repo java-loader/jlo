@@ -40,11 +40,12 @@ than downloading. update instead takes every installed name.
 {examples}
 
 {environment}
-  JLO_HOME   J'Lo's own directory (default ~/.jlo): the shell scripts,
-             the generated completions and default.jlorc. This is NOT
-             where JDKs are installed - those go to the IntelliJ IDEA
-             directory (~/Library/Java/JavaVirtualMachines on macOS,
-             ~/.jdks elsewhere), which is not configurable.",
+  JLO_HOME   J'Lo's own directory (default ~/.jlo): default.jlorc and,
+             unless Homebrew installed J'Lo, its shell scripts and
+             completions. This is NOT where JDKs are installed - those
+             go to the IntelliJ IDEA directory
+             (~/Library/Java/JavaVirtualMachines on macOS, ~/.jdks
+             elsewhere), which is not configurable.",
         examples = examples(EXAMPLES.iter()),
         environment = ui::help_heading("Environment:"),
     )
@@ -443,8 +444,8 @@ rule is the selector."
         long_about = "\
 Print a shell completion script
 
-The installer writes these to $JLO_HOME/completions. To load one
-directly:
+The installer writes these to $JLO_HOME/completions, Homebrew to its own
+completion directories. To load one directly:
 
   eval \"$(jlo completions bash)\"
 
