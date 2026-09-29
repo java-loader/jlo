@@ -5,8 +5,8 @@ mod common;
 
 use assert_cmd::Command;
 use common::{
-    INTERPRETERS, chmod, fake_jdk_archive, hermetic, install_fake_jdk, jdk_store_in, jlo, jlo_bin,
-    jlo_online, latest, offer, shells, squote,
+    INTERPRETERS, chmod, fake_jdk_archive, hermetic, install_fake_jdk, jdk_entry, jdk_store_in,
+    jlo, jlo_bin, jlo_online, latest, offer, shells, squote,
 };
 use predicates::prelude::*;
 use serial_test::serial;
@@ -212,16 +212,16 @@ fn remove_requires_at_least_one_version() {
 /// The rule-based half of `remove` had no command-level test at all while it
 /// was `jlo prune`: every one of its 12 tests called `JdkStore::prune`
 /// directly, so the wiring and the report were unproven. This covers what
-/// went, what stayed, and the unmanaged install left alone, in one run.
+/// went, what stayed, and the foreign directories left alone, in one run.
 #[test]
-fn remove_superseded_deletes_only_the_older_managed_builds() {
+fn remove_superseded_deletes_only_the_older_builds() {
     let home = tempfile::tempdir().unwrap();
     install_fake_jdk(home.path(), "21.0.11+10");
     install_fake_jdk(home.path(), "21.0.9+10");
-    // No `.jlo-managed` marker: the rule skips it rather than refusing, since
-    // nobody named it.
-    let unmanaged = jdk_store_in(home.path()).join("17.0.11+10");
-    std::fs::create_dir_all(unmanaged.join("bin")).unwrap();
+    // An earlier jlo's bare-version install: older than the 21 jlo holds,
+    // and still not jlo's.
+    let bare = jdk_store_in(home.path()).join("21.0.5+11");
+    std::fs::create_dir_all(bare.join("bin")).unwrap();
     // IntelliJ's name for a JDK it downloaded into the shared directory. Not
     // an install jlo can see, so neither counted nor warned about - a warning
     // would repeat on every run for as long as IntelliJ keeps it.
@@ -236,12 +236,19 @@ fn remove_superseded_deletes_only_the_older_managed_builds() {
         .stdout(predicate::str::is_empty())
         .stderr(predicate::str::contains("21.0.9+10"))
         .stderr(predicate::str::contains("Removed 1 JDK"))
-        .stderr(predicate::str::contains("temurin").not());
+        .stderr(predicate::str::contains("temurin-21.0.1").not())
+        .stderr(predicate::str::contains("21.0.5+11").not());
 
     let store = jdk_store_in(home.path());
-    assert!(store.join("21.0.11+10").exists(), "the newest minor stays");
-    assert!(!store.join("21.0.9+10").exists(), "the older minor goes");
-    assert!(unmanaged.exists(), "an unmanaged install is never deleted");
+    assert!(
+        store.join("jlo-temurin-21.0.11+10").exists(),
+        "the newest minor stays"
+    );
+    assert!(
+        !store.join("jlo-temurin-21.0.9+10").exists(),
+        "the older minor goes"
+    );
+    assert!(bare.exists(), "a bare-version install is never deleted");
     assert!(vendor.exists(), "a vendor-named JDK is never deleted");
 }
 
@@ -414,6 +421,38 @@ fn list_offline_succeeds_without_network() {
         .stderr(predicate::str::contains("No JDKs installed"));
 }
 
+/// What jlo will not touch is still shown, so the user is not left wondering
+/// why an earlier jlo's install or an IDE's download never goes away. Also
+/// when no JDK of jlo's is installed at all - the case right after upgrading
+/// past the bare-version layout.
+#[test]
+fn list_offline_names_the_directories_jlo_does_not_manage() {
+    let home = tempfile::tempdir().unwrap();
+    let store = jdk_store_in(home.path());
+    std::fs::create_dir_all(store.join("21.0.5+11/bin")).unwrap();
+    std::fs::create_dir_all(store.join("temurin-21.0.1")).unwrap();
+
+    jlo(home.path())
+        .args(["list", "--offline"])
+        .assert()
+        .success()
+        .stdout("    21.0.5+11\n    temurin-21.0.1\n")
+        .stderr(predicate::str::contains("No JDKs installed"))
+        .stderr(predicate::str::contains("Not managed by jlo"));
+
+    install_fake_jdk(home.path(), "21.0.9+10");
+
+    jlo(home.path())
+        .args(["list", "--offline"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("21.0.9+10"))
+        .stdout(predicate::str::contains(
+            "    21.0.5+11\n    temurin-21.0.1\n",
+        ))
+        .stderr(predicate::str::contains("Not managed by jlo"));
+}
+
 #[test]
 fn list_remote_shows_available_versions() {
     let mut server = mockito::Server::new();
@@ -456,7 +495,7 @@ fn list_remote_gives_a_superseded_build_its_own_line() {
     let home = tempfile::tempdir().unwrap();
     install_fake_jdk(home.path(), "21.0.11+10.0.LTS");
     install_fake_jdk(home.path(), "21.0.9+10.0.LTS");
-    let active = jdk_store_in(home.path()).join("21.0.9+10.0.LTS");
+    let active = jdk_entry(home.path(), "21.0.9+10.0.LTS");
 
     jlo(home.path())
         .arg("list")
@@ -669,13 +708,12 @@ fn env() {
     );
 }
 
-/// `jlo-bin <args>` against a store holding `installed` (`(version,
-/// managed)`), with Adoptium offering `offered` for 21. The download must be
+/// `jlo-bin <args>` against a store holding `installed`, with Adoptium offering `offered` for 21. The download must be
 /// hit exactly `downloads` times. `JAVA_HOME` points at the installed build
 /// `active` names, if any, and the command's stdout goes to `stdout`.
 fn run_against_an_offer(
     args: &[&str],
-    installed: &[(&str, bool)],
+    installed: &[&str],
     offered: &str,
     downloads: usize,
     active: Option<&str>,
@@ -694,13 +732,8 @@ fn run_against_an_offer(
         .create();
 
     let home = tempfile::tempdir().unwrap();
-    let store = jdk_store_in(home.path());
-    for &(version, managed) in installed {
-        if managed {
-            install_fake_jdk(home.path(), version);
-        } else {
-            std::fs::create_dir_all(store.join(version).join("bin")).unwrap();
-        }
+    for version in installed {
+        install_fake_jdk(home.path(), version);
     }
 
     let mut cmd = hermetic(jlo_bin(), home.path());
@@ -708,10 +741,11 @@ fn run_against_an_offer(
         .env("JLO_ADOPTIUM_API_URL", server.url())
         .stdout(stdout);
     if let Some(version) = active {
-        cmd.env("JAVA_HOME", store.join(version));
+        cmd.env("JAVA_HOME", jdk_entry(home.path(), version));
     }
     let out = cmd.output().unwrap();
     download.assert();
+    let store = jdk_store_in(home.path());
     (home, store, out)
 }
 
@@ -723,7 +757,7 @@ fn wrapped_install_and_update_replace_the_live_build_and_move_the_shell() {
     for verb in ["install", "update"] {
         let (_home, store, out) = run_against_an_offer(
             &["__wrapped", verb, "21"],
-            &[("21.0.5+11", true)],
+            &["21.0.5+11"],
             "21.0.9+10",
             1,
             Some("21.0.5+11"),
@@ -734,10 +768,10 @@ fn wrapped_install_and_update_replace_the_live_build_and_move_the_shell() {
 
         assert!(out.status.success(), "{verb}: {stderr}");
         assert!(
-            !store.join("21.0.5+11").exists(),
+            !store.join("jlo-temurin-21.0.5+11").exists(),
             "{verb}: superseded build survived"
         );
-        let new = store.join("21.0.9+10");
+        let new = store.join("jlo-temurin-21.0.9+10");
         assert!(new.exists());
         let lines: Vec<&str> = stdout.lines().collect();
         assert_eq!(lines.len(), 3, "{verb}: {stdout:?}");
@@ -756,7 +790,7 @@ fn unwrapped_install_and_update_keep_the_live_build() {
     for verb in ["install", "update"] {
         let (_home, store, out) = run_against_an_offer(
             &[verb, "21"],
-            &[("21.0.5+11", true)],
+            &["21.0.5+11"],
             "21.0.9+10",
             1,
             Some("21.0.5+11"),
@@ -766,10 +800,10 @@ fn unwrapped_install_and_update_keep_the_live_build() {
 
         assert!(out.status.success(), "{verb}: {stderr}");
         assert!(
-            store.join("21.0.5+11").exists(),
+            store.join("jlo-temurin-21.0.5+11").exists(),
             "{verb}: live build deleted"
         );
-        assert!(store.join("21.0.9+10").exists());
+        assert!(store.join("jlo-temurin-21.0.9+10").exists());
         assert!(out.stdout.is_empty(), "{verb}: {:?}", out.stdout);
         assert!(stderr.contains("Kept 21.0.5+11"), "{verb}: {stderr}");
         assert!(!stderr.contains("replaced"), "{verb}: {stderr}");
@@ -782,7 +816,7 @@ fn unwrapped_install_and_update_keep_the_live_build() {
 fn wrapped_update_leaves_a_shell_on_another_jdk_alone() {
     let (_home, store, out) = run_against_an_offer(
         &["__wrapped", "update", "21"],
-        &[("21.0.5+11", true)],
+        &["21.0.5+11"],
         "21.0.9+10",
         1,
         None,
@@ -795,7 +829,7 @@ fn wrapped_update_leaves_a_shell_on_another_jdk_alone() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(
-        !store.join("21.0.5+11").exists(),
+        !store.join("jlo-temurin-21.0.5+11").exists(),
         "superseded build survived"
     );
     assert_eq!(String::from_utf8_lossy(&out.stdout), "# jlo'end\n");
@@ -810,7 +844,7 @@ fn a_payload_that_cannot_be_written_deletes_nothing() {
     drop(reader);
     let (_home, store, out) = run_against_an_offer(
         &["__wrapped", "update", "21"],
-        &[("21.0.5+11", true)],
+        &["21.0.5+11"],
         "21.0.9+10",
         1,
         Some("21.0.5+11"),
@@ -821,10 +855,10 @@ fn a_payload_that_cannot_be_written_deletes_nothing() {
     assert!(!out.status.success(), "{stderr}");
     assert!(stderr.contains("could not write to stdout"), "{stderr}");
     assert!(
-        store.join("21.0.5+11").exists(),
+        store.join("jlo-temurin-21.0.5+11").exists(),
         "deleted before the shell was told"
     );
-    assert!(store.join("21.0.9+10").exists());
+    assert!(store.join("jlo-temurin-21.0.9+10").exists());
 }
 
 /// A `200 []` for the latest build of `major` - Adoptium's answer for a name
@@ -975,7 +1009,7 @@ fn env_survives_a_reader_that_stops_early() {
     // The store is derived from $HOME, so a throwaway home is enough to stand
     // a JDK up without installing one.
     let home = tempfile::tempdir().unwrap();
-    std::fs::create_dir_all(jdk_store_in(home.path()).join("21.0.5+11/bin")).unwrap();
+    std::fs::create_dir_all(jdk_entry(home.path(), "21.0.5+11").join("bin")).unwrap();
 
     let out = hermetic("/bin/bash", home.path())
         .arg("-c")
@@ -1033,7 +1067,7 @@ fn current_warns_but_still_answers_when_the_config_disagrees() {
     std::fs::write(project.join(".jlorc"), "21\n").unwrap();
 
     fixture_cmd(home.path(), &project, &["current"])
-        .env("JAVA_HOME", jdk_store_in(home.path()).join("25.0.4+101"))
+        .env("JAVA_HOME", jdk_entry(home.path(), "25.0.4+101"))
         .assert()
         .success()
         .code(0)
@@ -1049,7 +1083,7 @@ fn current_warns_but_still_answers_when_the_config_disagrees() {
 #[test]
 fn current_reports_a_removed_install_rather_than_calling_it_foreign() {
     let (home, project) = store_fixture(&["25.0.4+101"]);
-    let jdk = jdk_store_in(home.path()).join("25.0.4+101");
+    let jdk = jdk_entry(home.path(), "25.0.4+101");
     std::fs::remove_dir_all(&jdk).unwrap();
 
     fixture_cmd(home.path(), &project, &["current"])
@@ -1072,7 +1106,7 @@ fn current_never_touches_the_network() {
     let (home, project) = store_fixture(&["25.0.4+101"]);
 
     fixture_cmd(home.path(), &project, &["current"])
-        .env("JAVA_HOME", jdk_store_in(home.path()).join("25.0.4+101"))
+        .env("JAVA_HOME", jdk_entry(home.path(), "25.0.4+101"))
         .assert()
         .success()
         .code(0)
@@ -1115,7 +1149,7 @@ fn env_writes_exports_to_stdout_and_nothing_to_stderr() {
 // "no network access" into an assertion rather than a claim.
 
 fn installed_path(home: &std::path::Path, version: &str) -> String {
-    format!("{}\n", jdk_store_in(home).join(version).display())
+    format!("{}\n", jdk_entry(home, version).display())
 }
 
 /// Stage 4, reached only when nothing is configured *and* nothing is
@@ -1342,7 +1376,7 @@ fn remove_reports_a_failed_deletion_as_a_failure() {
 
         std::fs::set_permissions(&store, restore).unwrap();
         assert!(
-            store.join("21.0.9+10").exists(),
+            store.join("jlo-temurin-21.0.9+10").exists(),
             "{args:?}: nothing was actually deleted"
         );
     }
@@ -1365,10 +1399,10 @@ fn remove_deletes_every_build_of_the_major_named() {
         .stderr(predicate::str::contains("Removed 2 JDKs"));
 
     let store = jdk_store_in(home.path());
-    assert!(!store.join("21.0.11+10").exists());
-    assert!(!store.join("21.0.9+10").exists());
+    assert!(!store.join("jlo-temurin-21.0.11+10").exists());
+    assert!(!store.join("jlo-temurin-21.0.9+10").exists());
     assert!(
-        store.join("17.0.11+10").exists(),
+        store.join("jlo-temurin-17.0.11+10").exists(),
         "another major is untouched"
     );
 }

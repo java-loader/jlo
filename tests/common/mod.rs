@@ -166,17 +166,18 @@ pub(crate) fn jdk_store_in(home: &Path) -> PathBuf {
     }
 }
 
-/// A flat, jlo-managed JDK named `version` in the store under `home`.
+/// The store entry under `home` holding `version`, named as jlo names it.
+#[allow(dead_code)]
+pub(crate) fn jdk_entry(home: &Path, version: &str) -> PathBuf {
+    jdk_store_in(home).join(format!("jlo-temurin-{version}"))
+}
+
+/// A flat JDK holding `version` in the store under `home`.
 #[allow(dead_code)]
 pub(crate) fn install_fake_jdk(home: &Path, version: &str) -> PathBuf {
-    let jdk = jdk_store_in(home).join(version);
+    let jdk = jdk_entry(home, version);
     std::fs::create_dir_all(jdk.join("bin")).unwrap();
     std::fs::write(jdk.join("bin").join("java"), "").unwrap();
-    std::fs::write(
-        jdk_store_in(home).join(format!("{version}.jlo-managed")),
-        "",
-    )
-    .unwrap();
     jdk
 }
 

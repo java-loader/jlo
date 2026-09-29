@@ -666,8 +666,8 @@ fn a_later_failure_still_moves_the_shell_off_the_replaced_build() {
             for version in ["17.0.5+8", "21.0.5+11"] {
                 install_fake_jdk(home.path(), version);
             }
-            let old = store.join("21.0.5+11");
-            let new = store.join("21.0.9+10");
+            let old = store.join("jlo-temurin-21.0.5+11");
+            let new = store.join("jlo-temurin-21.0.9+10");
 
             let out = run_in(
                 sh,
@@ -699,7 +699,8 @@ fn a_later_failure_still_moves_the_shell_off_the_replaced_build() {
             assert!(!old.exists(), "the replacement was undone: {ctx}");
             assert!(new.join("bin/java").exists(), "{ctx}");
             assert!(
-                store.join("17.0.5+8").exists() && !store.join("17.0.9+10").exists(),
+                store.join("jlo-temurin-17.0.5+8").exists()
+                    && !store.join("jlo-temurin-17.0.9+10").exists(),
                 "the failed name's install was touched: {ctx}"
             );
             assert!(

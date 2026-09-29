@@ -235,9 +235,16 @@ fn cmd_list(client: &AdoptiumClient, offline: bool) -> Result<(), CommandError> 
 
     let active = store.active_version(&installed, active_java_home().as_deref());
     let groups = store::group_by_name(&installed);
+    let names = store
+        .foreign()
+        .context("could not list the other directories in the JDK store")?;
+    let foreign = ui::Foreign {
+        names: &names,
+        base: store.base(),
+    };
 
     if offline {
-        ui::offline_list(&groups, active.as_deref(), store.base());
+        ui::offline_list(&groups, active.as_deref(), &foreign);
     } else {
         let available = client.available_jdks().map_err(|e| {
             CommandError::with_hint(
@@ -245,7 +252,7 @@ fn cmd_list(client: &AdoptiumClient, offline: bool) -> Result<(), CommandError> 
                 "Use 'jlo list --offline' to list the JDKs already installed.",
             )
         })?;
-        ui::remote_list(&available, &groups, active.as_deref());
+        ui::remote_list(&available, &groups, active.as_deref(), &foreign);
     }
 
     Ok(())

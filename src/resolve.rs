@@ -8,7 +8,7 @@ use crate::request::Request;
 use crate::store::{self, JdkStore};
 use crate::{CommandError, ui};
 use anyhow::{Context, anyhow};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// The verb an offline miss tells the reader to re-run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -217,12 +217,11 @@ pub(crate) fn provenance(
     java_home: PathBuf,
     configured: impl FnOnce() -> anyhow::Result<Option<conf::Resolved>>,
 ) -> Result<Active, CommandError> {
-    // A `$JAVA_HOME` inside the store that is *gone* was ours, not foreign.
-    // Asked of `$JAVA_HOME` itself, not inferred from the listing: an IDE's
-    // `temurin-21.0.1` is present but unlistable (foreign), and a listed
-    // bundle's `Contents/Home` may be gone: `owns` compares both spellings
-    // without requiring either to exist.
-    if is_inside(store.base(), &java_home) && !java_home.exists() {
+    // A `$JAVA_HOME` under a jlo entry name that is *gone* was ours, not
+    // foreign. Asked of `$JAVA_HOME` itself, not inferred from the listing,
+    // which no longer holds it; a vanished foreign directory in the store is
+    // still foreign.
+    if store.names_an_entry(&java_home) && !java_home.exists() {
         return Err(CommandError::with_hint(
             anyhow!(
                 "$JAVA_HOME points at a jlo install that is no longer there ({}).",
@@ -290,21 +289,12 @@ pub(crate) fn provenance(
     Ok(active)
 }
 
-/// The canonicalized retry covers a `$HOME` reached through a symlink. `path`
-/// is deliberately not canonicalized: the case this decides is the one where
-/// it no longer exists.
-fn is_inside(base: &Path, path: &Path) -> bool {
-    path.starts_with(base)
-        || base
-            .canonicalize()
-            .is_ok_and(|canonical| path.starts_with(canonical))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::request::Stream;
     use crate::request::request;
+    use std::path::Path;
     use tempfile::tempdir;
 
     fn owned(items: &[&str]) -> Vec<String> {
@@ -337,7 +327,7 @@ mod tests {
             Verb::Home,
         )
         .expect("21 is installed");
-        assert_eq!(target.java_home, dir.path().join("21.0.3+9"));
+        assert_eq!(target.java_home, entry(dir.path(), "21.0.3+9"));
         assert_eq!(target.request, request("21"));
     }
 
@@ -356,7 +346,7 @@ mod tests {
             Verb::Home,
         )
         .expect("21 is installed");
-        assert_eq!(target.java_home, dir.path().join("21.0.3+9"));
+        assert_eq!(target.java_home, entry(dir.path(), "21.0.3+9"));
     }
 
     // -- cascade --
@@ -488,13 +478,17 @@ mod tests {
     // is asserted per verb end to end in `tests/test.rs`
     // (`offline_fails_without_touching_the_network`).
 
-    /// A fake store holding one JDK directory, marked managed the way an
-    /// install leaves it.
+    /// The store entry holding `version`.
+    fn entry(base: &Path, version: &str) -> PathBuf {
+        base.join(store::entry_name(version))
+    }
+
+    /// A fake store holding one JDK directory, named the way an install
+    /// leaves it.
     fn store_with(base: &Path, version: &str) -> JdkStore {
-        let dir = base.join(version);
+        let dir = entry(base, version);
         std::fs::create_dir_all(dir.join("bin")).unwrap();
         std::fs::write(dir.join("bin").join("java"), "").unwrap();
-        std::fs::File::create(dir.join(".jlo-managed")).unwrap();
         JdkStore::at(base)
     }
 
@@ -525,7 +519,8 @@ mod tests {
     fn provenance_names_the_config_when_it_agrees() {
         let dir = tempdir().unwrap();
         let store = store_holding(dir.path(), &["25.0.4+101"]);
-        let active = provenance(&store, dir.path().join("25.0.4+101"), project_pins("25")).unwrap();
+        let active =
+            provenance(&store, entry(dir.path(), "25.0.4+101"), project_pins("25")).unwrap();
         assert_eq!(active.version.as_deref(), Some("25.0.4+101"));
         assert!(matches!(
             active.source,
@@ -538,7 +533,8 @@ mod tests {
     fn provenance_reports_a_config_that_pins_another_name() {
         let dir = tempdir().unwrap();
         let store = store_holding(dir.path(), &["25.0.4+101"]);
-        let active = provenance(&store, dir.path().join("25.0.4+101"), project_pins("21")).unwrap();
+        let active =
+            provenance(&store, entry(dir.path(), "25.0.4+101"), project_pins("21")).unwrap();
         assert_eq!(active.source, None);
         assert_eq!(
             active.pinned_elsewhere.map(|p| p.request),
@@ -551,11 +547,11 @@ mod tests {
         let dir = tempdir().unwrap();
         let store = store_holding(dir.path(), &["21.0.5+11", "21.0.6+7"]);
 
-        let newest = provenance(&store, dir.path().join("21.0.6+7"), || Ok(None)).unwrap();
+        let newest = provenance(&store, entry(dir.path(), "21.0.6+7"), || Ok(None)).unwrap();
         assert_eq!(newest.source, Some(conf::Source::NewestInstalled));
 
         // Same name, older build: a bare `jlo env` would hand back 21.0.6+7.
-        let older = provenance(&store, dir.path().join("21.0.5+11"), || Ok(None)).unwrap();
+        let older = provenance(&store, entry(dir.path(), "21.0.5+11"), || Ok(None)).unwrap();
         assert_eq!(older.source, None);
         assert!(older.pinned_elsewhere.is_none());
     }
@@ -564,7 +560,7 @@ mod tests {
     fn provenance_says_nothing_pinned_when_stage_3_picks_another_major() {
         let dir = tempdir().unwrap();
         let store = store_holding(dir.path(), &["17.0.11+9", "25.0.4+101"]);
-        let active = provenance(&store, dir.path().join("17.0.11+9"), || Ok(None)).unwrap();
+        let active = provenance(&store, entry(dir.path(), "17.0.11+9"), || Ok(None)).unwrap();
         assert_eq!(active.source, None);
         assert!(active.pinned_elsewhere.is_none());
     }
@@ -573,8 +569,10 @@ mod tests {
     fn provenance_never_calls_a_pre_release_the_newest_install() {
         let dir = tempdir().unwrap();
         let store = store_holding(dir.path(), &["21.0.5+11", "28.0.0-beta+16.0.ea"]);
-        let active =
-            provenance(&store, dir.path().join("28.0.0-beta+16.0.ea"), || Ok(None)).unwrap();
+        let active = provenance(&store, entry(dir.path(), "28.0.0-beta+16.0.ea"), || {
+            Ok(None)
+        })
+        .unwrap();
         assert_eq!(active.source, None);
         assert!(active.pinned_elsewhere.is_none());
         assert_eq!(active.request.map(|r| r.stream), Some(Stream::Ea));
@@ -606,11 +604,22 @@ mod tests {
         assert_eq!(active.source, Some(conf::Source::Foreign));
     }
 
+    /// A bare-version directory an earlier jlo left, since deleted by hand:
+    /// in the store, gone, and still not jlo's.
+    #[test]
+    fn provenance_calls_a_vanished_foreign_directory_foreign() {
+        let dir = tempdir().unwrap();
+        let store = store_holding(dir.path(), &["25.0.4+101"]);
+        let gone = dir.path().join("21.0.3+9");
+        let active = provenance(&store, gone, config_must_not_be_read).unwrap();
+        assert_eq!(active.source, Some(conf::Source::Foreign));
+    }
+
     #[test]
     fn provenance_refuses_a_removed_install_without_reading_config() {
         let dir = tempdir().unwrap();
         let store = store_holding(dir.path(), &["25.0.4+101"]);
-        let gone = dir.path().join("25.0.4+101");
+        let gone = entry(dir.path(), "25.0.4+101");
         std::fs::remove_dir_all(&gone).unwrap();
         let err =
             provenance(&store, gone, config_must_not_be_read).expect_err("the install is gone");
@@ -624,7 +633,7 @@ mod tests {
     fn provenance_fails_when_the_config_cannot_be_read() {
         let dir = tempdir().unwrap();
         let store = store_holding(dir.path(), &["25.0.4+101"]);
-        let err = provenance(&store, dir.path().join("25.0.4+101"), || {
+        let err = provenance(&store, entry(dir.path(), "25.0.4+101"), || {
             Err(anyhow!("bad .jlorc"))
         })
         .expect_err("config failure propagates");

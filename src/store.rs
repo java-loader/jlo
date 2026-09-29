@@ -11,12 +11,24 @@ use std::env;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
-/// The ownership marker, *beside* the JDK directory rather than in it: a file
-/// at the root of a macOS JDK bundle unseals it (`codesign --verify` and
-/// `spctl --assess` then fail). `scan` filters to directories, so the marker
-/// never reads as an install.
-fn sibling_marker(base: &Path, version: &str) -> PathBuf {
-    base.join(format!("{version}.jlo-managed"))
+/// What makes a store entry jlo's: `jlo-temurin-<semver>`. The name alone
+/// decides, whoever put the directory there. No other tool writes a `jlo-`
+/// name, and the vendor leaves room for a second one; a bare semver cannot
+/// say whose build it is, and `temurin-<version>` is how `IntelliJ` names its
+/// own downloads in the same directory.
+const ENTRY_PREFIX: &str = "jlo-temurin-";
+
+/// The store entry holding `version`.
+pub(crate) fn entry_name(version: &str) -> String {
+    format!("{ENTRY_PREFIX}{version}")
+}
+
+/// The version an entry name holds, verbatim, and the name it answers to;
+/// `None` for anything not named `jlo-temurin-<semver>`.
+fn parse_entry(name: &str) -> Option<(String, Request)> {
+    let version = name.strip_prefix(ENTRY_PREFIX)?;
+    let semver = crate::version::parse(version).ok()?;
+    Some((version.to_string(), Request::of_build(&semver)?))
 }
 
 /// A macOS bundle's java home, relative to the bundle. One constant because
@@ -31,9 +43,6 @@ pub(crate) struct RemoveReport {
     /// Newest first for `remove`; `jlo list`'s order for `prune`.
     pub(crate) removed: Vec<String>,
     pub(crate) failures: Vec<String>,
-    /// Matched a target but lack the `.jlo-managed` marker. Always empty for
-    /// `prune`: nobody named the unmanaged installs the rule passes over.
-    pub(crate) skipped_unmanaged: Vec<String>,
     /// Targets that matched nothing. Always empty for `prune`.
     pub(crate) not_installed: Vec<String>,
     /// Left alone because `$JAVA_HOME` points at it.
@@ -49,8 +58,6 @@ pub(crate) enum RemoveError {
     /// Only the JDK `$JAVA_HOME` points at was left; deleting it would leave
     /// the calling shell on a path that no longer exists.
     InUse(String),
-    /// Everything that matched lacks the `.jlo-managed` marker.
-    Unmanaged(Vec<String>),
     /// The install directory itself could not be read.
     Store(anyhow::Error),
 }
@@ -64,33 +71,26 @@ impl std::fmt::Display for RemoveError {
             Self::InUse(version) => {
                 write!(f, "refusing to remove {version}: JAVA_HOME points at it")
             }
-            Self::Unmanaged(versions) => write!(
-                f,
-                "refusing to remove {}: not installed by jlo",
-                versions.join(", ")
-            ),
             // `{:#}`: the whole `anyhow` chain, as `main` prints every error.
             Self::Store(e) => write!(f, "{e:#}"),
         }
     }
 }
 
-/// A JDK found in the install directory, identified by its semver directory name.
+/// A JDK in the install directory: an entry named [`entry_name`]`(version)`.
 pub(crate) struct InstalledJdk {
+    /// The entry name without its prefix, verbatim.
     pub version: String,
     /// The name this install answers to; its stream is read off the version.
     pub request: Request,
-    /// Carries the `.jlo-managed` marker, so jlo may delete it.
-    pub managed: bool,
 }
 
 /// Whether `offered` is newer than every one of `builds` - one name's
 /// installs. The one rule behind `jlo list`'s `update` and `install`/`update`
 /// downloading, so the two cannot disagree.
 ///
-/// Unmanaged installs count, and the catalogue can sit *behind* the store (a
-/// rolled-back release, an install from elsewhere): following it would be a
-/// downgrade.
+/// The catalogue can sit *behind* the store (a rolled-back release, an install
+/// placed by hand): following it would be a downgrade.
 ///
 /// True for empty `builds`; the listing checks for that itself.
 pub(crate) fn supersedes_every_install(offered: &str, builds: &[&InstalledJdk]) -> bool {
@@ -99,32 +99,29 @@ pub(crate) fn supersedes_every_install(offered: &str, builds: &[&InstalledJdk]) 
         .all(|jdk| is_older_than(&jdk.version, offered))
 }
 
-/// What a build is beside its name's head. A build both unmanaged and older is
-/// `Unmanaged`: that decides whether `jlo remove --superseded` touches it.
+/// What a build is beside its name's head.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Status {
     /// As new as the head: two spellings of one version (`v21.0.11+9` beside
     /// `21.0.11+9`), so not superseded.
     Installed,
-    /// Managed and older than the head.
+    /// Older than the head.
     Superseded,
-    Unmanaged,
 }
 
 pub(crate) struct NameGroup<'a> {
     pub request: Request,
-    /// The newest *managed* build: the one the name reports and
-    /// `jlo remove --superseded` keeps. `None` when every build is unmanaged.
-    pub head: Option<&'a InstalledJdk>,
+    /// The newest build: the one the name reports and
+    /// `jlo remove --superseded` keeps.
+    pub head: &'a InstalledJdk,
     /// Every other build, newest first.
     pub others: Vec<(&'a InstalledJdk, Status)>,
 }
 
 impl NameGroup<'_> {
-    /// Every build, managed or not - what an offer must supersede.
+    /// Every build - what an offer must supersede.
     pub(crate) fn builds(&self) -> Vec<&InstalledJdk> {
-        self.head
-            .into_iter()
+        std::iter::once(self.head)
             .chain(self.others.iter().map(|(jdk, _)| *jdk))
             .collect()
     }
@@ -135,9 +132,7 @@ impl NameGroup<'_> {
 ///
 /// By name, not major: a pre-release of a later patch sorts above the current
 /// release, so a major-keyed group would make the released build superseded
-/// by a beta. Only a managed build heads a name: an unmanaged 21.0.3 beside a
-/// managed 21.0.1 would otherwise make the managed one superseded, and
-/// `remove --superseded` would leave the name with no build jlo manages.
+/// by a beta.
 ///
 /// `installed` may come in any order; the sort is stable, so two spellings of
 /// one version keep the order given.
@@ -148,22 +143,17 @@ pub(crate) fn group_by_name(installed: &[InstalledJdk]) -> Vec<NameGroup<'_>> {
 
     names
         .into_iter()
-        .map(|request| {
-            let mut builds: Vec<&InstalledJdk> = installed
+        .filter_map(|request| {
+            let mut builds = installed
                 .iter()
                 .filter(|jdk| jdk.request == request)
-                .collect();
+                .collect::<Vec<_>>();
             builds.sort_by(|a, b| cmp_desc(&a.version, &b.version));
-            let head = builds
-                .iter()
-                .position(|jdk| jdk.managed)
-                .map(|at| builds.remove(at));
+            let mut builds = builds.into_iter();
+            let head = builds.next()?;
             let others = builds
-                .into_iter()
                 .map(|jdk| {
-                    let status = if !jdk.managed {
-                        Status::Unmanaged
-                    } else if head.is_some_and(|head| is_older_than(&jdk.version, &head.version)) {
+                    let status = if is_older_than(&jdk.version, &head.version) {
                         Status::Superseded
                     } else {
                         Status::Installed
@@ -171,11 +161,11 @@ pub(crate) fn group_by_name(installed: &[InstalledJdk]) -> Vec<NameGroup<'_>> {
                     (jdk, status)
                 })
                 .collect();
-            NameGroup {
+            Some(NameGroup {
                 request,
                 head,
                 others,
-            }
+            })
         })
         .collect()
 }
@@ -199,10 +189,11 @@ struct Candidate {
     path: PathBuf,
     /// `None` when not valid UTF-8.
     name: Option<String>,
-    /// `None` when the name is not a semver, which keeps a hand-placed
-    /// `temurin-21.0.5` out of the listing.
-    request: Option<Request>,
-    managed: bool,
+    /// The name without [`ENTRY_PREFIX`] and the name it answers to; `None`
+    /// for anything not named `jlo-temurin-<semver>`, which keeps an earlier
+    /// jlo's bare `21.0.5+11` and an IDE's `temurin-21.0.5` out of the
+    /// listing and out of reach of every deletion.
+    jdk: Option<(String, Request)>,
 }
 
 /// The directory jlo installs JDKs into.
@@ -226,8 +217,8 @@ impl JdkStore {
         &self.base
     }
 
-    /// Every semver-named JDK, newest first. A missing base directory is an
-    /// empty store.
+    /// Every JDK entry, newest first. A missing base directory is an empty
+    /// store.
     pub(crate) fn list(&self) -> anyhow::Result<Vec<InstalledJdk>> {
         let candidates = self.scan_existing()?;
 
@@ -236,15 +227,50 @@ impl JdkStore {
         let mut installed: Vec<InstalledJdk> = candidates
             .into_iter()
             .filter_map(|candidate| {
-                Some(InstalledJdk {
-                    version: candidate.name?,
-                    request: candidate.request?,
-                    managed: candidate.managed,
-                })
+                let (version, request) = candidate.jdk?;
+                Some(InstalledJdk { version, request })
             })
             .collect();
         installed.sort_by(|a, b| cmp_desc(&a.version, &b.version));
         Ok(installed)
+    }
+
+    /// Every other directory in the store, by name, sorted: what the user may
+    /// want to delete by hand, and jlo never will. jlo's own staging
+    /// directories are left out. A missing base directory has none.
+    pub(crate) fn foreign(&self) -> anyhow::Result<Vec<String>> {
+        let mut names: Vec<String> = self
+            .scan_existing()?
+            .into_iter()
+            .filter(|candidate| candidate.jdk.is_none())
+            .filter_map(|candidate| {
+                let name = candidate.path.file_name()?.to_string_lossy().into_owned();
+                (!name.starts_with(STAGING_PREFIX)).then_some(name)
+            })
+            .collect();
+        names.sort_unstable();
+        Ok(names)
+    }
+
+    /// Whether `path` is a JDK entry or lies inside one, present or not: a
+    /// `$JAVA_HOME` that has vanished from under a name jlo owns was jlo's.
+    ///
+    /// The canonicalized retry covers a `$HOME` reached through a symlink.
+    /// `path` is deliberately not canonicalized: the case this decides is the
+    /// one where it no longer exists.
+    pub(crate) fn names_an_entry(&self, path: &Path) -> bool {
+        let canonical = self.base.canonicalize().ok();
+        path.strip_prefix(&self.base)
+            .ok()
+            .or_else(|| path.strip_prefix(canonical.as_deref()?).ok())
+            .and_then(|rest| rest.components().next())
+            .and_then(|first| first.as_os_str().to_str())
+            .is_some_and(|name| parse_entry(name).is_some())
+    }
+
+    /// The directory holding `jdk`.
+    fn entry(&self, jdk: &InstalledJdk) -> PathBuf {
+        self.base.join(entry_name(&jdk.version))
     }
 
     /// The installed version `$JAVA_HOME` points at; `None` when it is unset
@@ -263,7 +289,7 @@ impl JdkStore {
     /// Whether a live `$JAVA_HOME` points into `jdk`: the guard every deletion
     /// applies.
     fn is_live(&self, jdk: &InstalledJdk, active: Option<&Path>) -> bool {
-        active.is_some_and(|active| owns(&self.base.join(&jdk.version), active))
+        active.is_some_and(|active| owns(&self.entry(jdk), active))
     }
 
     /// The newest installed JDK answering to `request`.
@@ -276,7 +302,7 @@ impl JdkStore {
             .ok()?
             .into_iter()
             .find(|jdk| jdk.request == request)
-            .map(|jdk| java_home_in(&self.base.join(jdk.version)))
+            .map(|jdk| java_home_in(&self.entry(&jdk)))
     }
 
     /// [`newest_ga`] against the store. An unreadable store reads as nothing
@@ -294,7 +320,7 @@ impl JdkStore {
             .collect())
     }
 
-    /// Per name, the managed builds strictly older than the one this run
+    /// Per name, the builds strictly older than the one this run
     /// installed. `installed` is each name with its new build's version and
     /// java home.
     ///
@@ -316,20 +342,18 @@ impl JdkStore {
                     request,
                     java_home,
                     builds: Vec::new(),
-                    live: None,
+                    live: Vec::new(),
                     failures: Vec::new(),
                 };
                 match &listing {
                     Err(e) => plan.failures.push(format!("{e:#}")),
                     Ok(listing) => {
                         let superseded = listing.iter().filter(|jdk| {
-                            jdk.managed
-                                && jdk.request == request
-                                && is_older_than(&jdk.version, &version)
+                            jdk.request == request && is_older_than(&jdk.version, &version)
                         });
                         for jdk in superseded {
                             if self.is_live(jdk, active) {
-                                plan.live = Some(plan.builds.len());
+                                plan.live.push(jdk.version.clone());
                             }
                             plan.builds.push(jdk.version.clone());
                         }
@@ -345,7 +369,7 @@ impl JdkStore {
         }
     }
 
-    /// Remove every managed JDK that is not the newest of its name.
+    /// Remove every JDK that is not the newest of its name.
     ///
     /// The build `$JAVA_HOME` points at is skipped, as [`Self::remove`] skips
     /// it: this verb is not evaluated by the wrapper, so it cannot move the
@@ -388,11 +412,10 @@ impl JdkStore {
     /// Delete what `targets` select: every build of a name (`17`, `28-ea`), or
     /// one exact build (`17.0.11+10`).
     ///
-    /// A target not installed, unmanaged or live (`$JAVA_HOME` points at it)
-    /// is set aside and the rest still go: aborting on it would protect
-    /// nothing. Each is an error only when nothing is left to remove, because a
-    /// command told exactly what to delete must not report success having
-    /// deleted nothing. `active_java_home` is passed in so the guard is
+    /// A target not installed or live (`$JAVA_HOME` points at it) is set aside
+    /// and the rest still go: aborting on it would protect nothing. Each is an
+    /// error only when nothing is left to remove, because a command told
+    /// exactly what to delete must not report success having deleted nothing. `active_java_home` is passed in so the guard is
     /// testable without mutating the process environment.
     pub(crate) fn remove(
         &self,
@@ -421,39 +444,27 @@ impl JdkStore {
             .filter(|jdk| selectors.iter().any(|(_, selector)| selector.matches(jdk)))
             .collect();
 
-        // Set aside before the marker check, so a live install that is also
-        // unmanaged is reported as live: that is the one the user can act on.
         let (in_use, removable): (Vec<_>, Vec<_>) = matching
             .into_iter()
             .partition(|jdk| self.is_live(jdk, active_java_home));
         let in_use = in_use.first().map(|jdk| jdk.version.clone());
 
-        let (managed, unmanaged): (Vec<_>, Vec<_>) =
-            removable.into_iter().partition(|jdk| jdk.managed);
-
-        let unmanaged: Vec<String> = unmanaged
-            .into_iter()
-            .map(|jdk| jdk.version.clone())
-            .collect();
-
         // Nothing left to delete: name the reason, most actionable first (the
         // live JDK can be had by switching shells).
-        if managed.is_empty() {
-            return Err(match (in_use, unmanaged.is_empty()) {
-                (Some(version), _) => RemoveError::InUse(version),
-                (None, false) => RemoveError::Unmanaged(unmanaged),
-                (None, true) => RemoveError::NotInstalled(missing),
+        if removable.is_empty() {
+            return Err(match in_use {
+                Some(version) => RemoveError::InUse(version),
+                None => RemoveError::NotInstalled(missing),
             });
         }
 
         let mut report = RemoveReport {
-            skipped_unmanaged: unmanaged,
             not_installed: missing,
             skipped_in_use: in_use,
             ..RemoveReport::default()
         };
 
-        for jdk in managed {
+        for jdk in removable {
             remove_recorded(
                 &self.base,
                 jdk.version.clone(),
@@ -465,15 +476,15 @@ impl JdkStore {
         Ok(report)
     }
 
-    /// Move an extracted JDK from `source_dir` into the store and mark it
-    /// managed. Returns its java home.
+    /// Move an extracted JDK from `source_dir` into the store. Returns its
+    /// java home.
     pub(crate) fn install(
         &self,
         metadata: &JdkMetadata,
         source_dir: &Path,
         ui: &InstallUi,
     ) -> anyhow::Result<PathBuf> {
-        let dest_dir = self.base.join(&metadata.semver);
+        let dest_dir = self.base.join(entry_name(&metadata.semver));
 
         let extracted_jdk_path =
             find_jdk_path(source_dir).context("could not find the extracted JDK directory")?;
@@ -481,26 +492,10 @@ impl JdkStore {
         ui.start_install();
 
         // No directory to create first: `source_dir` is staged inside the
-        // store, and `semver` is a single path component.
+        // store, and the entry name is a single path component. One rename,
+        // so the entry appears whole or not at all.
         std::fs::rename(&extracted_jdk_path, &dest_dir)
             .context("could not move JDK to destination")?;
-
-        // Directory first, marker second: a marker written first would, if the
-        // rename failed or the process died, stand beside whatever else holds
-        // that name and hand it to `jlo remove`. A failed marker write moves
-        // the directory back to staging: left in place unmarked, the next
-        // `install` would call the name up to date and `remove` would refuse
-        // it - a permanent orphan.
-        if let Err(err) = std::fs::File::create(sibling_marker(&self.base, &metadata.semver)) {
-            let err = anyhow::Error::new(err).context("could not create marker file");
-            return Err(match std::fs::rename(&dest_dir, &extracted_jdk_path) {
-                Ok(()) => err,
-                Err(rollback) => err.context(format!(
-                    "could not move {dest_dir:?} back out of the store ({rollback}); \
-                     it is not marked as jlo's, so delete it by hand"
-                )),
-            });
-        }
 
         Ok(java_home_in(&dest_dir))
     }
@@ -517,22 +512,8 @@ impl JdkStore {
                     .file_name()
                     .and_then(|name| name.to_str())
                     .map(ToString::to_string);
-                let request = name
-                    .as_deref()
-                    .and_then(|name| crate::version::parse(name).ok())
-                    .and_then(|semver| Request::of_build(&semver));
-                // `is_file`, not `exists`: a *directory* named
-                // `21.0.3+9.jlo-managed` must not confer ownership on
-                // `21.0.3+9`, a JDK jlo never installed.
-                let managed = name
-                    .as_deref()
-                    .is_some_and(|name| sibling_marker(&self.base, name).is_file());
-                Candidate {
-                    path,
-                    name,
-                    request,
-                    managed,
-                }
+                let jdk = name.as_deref().and_then(parse_entry);
+                Candidate { path, name, jdk }
             })
             .collect())
     }
@@ -683,10 +664,11 @@ struct NamePlan {
     request: Request,
     /// The java home of the build this run installed.
     java_home: PathBuf,
-    /// The managed builds to delete, newest first.
+    /// The builds to delete, newest first.
     builds: Vec<String>,
-    /// Where in `builds` the one `$JAVA_HOME` points at is.
-    live: Option<usize>,
+    /// The builds among `builds` that `$JAVA_HOME` points into. More than one
+    /// when an entry is a symlink to another: both are the shell's JDK.
+    live: Vec<String>,
     /// The listing that could not be read, in place of any builds.
     failures: Vec<String>,
 }
@@ -706,8 +688,8 @@ impl Replacement<'_> {
     /// payload nothing moves the shell, so the live build is kept; a payload
     /// that cannot be written deletes nothing.
     ///
-    /// The plan's listing is not trusted at deletion time: [`remove_install`]
-    /// checks the marker again.
+    /// The plan's listing may be stale at deletion time: [`remove_install`]
+    /// fails on a build another run already took.
     fn apply<W: std::io::Write>(
         self,
         payload: Option<Payload<W>>,
@@ -723,15 +705,17 @@ impl Replacement<'_> {
                 let repoint = names
                     .iter()
                     .rev()
-                    .find(|name| name.live.is_some())
+                    .find(|name| !name.live.is_empty())
                     .map(|name| name.java_home.clone());
                 payload.follow(repoint.as_deref(), active, store.base())?;
                 run.repointed = repoint;
             }
             None => {
                 for name in &mut names {
-                    if let Some(at) = name.live {
-                        run.kept_active = Some(name.builds.remove(at));
+                    let live = &name.live;
+                    name.builds.retain(|version| !live.contains(version));
+                    if let Some(version) = name.live.first() {
+                        run.kept_active = Some(version.clone());
                     }
                 }
             }
@@ -870,8 +854,8 @@ fn install_jdk_inner(
 /// Where an install is downloaded and unpacked: inside the store, not in
 /// `$TMPDIR`. The last step is a `rename` into the store, which only works
 /// within one filesystem, and a tmpfs `/tmp` (Fedora, Arch, Debian 13) would
-/// fail it with `EXDEV` after the whole download. Its name does not parse as
-/// a version, so `scan` passes over it.
+/// fail it with `EXDEV` after the whole download. Its name is no entry name,
+/// so `list` passes over it.
 fn staging_dir(store: &JdkStore) -> anyhow::Result<tempfile::TempDir> {
     std::fs::create_dir_all(store.base())
         .with_context(|| format!("could not create {}", store.base().display()))?;
@@ -884,8 +868,8 @@ fn staging_dir(store: &JdkStore) -> anyhow::Result<tempfile::TempDir> {
         .context("could not create a staging directory in the JDK install directory")
 }
 
-/// The prefix `tempfile` gives staging directories. The leading dot keeps them
-/// out of the listing: `version::parse` refuses it.
+/// The prefix `tempfile` gives staging directories, for downloads and
+/// deletions alike; [`JdkStore::foreign`] leaves them out.
 const STAGING_PREFIX: &str = ".tmp";
 
 /// Delete the directories under `base` starting with `prefix` that an
@@ -990,51 +974,54 @@ pub(crate) fn same_path(a: &Path, b: &Path) -> bool {
     }
 }
 
-/// [`remove_install`], recording the name in `removed` or the reason in
+/// [`remove_install`], recording the version in `removed` or the reason in
 /// `failures`.
 fn remove_recorded(
     base: &Path,
-    name: String,
+    version: String,
     removed: &mut Vec<String>,
     failures: &mut Vec<String>,
 ) {
-    match remove_install(base, &name) {
-        Ok(()) => removed.push(name),
-        Err(e) => failures.push(format!("could not remove {:?}: {e}", base.join(&name))),
+    match remove_install(base, &version) {
+        Ok(()) => removed.push(version),
+        Err(e) => failures.push(format!(
+            "could not remove {:?}: {e:#}",
+            base.join(entry_name(&version))
+        )),
     }
 }
 
-/// Delete an install and the marker that claims it. **The marker goes first.**
+/// Delete an install: **renamed out of its name first**, into a fresh staging
+/// directory, then deleted there.
 ///
-/// A marker outliving its directory is invisible to `scan` and claims the next
-/// thing to appear under that name, so `jlo remove` would delete a JDK jlo
-/// never installed. A directory outliving its marker merely reads as
-/// unmanaged.
+/// A deletion interrupted halfway would otherwise leave a gutted directory
+/// that still carries the name, which the listing would resolve and `jlo env`
+/// hand out as `JAVA_HOME`. The rename is atomic, so the store sees the JDK
+/// whole or not at all; what an interrupted deletion leaves sits under
+/// [`STAGING_PREFIX`], where the next install sweeps it.
 ///
-/// The marker's removal is also the last word on ownership: every caller
-/// decided from a listing that may be stale. A marker already gone means the
-/// install is no longer known to be jlo's; of two runs deleting one install,
-/// only the one that removed the marker goes on to the directory.
-fn remove_install(base: &Path, version: &str) -> std::io::Result<()> {
-    match std::fs::remove_file(sibling_marker(base, version)) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Err(std::io::Error::new(
-                e.kind(),
-                "its .jlo-managed marker is gone",
-            ));
-        }
-        result => result?,
-    }
-    std::fs::remove_dir_all(base.join(version))
+/// The rename is also the last word between two runs deleting one install
+/// from listings that may be stale: only one of them finds it still there.
+fn remove_install(base: &Path, version: &str) -> anyhow::Result<()> {
+    let trash = tempfile::Builder::new()
+        .prefix(STAGING_PREFIX)
+        .tempdir_in(base)?;
+    std::fs::rename(
+        base.join(entry_name(version)),
+        trash.path().join(entry_name(version)),
+    )?;
+    let remnant = trash.path().to_path_buf();
+    trash
+        .close()
+        .with_context(|| format!("moved aside, but could not delete {remnant:?}"))
 }
 
 /// The java home inside a store entry: `Contents/Home` for a macOS JDK
 /// bundle, the entry itself for a flat install.
 ///
-/// Probed rather than selected on `env::consts::OS`: one store holds both
-/// shapes (older jlo unwrapped bundles; hand-placed JDKs come either way). The
-/// probe is `bin/java`, so a `Contents/Home` that cannot run Java is not read
-/// as a bundle.
+/// Probed rather than selected on `env::consts::OS`: jlo keeps the bundle,
+/// but a hand-placed entry may come either way. The probe is `bin/java`, so a
+/// `Contents/Home` that cannot run Java is not read as a bundle.
 fn java_home_in(dir: &Path) -> PathBuf {
     let bundled = dir.join(BUNDLE_HOME[0]).join(BUNDLE_HOME[1]);
     if bundled.join("bin").join("java").exists() {
@@ -1084,14 +1071,26 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use tempfile::tempdir;
 
-    fn create_jdk_dir(base: &Path, version: &str, managed: bool) {
-        let dir = base.join(version);
+    /// The store entry holding `version`.
+    fn entry(base: &Path, version: &str) -> PathBuf {
+        base.join(entry_name(version))
+    }
+
+    /// A flat JDK under `name`, exactly: `bin/java` and nothing else.
+    fn create_named_jdk_dir(base: &Path, name: &str) {
+        let dir = base.join(name);
         fs::create_dir_all(dir.join("bin")).unwrap();
-        // Create a fake java binary
         fs::write(dir.join("bin").join("java"), "").unwrap();
-        if managed {
-            fs::File::create(sibling_marker(base, version)).unwrap();
-        }
+    }
+
+    fn create_jdk_dir(base: &Path, version: &str) {
+        create_named_jdk_dir(base, &entry_name(version));
+    }
+
+    /// A working JDK under its bare version, as an earlier jlo installed it
+    /// or as a user might drop one in: not jlo's.
+    fn create_foreign_jdk_dir(base: &Path, version: &str) {
+        create_named_jdk_dir(base, version);
     }
 
     /// A `JdkMetadata` carrying only the field the store looks at.
@@ -1120,14 +1119,10 @@ mod tests {
     /// lives at `<version>/Contents/Home`, not at `<version>`. Written out
     /// rather than derived from [`expected_java_home`] so the bundle rules are
     /// exercised on Linux too - they are shape rules, not platform rules.
-    fn create_bundle_jdk_dir(base: &Path, version: &str, managed: bool) -> PathBuf {
-        let entry = base.join(version);
-        let java_home = entry.join("Contents").join("Home");
+    fn create_bundle_jdk_dir(base: &Path, version: &str) -> PathBuf {
+        let java_home = entry(base, version).join("Contents").join("Home");
         fs::create_dir_all(java_home.join("bin")).unwrap();
         fs::write(java_home.join("bin").join("java"), "").unwrap();
-        if managed {
-            fs::File::create(sibling_marker(base, version)).unwrap();
-        }
         java_home
     }
 
@@ -1141,101 +1136,139 @@ mod tests {
         source.join(release)
     }
 
-    // -- the marker --
+    // -- ownership is the name --
 
-    /// The marker is a file, and `scan` walks directories, so it must not be
-    /// mistaken for an install of its own - which would put a phantom row in
-    /// `jlo list` named after a real JDK.
+    /// Only `jlo-temurin-<semver>` is a JDK to jlo. An earlier jlo's bare
+    /// version and an IDE's `temurin-` download both work as JDKs, which is
+    /// what makes them worth pinning: listed, they would be resolved and
+    /// deleted.
     #[test]
-    fn the_sibling_marker_is_not_itself_an_install() {
+    fn only_a_jlo_entry_name_is_an_install() {
         let dir = tempdir().unwrap();
-        create_jdk_dir(dir.path(), "21.0.3+9", true);
+        create_jdk_dir(dir.path(), "21.0.3+9");
+        create_foreign_jdk_dir(dir.path(), "21.0.5+11");
+        create_named_jdk_dir(dir.path(), "temurin-21.0.5");
+        create_named_jdk_dir(dir.path(), "jlo-temurin-latest");
+        fs::write(entry(dir.path(), "21.0.7+6"), "a file").unwrap();
 
         let installed = JdkStore::at(dir.path()).list().unwrap();
-        assert_eq!(installed.len(), 1);
-        assert_eq!(installed[0].version, "21.0.3+9");
+        let versions: Vec<&str> = installed.iter().map(|jdk| jdk.version.as_str()).collect();
+        assert_eq!(versions, ["21.0.3+9"]);
     }
 
-    /// A marker outliving its install would claim the next install of that
-    /// version before jlo had written anything - so an unmanaged JDK the user
-    /// dropped in by hand under a name jlo once used would read as jlo's, and
-    /// `jlo remove` would delete it.
+    /// Everything the listing passes over, so `jlo list` can show it - except
+    /// jlo's own staging directories, and files. Another hidden directory is
+    /// somebody's, and shown.
     #[test]
-    fn removing_an_install_takes_its_marker_with_it() {
+    fn foreign_names_every_other_directory() {
         let dir = tempdir().unwrap();
-        create_jdk_dir(dir.path(), "21.0.3+9", true);
+        create_jdk_dir(dir.path(), "21.0.3+9");
+        create_foreign_jdk_dir(dir.path(), "21.0.5+11");
+        create_named_jdk_dir(dir.path(), "temurin-21.0.5");
+        create_named_jdk_dir(dir.path(), "jlo-temurin-latest");
+        fs::create_dir(dir.path().join(".tmpAbC123")).unwrap();
+        fs::create_dir(dir.path().join(".backup-jdk")).unwrap();
+        fs::write(dir.path().join("notes.txt"), "").unwrap();
+
+        assert_eq!(
+            JdkStore::at(dir.path()).foreign().unwrap(),
+            [
+                ".backup-jdk",
+                "21.0.5+11",
+                "jlo-temurin-latest",
+                "temurin-21.0.5"
+            ]
+        );
+    }
+
+    #[test]
+    fn foreign_of_a_missing_store_is_empty() {
+        let dir = tempdir().unwrap();
+        let store = JdkStore::at(dir.path().join("absent"));
+        assert!(store.foreign().unwrap().is_empty());
+    }
+
+    /// A removal goes through a staging directory; a successful one must not
+    /// leave that behind, or every removal would cost a stray `.tmp` entry
+    /// until the next install sweeps it.
+    #[test]
+    fn removing_an_install_leaves_nothing_behind() {
+        let dir = tempdir().unwrap();
+        create_jdk_dir(dir.path(), "21.0.3+9");
 
         JdkStore::at(dir.path())
             .remove(&["21".to_string()], None)
-            .expect("it is managed and not in use");
+            .expect("it is installed and not in use");
 
-        assert!(!sibling_marker(dir.path(), "21.0.3+9").exists());
-        assert!(!dir.path().join("21.0.3+9").exists());
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 
-    /// A *directory* whose name happens to end in `.jlo-managed` is an entry
-    /// like any other, and must not confer ownership on the entry it appears
-    /// to name - that would put a JDK jlo never installed within reach of
-    /// `jlo remove`, which is the one thing the marker exists to prevent.
+    /// Two runs deleting one install from listings taken before either
+    /// started: the second must fail, not report a removal it did not make.
     #[test]
-    fn a_directory_named_like_a_marker_does_not_claim_its_neighbour() {
+    fn removing_an_install_already_gone_fails() {
         let dir = tempdir().unwrap();
-        create_jdk_dir(dir.path(), "21.0.3+9", false);
-        fs::create_dir_all(dir.path().join("21.0.3+9.jlo-managed")).unwrap();
+        create_jdk_dir(dir.path(), "21.0.3+9");
+        remove_install(dir.path(), "21.0.3+9").unwrap();
 
-        let installed = JdkStore::at(dir.path()).list().unwrap();
-        let jdk = installed
-            .iter()
-            .find(|jdk| jdk.version == "21.0.3+9")
-            .expect("the JDK is listed");
+        remove_install(dir.path(), "21.0.3+9").expect_err("the install is gone");
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    /// A deletion that fails partway must not leave a gutted JDK under its
+    /// name, where `jlo env` would still hand it out. The remnant sits under
+    /// the staging prefix instead, named in the failure, for the sweep to
+    /// take. The failure is staged with a directory that cannot be emptied.
+    #[test]
+    fn a_deletion_that_fails_partway_leaves_nothing_under_the_name() {
+        let dir = tempdir().unwrap();
+        create_jdk_dir(dir.path(), "21.0.3+9");
+        let locked = entry(dir.path(), "21.0.3+9").join("lib");
+        fs::create_dir(&locked).unwrap();
+        fs::write(locked.join("modules"), "").unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o555)).unwrap();
+
+        let err = remove_install(dir.path(), "21.0.3+9").expect_err("lib cannot be emptied");
+
+        let store = JdkStore::at(dir.path());
+        assert!(store.list().unwrap().is_empty());
+        assert!(store.foreign().unwrap().is_empty());
+        let remnants: Vec<PathBuf> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        assert_eq!(remnants.len(), 1, "{remnants:?}");
         assert!(
-            !jdk.managed,
-            "a directory was accepted as an ownership marker"
+            format!("{err:#}").contains(&format!("{:?}", remnants[0])),
+            "{err:#}"
         );
+
+        let locked = remnants[0].join(entry_name("21.0.3+9")).join("lib");
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
     }
 
-    /// The order inside [`remove_install`], pinned from the outside: after a
-    /// removal whose directory deletion fails, the install must read as
-    /// *unmanaged* rather than as still-owned. A marker outliving its
-    /// directory cannot be cleaned up - `scan` walks directories - and would
-    /// claim whatever the user next puts under that name.
-    ///
-    /// The failure is staged by making the entry a *file*, which
-    /// `remove_dir_all` refuses: the closest a test can get to an interruption
-    /// without racing one.
+    /// An entry that is a symlink goes as a link: what it points at is not
+    /// in the store and is not jlo's.
     #[test]
-    fn a_failed_removal_leaves_the_install_unowned_not_claimed() {
+    fn removing_a_symlinked_entry_keeps_its_target() {
         let dir = tempdir().unwrap();
-        fs::write(dir.path().join("21.0.3+9"), "not a directory").unwrap();
-        fs::File::create(sibling_marker(dir.path(), "21.0.3+9")).unwrap();
+        let elsewhere = tempdir().unwrap();
+        create_named_jdk_dir(elsewhere.path(), "jdk");
+        std::os::unix::fs::symlink(elsewhere.path().join("jdk"), entry(dir.path(), "21.0.3+9"))
+            .unwrap();
 
-        remove_install(dir.path(), "21.0.3+9").expect_err("the entry is not a directory");
+        JdkStore::at(dir.path())
+            .remove(&["21".to_string()], None)
+            .expect("the link is an install");
 
-        assert!(
-            !sibling_marker(dir.path(), "21.0.3+9").exists(),
-            "the marker outlived the removal and would claim the next install"
-        );
-    }
-
-    /// The same order from the other side: a marker that cannot be removed
-    /// stops the removal before the directory goes, or the marker outlives
-    /// it after all. Staged by making the marker a directory, which
-    /// `remove_file` refuses with an error other than `NotFound`.
-    #[test]
-    fn a_marker_that_cannot_be_removed_keeps_the_install() {
-        let dir = tempdir().unwrap();
-        create_jdk_dir(dir.path(), "21.0.3+9", false);
-        fs::create_dir(sibling_marker(dir.path(), "21.0.3+9")).unwrap();
-
-        remove_install(dir.path(), "21.0.3+9").expect_err("the marker cannot be removed");
-
-        assert!(dir.path().join("21.0.3+9/bin/java").exists());
+        assert!(!entry(dir.path(), "21.0.3+9").exists());
+        assert!(elsewhere.path().join("jdk/bin/java").exists());
     }
 
     // -- the two shapes a store entry can have --
     //
-    // One store holds both: a bundle jlo installed, a flat directory an older
-    // jlo left behind, and a hand-placed JDK in either shape. Nothing here is
+    // One store holds both: a bundle jlo installed, and a hand-placed JDK in
+    // either shape. Nothing here is
     // gated on the host platform, because the rules are about the directory,
     // not about the machine reading it.
 
@@ -1244,7 +1277,7 @@ mod tests {
     #[test]
     fn find_matching_answers_a_bundle_with_its_contents_home() {
         let dir = tempdir().unwrap();
-        let java_home = create_bundle_jdk_dir(dir.path(), "21.0.3+9", true);
+        let java_home = create_bundle_jdk_dir(dir.path(), "21.0.3+9");
 
         assert_eq!(
             JdkStore::at(dir.path()).find_matching(request("21")),
@@ -1252,17 +1285,17 @@ mod tests {
         );
     }
 
-    /// The other half of the same rule. An install made before jlo kept the
-    /// bundle has no `Contents/Home`, and must keep resolving to itself
-    /// rather than to a path that is not there - there is no migration step.
+    /// The other half of the same rule. A flat entry placed by hand has no
+    /// `Contents/Home`, and must resolve to itself rather than to a path that
+    /// is not there.
     #[test]
     fn find_matching_answers_a_flat_install_with_itself() {
         let dir = tempdir().unwrap();
-        create_jdk_dir(dir.path(), "21.0.3+9", true);
+        create_jdk_dir(dir.path(), "21.0.3+9");
 
         assert_eq!(
             JdkStore::at(dir.path()).find_matching(request("21")),
-            Some(dir.path().join("21.0.3+9"))
+            Some(entry(dir.path(), "21.0.3+9"))
         );
     }
 
@@ -1272,12 +1305,12 @@ mod tests {
     #[test]
     fn a_contents_home_without_a_launcher_is_not_a_bundle() {
         let dir = tempdir().unwrap();
-        create_jdk_dir(dir.path(), "21.0.3+9", true);
-        fs::create_dir_all(dir.path().join("21.0.3+9/Contents/Home")).unwrap();
+        create_jdk_dir(dir.path(), "21.0.3+9");
+        fs::create_dir_all(entry(dir.path(), "21.0.3+9").join("Contents/Home")).unwrap();
 
         assert_eq!(
             JdkStore::at(dir.path()).find_matching(request("21")),
-            Some(dir.path().join("21.0.3+9"))
+            Some(entry(dir.path(), "21.0.3+9"))
         );
     }
 
@@ -1294,28 +1327,31 @@ mod tests {
     fn is_live_recognises_every_spelling_of_the_build_in_use() {
         let dir = tempdir().unwrap();
         let base = dir.path();
-        create_jdk_dir(base, "17.0.2+8", true);
-        let bundle_home = create_bundle_jdk_dir(base, "21.0.3+9", true);
-        let broken_home = create_bundle_jdk_dir(base, "25.0.1+8", true);
+        create_jdk_dir(base, "17.0.2+8");
+        let bundle_home = create_bundle_jdk_dir(base, "21.0.3+9");
+        let broken_home = create_bundle_jdk_dir(base, "25.0.1+8");
         fs::remove_file(broken_home.join("bin").join("java")).unwrap();
         let link = base.join("link");
-        std::os::unix::fs::symlink(base.join("17.0.2+8"), &link).unwrap();
+        std::os::unix::fs::symlink(entry(base, "17.0.2+8"), &link).unwrap();
         let store = JdkStore::at(base);
         let installed = store.list().unwrap();
         let jdk = |version: &str| installed.iter().find(|jdk| jdk.version == version).unwrap();
 
         let cases: [(&str, Option<PathBuf>, bool); 8] = [
-            ("17.0.2+8", Some(base.join("17.0.2+8")), true),
+            ("17.0.2+8", Some(entry(base, "17.0.2+8")), true),
             ("17.0.2+8", Some(link), true),
             (
                 "17.0.2+8",
-                Some(PathBuf::from(format!("{}/17.0.2+8/", base.display()))),
+                Some(PathBuf::from(format!(
+                    "{}/",
+                    entry(base, "17.0.2+8").display()
+                ))),
                 true,
             ),
             ("21.0.3+9", Some(bundle_home), true),
-            ("21.0.3+9", Some(base.join("21.0.3+9")), true),
+            ("21.0.3+9", Some(entry(base, "21.0.3+9")), true),
             ("25.0.1+8", Some(broken_home), true),
-            ("17.0.2+8", Some(base.join("21.0.3+9")), false),
+            ("17.0.2+8", Some(entry(base, "21.0.3+9")), false),
             ("17.0.2+8", None, false),
         ];
         for (version, active, live) in cases {
@@ -1332,21 +1368,21 @@ mod tests {
     #[test]
     fn find_matching_finds_latest() {
         let dir = tempdir().unwrap();
-        create_jdk_dir(dir.path(), "21.0.1+12", true);
-        create_jdk_dir(dir.path(), "21.0.3+9", true);
-        create_jdk_dir(dir.path(), "17.0.2+8", true);
+        create_jdk_dir(dir.path(), "21.0.1+12");
+        create_jdk_dir(dir.path(), "21.0.3+9");
+        create_jdk_dir(dir.path(), "17.0.2+8");
 
         let result = JdkStore::at(dir.path()).find_matching(request("21"));
         assert_eq!(
             result.unwrap().file_name().unwrap().to_str().unwrap(),
-            "21.0.3+9"
+            entry_name("21.0.3+9")
         );
     }
 
     #[test]
     fn find_matching_no_match() {
         let dir = tempdir().unwrap();
-        create_jdk_dir(dir.path(), "17.0.2+8", true);
+        create_jdk_dir(dir.path(), "17.0.2+8");
 
         assert!(
             JdkStore::at(dir.path())
@@ -1360,18 +1396,18 @@ mod tests {
     #[test]
     fn find_matching_never_crosses_streams() {
         let dir = tempdir().unwrap();
-        create_jdk_dir(dir.path(), "26.0.1+9", true);
-        create_jdk_dir(dir.path(), "26.0.2-beta+101.0.ea", true);
+        create_jdk_dir(dir.path(), "26.0.1+9");
+        create_jdk_dir(dir.path(), "26.0.2-beta+101.0.ea");
         let store = JdkStore::at(dir.path());
 
         assert_eq!(
             store.find_matching(request("26")),
-            Some(dir.path().join("26.0.1+9")),
+            Some(entry(dir.path(), "26.0.1+9")),
             "a GA request must not be answered with the higher-sorting beta"
         );
         assert_eq!(
             store.find_matching(request("26-ea")),
-            Some(dir.path().join("26.0.2-beta+101.0.ea"))
+            Some(entry(dir.path(), "26.0.2-beta+101.0.ea"))
         );
     }
 
@@ -1382,8 +1418,8 @@ mod tests {
     #[test]
     fn newest_ga_request_ignores_pre_releases() {
         let dir = tempdir().unwrap();
-        create_jdk_dir(dir.path(), "21.0.5+11", true);
-        create_jdk_dir(dir.path(), "28.0.0-beta+16.0.ea", true);
+        create_jdk_dir(dir.path(), "21.0.5+11");
+        create_jdk_dir(dir.path(), "28.0.0-beta+16.0.ea");
 
         assert_eq!(
             JdkStore::at(dir.path()).newest_ga_request(),
@@ -1394,7 +1430,7 @@ mod tests {
     #[test]
     fn newest_ga_request_is_none_when_only_pre_releases_are_installed() {
         let dir = tempdir().unwrap();
-        create_jdk_dir(dir.path(), "28.0.0-beta+16.0.ea", true);
+        create_jdk_dir(dir.path(), "28.0.0-beta+16.0.ea");
 
         assert_eq!(JdkStore::at(dir.path()).newest_ga_request(), None);
     }
@@ -1404,7 +1440,7 @@ mod tests {
     #[test]
     fn newest_ga_request_skips_a_store_below_the_floor() {
         let dir = tempdir().unwrap();
-        create_jdk_dir(dir.path(), "7.0.4+101", true);
+        create_jdk_dir(dir.path(), "7.0.4+101");
 
         assert_eq!(JdkStore::at(dir.path()).newest_ga_request(), None);
     }
@@ -1417,10 +1453,10 @@ mod tests {
     #[test]
     fn installed_requests_names_both_streams() {
         let dir = tempdir().unwrap();
-        create_jdk_dir(dir.path(), "21.0.3+9", true);
-        create_jdk_dir(dir.path(), "21.0.5+11", true);
-        create_jdk_dir(dir.path(), "17.0.2+8", true);
-        create_jdk_dir(dir.path(), "28.0.0-beta+16.0.ea", true);
+        create_jdk_dir(dir.path(), "21.0.3+9");
+        create_jdk_dir(dir.path(), "21.0.5+11");
+        create_jdk_dir(dir.path(), "17.0.2+8");
+        create_jdk_dir(dir.path(), "28.0.0-beta+16.0.ea");
 
         let requests = JdkStore::at(dir.path()).installed_requests().unwrap();
 
@@ -1467,9 +1503,9 @@ mod tests {
     #[test]
     fn list_sorted_newest_first() {
         let dir = tempdir().unwrap();
-        create_jdk_dir(dir.path(), "21.0.9+7", true);
-        create_jdk_dir(dir.path(), "21.0.12+7", true);
-        create_jdk_dir(dir.path(), "17.0.13+11", true);
+        create_jdk_dir(dir.path(), "21.0.9+7");
+        create_jdk_dir(dir.path(), "21.0.12+7");
+        create_jdk_dir(dir.path(), "17.0.13+11");
 
         let jdks = JdkStore::at(dir.path()).list().unwrap();
         let versions: Vec<_> = jdks.iter().map(|j| j.version.as_str()).collect();
@@ -1477,26 +1513,11 @@ mod tests {
     }
 
     #[test]
-    fn list_reports_managed_flag() {
-        let dir = tempdir().unwrap();
-        create_jdk_dir(dir.path(), "21.0.12+7", true);
-        create_jdk_dir(dir.path(), "17.0.13+11", false);
-
-        let jdks = JdkStore::at(dir.path()).list().unwrap();
-        assert_eq!(jdks[0].version, "21.0.12+7");
-        assert_eq!(jdks[0].request.major, 21);
-        assert!(jdks[0].managed);
-        assert_eq!(jdks[1].version, "17.0.13+11");
-        assert_eq!(jdks[1].request.major, 17);
-        assert!(!jdks[1].managed);
-    }
-
-    #[test]
     fn list_ignores_non_semver_and_files() {
         let dir = tempdir().unwrap();
-        create_jdk_dir(dir.path(), "21.0.12+7", true);
+        create_jdk_dir(dir.path(), "21.0.12+7");
         fs::create_dir(dir.path().join("not-a-jdk")).unwrap();
-        fs::write(dir.path().join("21.0.1+9"), "a file, not a directory").unwrap();
+        fs::write(entry(dir.path(), "21.0.1+9"), "a file, not a directory").unwrap();
 
         let jdks = JdkStore::at(dir.path()).list().unwrap();
         assert_eq!(jdks.len(), 1);
@@ -1605,7 +1626,7 @@ mod tests {
     fn a_staging_directory_is_not_mistaken_for_an_install() {
         let dir = tempdir().unwrap();
         let store = JdkStore::at(dir.path());
-        create_jdk_dir(dir.path(), "21.0.3+9", true);
+        create_jdk_dir(dir.path(), "21.0.3+9");
 
         let staging = staging_dir(&store).unwrap();
 
@@ -1625,8 +1646,8 @@ mod tests {
     #[test]
     fn prune_leaves_an_in_flight_staging_directory_alone() {
         let dir = tempdir().unwrap();
-        create_jdk_dir(dir.path(), "21.0.1+12", true);
-        create_jdk_dir(dir.path(), "21.0.3+9", true);
+        create_jdk_dir(dir.path(), "21.0.1+12");
+        create_jdk_dir(dir.path(), "21.0.3+9");
         let store = JdkStore::at(dir.path());
         let staging = staging_dir(&store).unwrap();
 
@@ -1642,16 +1663,15 @@ mod tests {
     // -- group_by_name --
 
     /// An install as `list` reports it, named the way `scan` names it.
-    fn jdk(version: &str, managed: bool) -> InstalledJdk {
+    fn jdk(version: &str) -> InstalledJdk {
         InstalledJdk {
             version: version.to_string(),
             request: Request::of_build(&crate::version::parse(version).unwrap()).unwrap(),
-            managed,
         }
     }
 
     /// A group as `(name, head, others)`, with every build by its version.
-    type Grouped<'a> = (String, Option<&'a str>, Vec<(&'a str, Status)>);
+    type Grouped<'a> = (String, &'a str, Vec<(&'a str, Status)>);
 
     fn grouped(installed: &[InstalledJdk]) -> Vec<Grouped<'_>> {
         group_by_name(installed)
@@ -1659,7 +1679,7 @@ mod tests {
             .map(|group| {
                 (
                     group.request.to_string(),
-                    group.head.map(|jdk| jdk.version.as_str()),
+                    group.head.version.as_str(),
                     group
                         .others
                         .into_iter()
@@ -1681,12 +1701,12 @@ mod tests {
             ["21.0.11+9.0.LTS", "21.0.11+10.0.LTS"],
             ["21.0.11+10.0.LTS", "21.0.11+9.0.LTS"],
         ] {
-            let installed = order.map(|version| jdk(version, true));
+            let installed = order.map(jdk);
             assert_eq!(
                 grouped(&installed),
                 vec![(
                     "21".to_string(),
-                    Some("21.0.11+10.0.LTS"),
+                    "21.0.11+10.0.LTS",
                     vec![("21.0.11+9.0.LTS", Status::Superseded)]
                 )]
             );
@@ -1698,52 +1718,13 @@ mod tests {
     /// picking one to delete: neither is superseded, and both stay.
     #[test]
     fn two_spellings_of_one_version_are_neither_superseded() {
-        let installed = [jdk("v21.0.11+9", true), jdk("21.0.11+9", true)];
+        let installed = [jdk("v21.0.11+9"), jdk("21.0.11+9")];
         assert_eq!(
             grouped(&installed),
             vec![(
                 "21".to_string(),
-                Some("v21.0.11+9"),
+                "v21.0.11+9",
                 vec![("21.0.11+9", Status::Installed)]
-            )]
-        );
-    }
-
-    /// Only a managed build heads a name, so an unmanaged *newer* one does
-    /// not make the managed one superseded. Unmanaged wins over superseded:
-    /// `remove --superseded` will not touch an unmanaged build whatever else
-    /// is true. The other builds stay newest first, whatever their status.
-    #[test]
-    fn only_a_managed_build_heads_its_name() {
-        let installed = [
-            jdk("21.0.8+9.0.LTS", false),
-            jdk("21.0.12+7", false),
-            jdk("21.0.9+10.0.LTS", true),
-            jdk("21.0.11+10.0.LTS", true),
-        ];
-        assert_eq!(
-            grouped(&installed),
-            vec![(
-                "21".to_string(),
-                Some("21.0.11+10.0.LTS"),
-                vec![
-                    ("21.0.12+7", Status::Unmanaged),
-                    ("21.0.9+10.0.LTS", Status::Superseded),
-                    ("21.0.8+9.0.LTS", Status::Unmanaged),
-                ]
-            )]
-        );
-    }
-
-    #[test]
-    fn a_name_of_only_unmanaged_builds_has_no_head() {
-        let installed = [jdk("17.0.20+101", false)];
-        assert_eq!(
-            grouped(&installed),
-            vec![(
-                "17".to_string(),
-                None,
-                vec![("17.0.20+101", Status::Unmanaged)]
             )]
         );
     }
@@ -1755,17 +1736,17 @@ mod tests {
     #[test]
     fn neither_stream_supersedes_the_other() {
         let installed = [
-            jdk("26.0.3-beta+102.0.ea", true),
-            jdk("26.0.2-beta+101.0.ea", true),
-            jdk("26.0.1+9", true),
+            jdk("26.0.3-beta+102.0.ea"),
+            jdk("26.0.2-beta+101.0.ea"),
+            jdk("26.0.1+9"),
         ];
         assert_eq!(
             grouped(&installed),
             vec![
-                ("26".to_string(), Some("26.0.1+9"), vec![]),
+                ("26".to_string(), "26.0.1+9", vec![]),
                 (
                     "26-ea".to_string(),
-                    Some("26.0.3-beta+102.0.ea"),
+                    "26.0.3-beta+102.0.ea",
                     vec![("26.0.2-beta+101.0.ea", Status::Superseded)]
                 ),
             ]
@@ -1775,26 +1756,27 @@ mod tests {
     // -- replacement --
 
     /// What `jlo update` deletes after installing `21.0.5+11`: every older
-    /// managed build of *that name* - and nothing of the sibling stream,
-    /// nothing unmanaged, nothing newer. `21.0.7+6` stands for a concurrent
-    /// run that installed past this one: measured against it, `21.0.5+11` -
-    /// the build this run exports - would be deleted too.
+    /// build of *that name* - and nothing of the sibling stream, nothing
+    /// foreign (an earlier jlo's bare `21.0.2+13`), nothing newer.
+    /// `21.0.7+6` stands for a concurrent run that installed past this one:
+    /// measured against it, `21.0.5+11` - the build this run exports - would
+    /// be deleted too.
     #[test]
     fn an_update_supersedes_the_older_builds_of_its_name_only() {
         let dir = tempdir().unwrap();
         let base = dir.path();
-        create_jdk_dir(base, "21.0.1+12", true);
-        create_jdk_dir(base, "21.0.3+9", true);
-        create_jdk_dir(base, "21.0.2+13", false);
-        create_jdk_dir(base, "21.0.5+11", true);
-        create_jdk_dir(base, "21.0.7+6", true);
-        create_jdk_dir(base, "21.0.0-beta+4.0.ea", true);
+        create_jdk_dir(base, "21.0.1+12");
+        create_jdk_dir(base, "21.0.3+9");
+        create_foreign_jdk_dir(base, "21.0.2+13");
+        create_jdk_dir(base, "21.0.5+11");
+        create_jdk_dir(base, "21.0.7+6");
+        create_jdk_dir(base, "21.0.0-beta+4.0.ea");
 
         let store = JdkStore::at(base);
         let installed = vec![(
             request("21"),
             "21.0.5+11".to_string(),
-            base.join("21.0.5+11"),
+            entry(base, "21.0.5+11"),
         )];
         let plan = store.plan_replacement(installed, None);
 
@@ -1802,27 +1784,27 @@ mod tests {
     }
 
     /// A plan is a listing, and the store can change before it is applied.
-    /// A build whose marker went in between is no longer known to be jlo's:
-    /// deleting it on the plan's word would delete what may not be ours.
+    /// A build another run deleted in between is a failure, not a removal
+    /// this run can claim.
     #[test]
-    fn applying_a_plan_leaves_a_build_whose_marker_has_gone() {
+    fn applying_a_plan_reports_a_build_already_gone() {
         let dir = tempdir().unwrap();
         let base = dir.path();
-        create_jdk_dir(base, "21.0.3+9", true);
-        create_jdk_dir(base, "21.0.5+11", true);
+        create_jdk_dir(base, "21.0.3+9");
+        create_jdk_dir(base, "21.0.5+11");
         let store = JdkStore::at(base);
         let installed = vec![(
             request("21"),
             "21.0.5+11".to_string(),
-            base.join("21.0.5+11"),
+            entry(base, "21.0.5+11"),
         )];
         let plan = store.plan_replacement(installed, None);
 
-        fs::remove_file(sibling_marker(base, "21.0.3+9")).unwrap();
+        remove_install(base, "21.0.3+9").unwrap();
         let mut run = InstallRun::default();
         plan.apply::<std::io::Sink>(None, &mut run).unwrap();
 
-        assert!(base.join("21.0.3+9/bin/java").exists());
+        assert!(!entry(base, "21.0.3+9").exists());
         let (_, result) = &run.names[0];
         let NameResult::Installed { replaced, failures } = result else {
             panic!("{result:?}");
@@ -1839,10 +1821,10 @@ mod tests {
     #[test]
     fn prune_leaves_the_jdk_java_home_points_at_alone() {
         let dir = tempdir().unwrap();
-        create_jdk_dir(dir.path(), "21.0.1+12", true);
-        create_jdk_dir(dir.path(), "21.0.3+9", true);
+        create_jdk_dir(dir.path(), "21.0.1+12");
+        create_jdk_dir(dir.path(), "21.0.3+9");
 
-        let active = dir.path().join("21.0.1+12");
+        let active = entry(dir.path(), "21.0.1+12");
         let report = JdkStore::at(dir.path()).prune(Some(&active)).unwrap();
 
         assert!(active.exists(), "the live JDK must survive");
@@ -1855,16 +1837,19 @@ mod tests {
     #[test]
     fn prune_removes_the_other_superseded_builds_around_the_live_one() {
         let dir = tempdir().unwrap();
-        create_jdk_dir(dir.path(), "21.0.1+12", true);
-        create_jdk_dir(dir.path(), "21.0.3+9", true);
-        create_jdk_dir(dir.path(), "17.0.2+8", true);
-        create_jdk_dir(dir.path(), "17.0.9+9", true);
+        create_jdk_dir(dir.path(), "21.0.1+12");
+        create_jdk_dir(dir.path(), "21.0.3+9");
+        create_jdk_dir(dir.path(), "17.0.2+8");
+        create_jdk_dir(dir.path(), "17.0.9+9");
 
-        let active = dir.path().join("21.0.1+12");
+        let active = entry(dir.path(), "21.0.1+12");
         JdkStore::at(dir.path()).prune(Some(&active)).unwrap();
 
         assert!(active.exists());
-        assert!(!dir.path().join("17.0.2+8").exists(), "17.0.2+8 still goes");
+        assert!(
+            !entry(dir.path(), "17.0.2+8").exists(),
+            "17.0.2+8 still goes"
+        );
     }
 
     /// In `jlo list`'s name order - newest major first, and of one major the
@@ -1884,7 +1869,7 @@ mod tests {
             "21.0.1+12",
             "21.0.3+9",
         ] {
-            create_jdk_dir(dir.path(), version, true);
+            create_jdk_dir(dir.path(), version);
         }
 
         let report = JdkStore::at(dir.path()).prune(None).unwrap();
@@ -1902,12 +1887,13 @@ mod tests {
         assert!(report.failures.is_empty());
     }
 
+    /// An earlier jlo's bare-version installs are older builds of a name
+    /// jlo now holds, and still not jlo's to delete.
     #[test]
-    fn prune_leaves_unmanaged_installs_alone() {
+    fn prune_leaves_foreign_installs_alone() {
         let dir = tempdir().unwrap();
-        create_jdk_dir(dir.path(), "21.0.1+12", false);
-        create_jdk_dir(dir.path(), "21.0.3+9", false);
-        create_jdk_dir(dir.path(), "17.0.2+8", true);
+        create_foreign_jdk_dir(dir.path(), "21.0.1+12");
+        create_jdk_dir(dir.path(), "21.0.3+9");
 
         let report = JdkStore::at(dir.path()).prune(None).unwrap();
 
@@ -1938,9 +1924,9 @@ mod tests {
     #[test]
     fn remove_deletes_every_build_of_a_major() {
         let dir = tempdir().unwrap();
-        create_jdk_dir(dir.path(), "17.0.2+8", true);
-        create_jdk_dir(dir.path(), "17.0.9+9", true);
-        create_jdk_dir(dir.path(), "21.0.3+9", true);
+        create_jdk_dir(dir.path(), "17.0.2+8");
+        create_jdk_dir(dir.path(), "17.0.9+9");
+        create_jdk_dir(dir.path(), "21.0.3+9");
 
         let report = JdkStore::at(dir.path())
             .remove(&targets(&["17"]), None)
@@ -1949,9 +1935,9 @@ mod tests {
         // Newest first, the order `list` and `jlo list --offline` use.
         assert_eq!(report.removed, vec!["17.0.9+9", "17.0.2+8"]);
         assert!(report.failures.is_empty());
-        assert!(!dir.path().join("17.0.2+8").exists());
-        assert!(!dir.path().join("17.0.9+9").exists());
-        assert!(dir.path().join("21.0.3+9").exists());
+        assert!(!entry(dir.path(), "17.0.2+8").exists());
+        assert!(!entry(dir.path(), "17.0.9+9").exists());
+        assert!(entry(dir.path(), "21.0.3+9").exists());
     }
 
     /// An exact target names one directory, so its siblings in the same major
@@ -1961,22 +1947,22 @@ mod tests {
     #[test]
     fn remove_deletes_only_the_exact_version_named() {
         let dir = tempdir().unwrap();
-        create_jdk_dir(dir.path(), "17.0.2+8", true);
-        create_jdk_dir(dir.path(), "17.0.9+9", true);
+        create_jdk_dir(dir.path(), "17.0.2+8");
+        create_jdk_dir(dir.path(), "17.0.9+9");
 
         let report = JdkStore::at(dir.path())
             .remove(&targets(&["17.0.2+8"]), None)
             .unwrap();
 
         assert_eq!(report.removed, vec!["17.0.2+8"]);
-        assert!(!dir.path().join("17.0.2+8").exists());
-        assert!(dir.path().join("17.0.9+9").exists());
+        assert!(!entry(dir.path(), "17.0.2+8").exists());
+        assert!(entry(dir.path(), "17.0.9+9").exists());
     }
 
     #[test]
     fn remove_reports_a_target_that_is_not_installed() {
         let dir = tempdir().unwrap();
-        create_jdk_dir(dir.path(), "21.0.3+9", true);
+        create_jdk_dir(dir.path(), "21.0.3+9");
 
         let err = JdkStore::at(dir.path())
             .remove(&targets(&["17"]), None)
@@ -1994,22 +1980,22 @@ mod tests {
     #[test]
     fn remove_does_not_round_an_exact_target_to_a_neighbour() {
         let dir = tempdir().unwrap();
-        create_jdk_dir(dir.path(), "17.0.9+9", true);
+        create_jdk_dir(dir.path(), "17.0.9+9");
 
         let err = JdkStore::at(dir.path())
             .remove(&targets(&["17.0.2+8"]), None)
             .unwrap_err();
 
         assert!(matches!(err, RemoveError::NotInstalled(_)), "{err}");
-        assert!(dir.path().join("17.0.9+9").exists());
+        assert!(entry(dir.path(), "17.0.9+9").exists());
     }
 
     #[test]
     fn remove_takes_several_targets_at_once() {
         let dir = tempdir().unwrap();
-        create_jdk_dir(dir.path(), "11.0.1+13", true);
-        create_jdk_dir(dir.path(), "17.0.2+8", true);
-        create_jdk_dir(dir.path(), "21.0.3+9", true);
+        create_jdk_dir(dir.path(), "11.0.1+13");
+        create_jdk_dir(dir.path(), "17.0.2+8");
+        create_jdk_dir(dir.path(), "21.0.3+9");
 
         let report = JdkStore::at(dir.path())
             .remove(&targets(&["11", "17"]), None)
@@ -2017,22 +2003,22 @@ mod tests {
 
         // Newest first overall, whatever order the targets came in.
         assert_eq!(report.removed, vec!["17.0.2+8", "11.0.1+13"]);
-        assert!(dir.path().join("21.0.3+9").exists());
+        assert!(entry(dir.path(), "21.0.3+9").exists());
     }
 
     #[test]
     fn remove_mixes_major_and_exact_targets() {
         let dir = tempdir().unwrap();
-        create_jdk_dir(dir.path(), "17.0.2+8", true);
-        create_jdk_dir(dir.path(), "21.0.1+12", true);
-        create_jdk_dir(dir.path(), "21.0.3+9", true);
+        create_jdk_dir(dir.path(), "17.0.2+8");
+        create_jdk_dir(dir.path(), "21.0.1+12");
+        create_jdk_dir(dir.path(), "21.0.3+9");
 
         let report = JdkStore::at(dir.path())
             .remove(&targets(&["17", "21.0.1+12"]), None)
             .unwrap();
 
         assert_eq!(report.removed, vec!["21.0.1+12", "17.0.2+8"]);
-        assert!(dir.path().join("21.0.3+9").exists());
+        assert!(entry(dir.path(), "21.0.3+9").exists());
     }
 
     /// Overlapping targets select the same directory once. Deleting it twice
@@ -2040,7 +2026,7 @@ mod tests {
     #[test]
     fn remove_does_not_select_an_overlapping_target_twice() {
         let dir = tempdir().unwrap();
-        create_jdk_dir(dir.path(), "17.0.2+8", true);
+        create_jdk_dir(dir.path(), "17.0.2+8");
 
         let report = JdkStore::at(dir.path())
             .remove(&targets(&["17", "17.0.2+8"]), None)
@@ -2056,7 +2042,7 @@ mod tests {
     #[test]
     fn remove_skips_a_version_that_matches_nothing_and_gets_on_with_the_rest() {
         let dir = tempdir().unwrap();
-        create_jdk_dir(dir.path(), "17.0.2+8", true);
+        create_jdk_dir(dir.path(), "17.0.2+8");
 
         let report = JdkStore::at(dir.path())
             .remove(&targets(&["3", "4", "5", "17"]), None)
@@ -2064,40 +2050,7 @@ mod tests {
 
         assert_eq!(report.removed, vec!["17.0.2+8"]);
         assert_eq!(report.not_installed, vec!["3", "4", "5"]);
-        assert!(!dir.path().join("17.0.2+8").exists());
-    }
-
-    /// Same for an unmanaged install named alongside a removable one: it is
-    /// reported and skipped, not a refusal.
-    #[test]
-    fn remove_skips_an_unmanaged_version_named_alongside_a_removable_one() {
-        let dir = tempdir().unwrap();
-        create_jdk_dir(dir.path(), "17.0.2+8", true);
-        create_jdk_dir(dir.path(), "21.0.3+9", false);
-
-        let report = JdkStore::at(dir.path())
-            .remove(&targets(&["17", "21"]), None)
-            .unwrap();
-
-        assert_eq!(report.removed, vec!["17.0.2+8"]);
-        assert_eq!(report.skipped_unmanaged, vec!["21.0.3+9"]);
-        assert!(dir.path().join("21.0.3+9").exists());
-    }
-
-    /// When nothing is left to do, the unmanaged install is the better
-    /// answer: it is the one J'Lo found and declined, where the other version
-    /// simply is not there.
-    #[test]
-    fn remove_names_the_unmanaged_install_ahead_of_a_missing_version() {
-        let dir = tempdir().unwrap();
-        create_jdk_dir(dir.path(), "21.0.3+9", false);
-
-        let err = JdkStore::at(dir.path())
-            .remove(&targets(&["3", "21"]), None)
-            .unwrap_err();
-
-        assert!(matches!(err, RemoveError::Unmanaged(_)), "{err}");
-        assert!(dir.path().join("21.0.3+9").exists());
+        assert!(!entry(dir.path(), "17.0.2+8").exists());
     }
 
     /// Every miss in one message. Reporting only the first would make
@@ -2105,7 +2058,7 @@ mod tests {
     #[test]
     fn remove_names_every_version_that_matched_nothing() {
         let dir = tempdir().unwrap();
-        create_jdk_dir(dir.path(), "21.0.3+9", true);
+        create_jdk_dir(dir.path(), "21.0.3+9");
 
         let err = JdkStore::at(dir.path())
             .remove(&targets(&["3", "4", "5"]), None)
@@ -2119,7 +2072,7 @@ mod tests {
     #[test]
     fn remove_collects_misses_from_either_side_of_a_match() {
         let dir = tempdir().unwrap();
-        create_jdk_dir(dir.path(), "21.0.3+9", true);
+        create_jdk_dir(dir.path(), "21.0.3+9");
 
         let report = JdkStore::at(dir.path())
             .remove(&targets(&["3", "21", "5", "3"]), None)
@@ -2129,67 +2082,22 @@ mod tests {
         assert_eq!(report.not_installed, vec!["3", "5"]);
     }
 
-    // -- remove: the two refusals --
+    // -- remove: the refusals --
 
-    /// No marker, no deletion. The user named this install
-    /// explicitly, so silently skipping it and exiting 0 would claim a
-    /// removal that did not happen.
+    /// A foreign directory named exactly like the target is not an install:
+    /// neither the name nor the exact build reaches it.
     #[test]
-    fn remove_refuses_an_unmanaged_install() {
+    fn remove_never_reaches_a_foreign_directory() {
         let dir = tempdir().unwrap();
-        create_jdk_dir(dir.path(), "17.0.2+8", false);
+        create_foreign_jdk_dir(dir.path(), "17.0.2+8");
 
-        let err = JdkStore::at(dir.path())
-            .remove(&targets(&["17"]), None)
-            .unwrap_err();
-
-        assert!(matches!(err, RemoveError::Unmanaged(_)), "{err}");
-        assert_eq!(
-            err.to_string(),
-            "refusing to remove 17.0.2+8: not installed by jlo"
-        );
-        assert!(
-            dir.path().join("17.0.2+8").exists(),
-            "the unmanaged install must survive the refusal"
-        );
-    }
-
-    /// Before the marker moved beside the install, jlo wrote `.jlo-managed`
-    /// *inside* it. That file no longer confers ownership: such an install is
-    /// still listed, but as unmanaged, and `remove` leaves it where it is.
-    #[test]
-    fn an_in_directory_marker_is_not_ownership() {
-        let dir = tempdir().unwrap();
-        create_jdk_dir(dir.path(), "17.0.2+8", false);
-        fs::File::create(dir.path().join("17.0.2+8").join(".jlo-managed")).unwrap();
-        let store = JdkStore::at(dir.path());
-
-        let installed = store.list().unwrap();
-        assert_eq!(installed.len(), 1);
-        assert_eq!(installed[0].version, "17.0.2+8");
-        assert!(!installed[0].managed);
-
-        let err = store.remove(&targets(&["17"]), None).unwrap_err();
-        assert!(matches!(err, RemoveError::Unmanaged(_)), "{err}");
-        assert!(dir.path().join("17.0.2+8").join("bin").is_dir());
-    }
-
-    /// A managed match alongside an unmanaged one is not a refusal: the
-    /// managed install goes, and the one left behind is reported by name so
-    /// the user is not left wondering why a version never goes away.
-    #[test]
-    fn remove_skips_an_unmanaged_sibling_without_refusing() {
-        let dir = tempdir().unwrap();
-        create_jdk_dir(dir.path(), "17.0.2+8", true);
-        create_jdk_dir(dir.path(), "17.0.9+9", false);
-
-        let report = JdkStore::at(dir.path())
-            .remove(&targets(&["17"]), None)
-            .unwrap();
-
-        assert_eq!(report.removed, vec!["17.0.2+8"]);
-        assert_eq!(report.skipped_unmanaged, vec!["17.0.9+9"]);
-        assert!(dir.path().join("17.0.9+9").exists());
+        for target in ["17", "17.0.2+8"] {
+            let err = JdkStore::at(dir.path())
+                .remove(&targets(&[target]), None)
+                .unwrap_err();
+            assert!(matches!(err, RemoveError::NotInstalled(_)), "{err}");
+        }
+        assert!(dir.path().join("17.0.2+8").join("bin/java").exists());
     }
 
     /// The hazard that killed `jlo update --clean`: deleting the JDK the
@@ -2197,8 +2105,8 @@ mod tests {
     #[test]
     fn remove_refuses_the_jdk_java_home_points_at() {
         let dir = tempdir().unwrap();
-        create_jdk_dir(dir.path(), "21.0.3+9", true);
-        let active = dir.path().join("21.0.3+9");
+        create_jdk_dir(dir.path(), "21.0.3+9");
+        let active = entry(dir.path(), "21.0.3+9");
 
         let err = JdkStore::at(dir.path())
             .remove(&targets(&["21.0.3+9"]), Some(&active))
@@ -2219,9 +2127,9 @@ mod tests {
     #[test]
     fn remove_skips_the_live_build_and_takes_its_siblings() {
         let dir = tempdir().unwrap();
-        create_jdk_dir(dir.path(), "21.0.1+12", true);
-        create_jdk_dir(dir.path(), "21.0.3+9", true);
-        let active = dir.path().join("21.0.3+9");
+        create_jdk_dir(dir.path(), "21.0.1+12");
+        create_jdk_dir(dir.path(), "21.0.3+9");
+        let active = entry(dir.path(), "21.0.3+9");
 
         let report = JdkStore::at(dir.path())
             .remove(&targets(&["21"]), Some(&active))
@@ -2238,10 +2146,10 @@ mod tests {
     #[test]
     fn remove_takes_the_rest_of_a_long_list_past_the_live_jdk() {
         let dir = tempdir().unwrap();
-        create_jdk_dir(dir.path(), "17.0.2+8", true);
-        create_jdk_dir(dir.path(), "21.0.3+9", true);
-        create_jdk_dir(dir.path(), "26.0.2+101", true);
-        let active = dir.path().join("26.0.2+101");
+        create_jdk_dir(dir.path(), "17.0.2+8");
+        create_jdk_dir(dir.path(), "21.0.3+9");
+        create_jdk_dir(dir.path(), "26.0.2+101");
+        let active = entry(dir.path(), "26.0.2+101");
 
         let report = JdkStore::at(dir.path())
             .remove(&targets(&["21", "26", "3", "17"]), Some(&active))
@@ -2253,27 +2161,12 @@ mod tests {
         assert!(active.exists());
     }
 
-    /// Checked before the marker: when a target trips both refusals, the
-    /// live-JDK one is the more useful thing to say.
-    #[test]
-    fn remove_reports_the_live_jdk_ahead_of_the_missing_marker() {
-        let dir = tempdir().unwrap();
-        create_jdk_dir(dir.path(), "21.0.3+9", false);
-        let active = dir.path().join("21.0.3+9");
-
-        let err = JdkStore::at(dir.path())
-            .remove(&targets(&["21"]), Some(&active))
-            .unwrap_err();
-
-        assert!(matches!(err, RemoveError::InUse(_)), "{err}");
-    }
-
     #[test]
     fn remove_proceeds_when_java_home_points_somewhere_else() {
         let dir = tempdir().unwrap();
-        create_jdk_dir(dir.path(), "17.0.2+8", true);
-        create_jdk_dir(dir.path(), "21.0.3+9", true);
-        let active = dir.path().join("21.0.3+9");
+        create_jdk_dir(dir.path(), "17.0.2+8");
+        create_jdk_dir(dir.path(), "21.0.3+9");
+        let active = entry(dir.path(), "21.0.3+9");
 
         let report = JdkStore::at(dir.path())
             .remove(&targets(&["17"]), Some(&active))
@@ -2317,12 +2210,10 @@ mod tests {
         let ga = InstalledJdk {
             version: "26.0.1+9".to_string(),
             request: request("26"),
-            managed: true,
         };
         let ea = InstalledJdk {
             version: "26.0.2-beta+101.0.ea".to_string(),
             request: request("26-ea"),
-            managed: true,
         };
 
         assert!(Selector::parse("26").matches(&ga));
@@ -2575,8 +2466,8 @@ mod tests {
     #[test]
     fn the_run_never_moves_a_name_back() {
         let dir = tempdir().unwrap();
-        create_jdk_dir(dir.path(), "21.0.10+5", true);
-        create_jdk_dir(dir.path(), "21.0.12+7", true);
+        create_jdk_dir(dir.path(), "21.0.10+5");
+        create_jdk_dir(dir.path(), "21.0.12+7");
         let adoptium = Adoptium::new().offer("21", "21.0.11+9", 0, true);
 
         let run = run_unwrapped(&adoptium, &JdkStore::at(dir.path()), &["21"], None);
@@ -2587,16 +2478,16 @@ mod tests {
             run.names,
             vec![(request("21"), NameResult::UpToDate("21.0.12+7".to_string()))]
         );
-        assert!(!dir.path().join("21.0.11+9").exists());
-        assert!(dir.path().join("21.0.10+5").exists());
+        assert!(!entry(dir.path(), "21.0.11+9").exists());
+        assert!(entry(dir.path(), "21.0.10+5").exists());
     }
 
-    /// Two spellings of one version are one version: an unmanaged
-    /// `v21.0.11+9` is the offer already present.
+    /// Two spellings of one version are one version: a hand-placed
+    /// `jlo-temurin-v21.0.11+9` is the offer already present.
     #[test]
     fn the_run_takes_another_spelling_of_the_offer_as_current() {
         let dir = tempdir().unwrap();
-        create_jdk_dir(dir.path(), "v21.0.11+9", false);
+        create_jdk_dir(dir.path(), "v21.0.11+9");
         let adoptium = Adoptium::new().offer("21", "21.0.11+9", 0, true);
 
         let run = run_unwrapped(&adoptium, &JdkStore::at(dir.path()), &["21"], None);
@@ -2610,7 +2501,7 @@ mod tests {
                 NameResult::UpToDate("v21.0.11+9".to_string())
             )]
         );
-        assert!(!dir.path().join("21.0.11+9").exists());
+        assert!(!entry(dir.path(), "21.0.11+9").exists());
     }
 
     /// Only builds of the name are measured against: a `21-ea` build newer
@@ -2619,8 +2510,8 @@ mod tests {
     #[test]
     fn a_newer_pre_release_does_not_hold_back_its_release() {
         let dir = tempdir().unwrap();
-        create_jdk_dir(dir.path(), "21.0.5+11", true);
-        create_jdk_dir(dir.path(), "21.0.10-beta+3", true);
+        create_jdk_dir(dir.path(), "21.0.5+11");
+        create_jdk_dir(dir.path(), "21.0.10-beta+3");
         let adoptium = Adoptium::new().offer("21", "21.0.9+10", 1, true);
 
         let run = run_unwrapped(&adoptium, &JdkStore::at(dir.path()), &["21"], None);
@@ -2628,8 +2519,8 @@ mod tests {
         adoptium.assert();
         assert!(run.error.is_none(), "{:?}", run.error);
         assert_eq!(run.names, vec![(request("21"), installed(&["21.0.5+11"]))]);
-        assert!(dir.path().join("21.0.9+10").exists());
-        assert!(dir.path().join("21.0.10-beta+3").exists());
+        assert!(entry(dir.path(), "21.0.9+10").exists());
+        assert!(entry(dir.path(), "21.0.10-beta+3").exists());
     }
 
     /// `jlo install 8 21` on Apple silicon installs 21: a name Adoptium does
@@ -2652,7 +2543,7 @@ mod tests {
                 (request("21"), installed(&[]))
             ]
         );
-        assert!(dir.path().join("21.0.9+10").exists());
+        assert!(entry(dir.path(), "21.0.9+10").exists());
     }
 
     /// With no name left, a command told to install something must not
@@ -2688,8 +2579,8 @@ mod tests {
     #[test]
     fn a_failed_lookup_stops_the_run_before_any_download() {
         let dir = tempdir().unwrap();
-        create_jdk_dir(dir.path(), "17.0.5+8", true);
-        create_jdk_dir(dir.path(), "21.0.5+11", true);
+        create_jdk_dir(dir.path(), "17.0.5+8");
+        create_jdk_dir(dir.path(), "21.0.5+11");
         let adoptium = Adoptium::new()
             .offer("21", "21.0.9+10", 0, true)
             .failing("17");
@@ -2711,8 +2602,8 @@ mod tests {
         );
         assert!(run.names.is_empty());
         assert!(out.is_empty(), "the shell was told something");
-        assert!(dir.path().join("21.0.5+11").exists());
-        assert!(!dir.path().join("21.0.9+10").exists());
+        assert!(entry(dir.path(), "21.0.5+11").exists());
+        assert!(!entry(dir.path(), "21.0.9+10").exists());
     }
 
     /// Unwrapped, nothing is known to evaluate stdout, so the shell cannot
@@ -2720,8 +2611,8 @@ mod tests {
     #[test]
     fn an_unwrapped_run_keeps_the_live_build() {
         let dir = tempdir().unwrap();
-        create_jdk_dir(dir.path(), "21.0.5+11", true);
-        let live = dir.path().join("21.0.5+11");
+        create_jdk_dir(dir.path(), "21.0.5+11");
+        let live = entry(dir.path(), "21.0.5+11");
         let adoptium = Adoptium::new().offer("21", "21.0.9+10", 1, true);
 
         let run = run_unwrapped(&adoptium, &JdkStore::at(dir.path()), &["21"], Some(&live));
@@ -2731,7 +2622,29 @@ mod tests {
         assert!(live.exists());
         assert_eq!(run.kept_active.as_deref(), Some("21.0.5+11"));
         assert!(run.repointed.is_none());
-        assert!(dir.path().join("21.0.9+10").exists());
+        assert!(entry(dir.path(), "21.0.9+10").exists());
+    }
+
+    /// An entry symlinked to another is the same JDK: `JAVA_HOME` through the
+    /// link is live in both, and keeping only one would delete the link's
+    /// target or leave the link dangling.
+    #[test]
+    fn an_unwrapped_run_keeps_every_build_the_shell_is_on() {
+        let dir = tempdir().unwrap();
+        create_jdk_dir(dir.path(), "21.0.5+11");
+        std::os::unix::fs::symlink(
+            entry(dir.path(), "21.0.5+11"),
+            entry(dir.path(), "21.0.6+7"),
+        )
+        .unwrap();
+        let live = entry(dir.path(), "21.0.6+7");
+        let adoptium = Adoptium::new().offer("21", "21.0.9+10", 1, true);
+
+        let run = run_unwrapped(&adoptium, &JdkStore::at(dir.path()), &["21"], Some(&live));
+
+        assert!(run.error.is_none(), "{:?}", run.error);
+        assert!(live.join("bin/java").exists());
+        assert!(entry(dir.path(), "21.0.5+11").exists());
     }
 
     /// Wrapped, the live build goes too - but only after the payload that
@@ -2739,8 +2652,8 @@ mod tests {
     #[test]
     fn a_wrapped_run_deletes_the_live_build_only_after_the_payload() {
         let dir = tempdir().unwrap();
-        create_jdk_dir(dir.path(), "21.0.5+11", true);
-        let live = dir.path().join("21.0.5+11");
+        create_jdk_dir(dir.path(), "21.0.5+11");
+        let live = entry(dir.path(), "21.0.5+11");
         let adoptium = Adoptium::new().offer("21", "21.0.9+10", 1, true);
         let mut witness = Witness::new(live.clone());
 
@@ -2757,7 +2670,7 @@ mod tests {
         assert_eq!(witness.present_at_flush, Some(true));
         assert!(!live.exists());
         // The package is flat, so its java home is the entry itself.
-        let new = dir.path().join("21.0.9+10");
+        let new = entry(dir.path(), "21.0.9+10");
         assert_eq!(run.repointed.as_deref(), Some(new.as_path()));
         assert!(run.kept_active.is_none());
         let payload = witness.payload();
@@ -2774,9 +2687,9 @@ mod tests {
     fn a_payload_that_cannot_be_written_deletes_nothing() {
         for writes in [false, true] {
             let dir = tempdir().unwrap();
-            create_jdk_dir(dir.path(), "17.0.5+8", true);
-            create_jdk_dir(dir.path(), "21.0.5+11", true);
-            let live = dir.path().join("21.0.5+11");
+            create_jdk_dir(dir.path(), "17.0.5+8");
+            create_jdk_dir(dir.path(), "21.0.5+11");
+            let live = entry(dir.path(), "21.0.5+11");
             let adoptium = Adoptium::new()
                 .offer("21", "21.0.9+10", 1, true)
                 .offer("17", "17.0.9+1", 1, true);
@@ -2792,7 +2705,7 @@ mod tests {
             adoptium.assert();
             assert!(run.error.is_some(), "writes: {writes}");
             assert!(live.exists(), "writes: {writes}");
-            assert!(dir.path().join("17.0.5+8").exists(), "writes: {writes}");
+            assert!(entry(dir.path(), "17.0.5+8").exists(), "writes: {writes}");
             assert!(run.repointed.is_none(), "writes: {writes}");
         }
     }
@@ -2803,8 +2716,8 @@ mod tests {
     #[test]
     fn a_failed_download_keeps_what_the_names_before_it_did() {
         let dir = tempdir().unwrap();
-        create_jdk_dir(dir.path(), "17.0.5+8", true);
-        create_jdk_dir(dir.path(), "21.0.5+11", true);
+        create_jdk_dir(dir.path(), "17.0.5+8");
+        create_jdk_dir(dir.path(), "21.0.5+11");
         let adoptium = Adoptium::new()
             .offer("21", "21.0.9+10", 1, true)
             .offer("17", "17.0.9+1", 1, false);
@@ -2824,10 +2737,10 @@ mod tests {
             format!("{:#}", error.error).contains("checksum"),
             "{error:?}"
         );
-        assert!(!dir.path().join("21.0.5+11").exists());
-        assert!(dir.path().join("21.0.9+10").exists());
-        assert!(dir.path().join("17.0.5+8").exists());
-        assert!(!dir.path().join("17.0.9+1").exists());
+        assert!(!entry(dir.path(), "21.0.5+11").exists());
+        assert!(entry(dir.path(), "21.0.9+10").exists());
+        assert!(entry(dir.path(), "17.0.5+8").exists());
+        assert!(!entry(dir.path(), "17.0.9+1").exists());
         assert_eq!(String::from_utf8(out).unwrap(), "# jlo'end\n");
     }
 
@@ -2836,7 +2749,7 @@ mod tests {
     #[test]
     fn an_earlier_error_survives_a_failed_payload() {
         let dir = tempdir().unwrap();
-        create_jdk_dir(dir.path(), "21.0.5+11", true);
+        create_jdk_dir(dir.path(), "21.0.5+11");
         let adoptium = Adoptium::new()
             .offer("21", "21.0.9+10", 1, true)
             .offer("17", "17.0.9+1", 1, false);
@@ -2854,7 +2767,7 @@ mod tests {
             format!("{:#}", error.error).contains("checksum"),
             "{error:?}"
         );
-        assert!(dir.path().join("21.0.5+11").exists());
+        assert!(entry(dir.path(), "21.0.5+11").exists());
     }
 
     /// A name given twice is one lookup and one download.
@@ -2894,62 +2807,34 @@ mod tests {
             )
             .unwrap();
 
-        (dest_parent.join("21.0.3+9"), returned)
+        (entry(dest_parent, "21.0.3+9"), returned)
     }
 
-    /// The marker goes *beside* the install, never inside it: on macOS the
-    /// install is a signed bundle and a file at its root unseals it. Nothing
-    /// is written into the directory at all.
+    /// The install lands under its entry name, and nothing else appears in
+    /// the store: no marker beside it, no staging left over.
     #[test]
-    fn install_moves_and_marks() {
+    fn install_moves_into_the_entry_name() {
         let dest_parent = tempdir().unwrap();
         let (entry, java_home) = install_mock_jdk(dest_parent.path());
 
-        assert!(sibling_marker(dest_parent.path(), "21.0.3+9").exists());
-        assert!(!entry.join(".jlo-managed").exists());
         assert!(java_home.join("bin").join("java").exists());
+        let names: Vec<_> = fs::read_dir(dest_parent.path())
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        assert_eq!(names, [entry]);
     }
 
-    /// A directory at the marker path makes the marker write fail after the
-    /// JDK has already been moved into place. Left there, it would be an
-    /// unmarked build of the version: `install` would call the name up to
-    /// date and never retry, and `remove` would refuse it as not jlo's. So
-    /// the failed install takes its JDK back out.
+    /// An entry already holding the name - a concurrent run's, or one placed
+    /// by hand - is not overwritten: the install fails and leaves it as it
+    /// was.
     #[test]
-    fn a_failed_marker_write_leaves_no_unmanaged_install_behind() {
+    fn an_install_onto_an_occupied_entry_leaves_it_alone() {
         let dest_parent = tempdir().unwrap();
         let source_dir = tempdir().unwrap();
         create_extracted_jdk(source_dir.path(), "jdk-21.0.3+9");
-        fs::create_dir(sibling_marker(dest_parent.path(), "21.0.3+9")).unwrap();
-
-        let result = JdkStore::at(dest_parent.path()).install(
-            &metadata("21.0.3+9"),
-            source_dir.path(),
-            &InstallUi::hidden("test"),
-        );
-
-        let message = format!("{:#}", result.expect_err("the marker could not be written"));
-        assert!(
-            message.contains("could not create marker file"),
-            "{message}"
-        );
-        assert!(
-            !dest_parent.path().join("21.0.3+9").exists(),
-            "an unmarked install was left in the store"
-        );
-    }
-
-    /// A directory already holding the version's name that jlo did not mark
-    /// may be `IntelliJ`'s or the user's. The install fails, and it must not
-    /// fail by claiming that directory: no marker appears beside it and its
-    /// contents stay as they were.
-    #[test]
-    fn an_install_onto_an_unmanaged_directory_does_not_claim_it() {
-        let dest_parent = tempdir().unwrap();
-        let source_dir = tempdir().unwrap();
-        create_extracted_jdk(source_dir.path(), "jdk-21.0.3+9");
-        create_jdk_dir(dest_parent.path(), "21.0.3+9", false);
-        let theirs = dest_parent.path().join("21.0.3+9");
+        create_jdk_dir(dest_parent.path(), "21.0.3+9");
+        let theirs = entry(dest_parent.path(), "21.0.3+9");
         fs::write(theirs.join("release"), "theirs").unwrap();
 
         let result = JdkStore::at(dest_parent.path()).install(
@@ -2958,11 +2843,7 @@ mod tests {
             &InstallUi::hidden("test"),
         );
 
-        assert!(result.is_err(), "installed over someone else's directory");
-        assert!(
-            !sibling_marker(dest_parent.path(), "21.0.3+9").exists(),
-            "an unmanaged directory was marked as jlo's"
-        );
+        assert!(result.is_err(), "installed over an existing entry");
         assert_eq!(
             fs::read_to_string(theirs.join("release")).unwrap(),
             "theirs"
@@ -2982,12 +2863,12 @@ mod tests {
     #[test]
     fn active_version_names_the_install_java_home_points_at() {
         let dir = tempdir().unwrap();
-        create_jdk_dir(dir.path(), "17.0.2+8", true);
-        create_jdk_dir(dir.path(), "21.0.3+9", true);
+        create_jdk_dir(dir.path(), "17.0.2+8");
+        create_jdk_dir(dir.path(), "21.0.3+9");
         let store = JdkStore::at(dir.path());
         let installed = store.list().unwrap();
 
-        let active = dir.path().join("21.0.3+9");
+        let active = entry(dir.path(), "21.0.3+9");
         assert_eq!(
             store.active_version(&installed, Some(&active)).as_deref(),
             Some("21.0.3+9")
@@ -2997,7 +2878,7 @@ mod tests {
     #[test]
     fn active_version_is_none_when_java_home_points_outside_the_store() {
         let dir = tempdir().unwrap();
-        create_jdk_dir(dir.path(), "21.0.3+9", true);
+        create_jdk_dir(dir.path(), "21.0.3+9");
         let store = JdkStore::at(dir.path());
         let installed = store.list().unwrap();
 

@@ -47,7 +47,9 @@ With the optional autoload line in your profile, `cd` into the project does the 
 downloads: a pinned JDK that is not installed yet gets a notice, and `jlo env` fetches it. Outside a project,
 `jlo init --global 25` sets your default — with autoload, every new shell starts on it.
 
-JDKs are installed to `~/Library/Java/JavaVirtualMachines/` on macOS and `~/.jdks/` on Linux.
+JDKs are installed to `~/Library/Java/JavaVirtualMachines/` on macOS and `~/.jdks/` on Linux, each in a directory
+named `jlo-temurin-<version>`. J'Lo never touches anything else in there; `jlo list` shows it so you can delete it by
+hand.
 
 A version is a major (`25`) or a pre-release stream (`28-ea`). `jlo --help` lists every command.
 

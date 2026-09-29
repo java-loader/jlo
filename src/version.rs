@@ -1,6 +1,6 @@
-//! Ordering for JDK directory and catalogue names (`21.0.11+10.0.LTS`) and
-//! J'Lo's release tags. Strict: a name that is not semver is an error, which is
-//! how `temurin-21` and friends stay out of the store.
+//! Ordering for JDK versions - a store entry's name after its prefix, and the
+//! catalogue's (`21.0.11+10.0.LTS`) - and J'Lo's release tags. Strict: a
+//! version that is not semver is an error.
 //!
 //! Build metadata participates in the ordering, against the semver spec: it
 //! carries Adoptium's build number, two builds of one patch are two

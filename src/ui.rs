@@ -232,9 +232,6 @@ pub(crate) fn remove_refusal_hint(refusal: &RemoveError) -> Option<String> {
             "Run 'jlo list --offline' to see what is installed.".to_string()
         }
         RemoveError::InUse(_) => switch_shell_hint("remove it"),
-        RemoveError::Unmanaged(_) => "J'Lo only deletes installs carrying its .jlo-managed \
-             marker; remove the directory by hand if you are sure."
-            .to_string(),
         RemoveError::Store(_) => return None,
     };
     Some(format!("Nothing was removed. {advice}"))
@@ -380,11 +377,6 @@ pub(crate) fn remove_report(report: &RemoveReport) {
         print_removed(count, "JDK");
     }
 
-    // Listed, not counted: the user named these.
-    for version in &report.skipped_unmanaged {
-        note(format!("  left {version} alone (not managed by jlo)"));
-    }
-
     // Not a failure - already absent is what was asked for - but usually a
     // typo, so still said.
     if !report.not_installed.is_empty() {
@@ -403,13 +395,14 @@ pub(crate) fn remove_report(report: &RemoveReport) {
 
 /// The `jlo list --offline` listing: the networked listing's rows, minus the
 /// catalogue.
-pub(crate) fn offline_list(groups: &[NameGroup], active_version: Option<&str>, base: &Path) {
+pub(crate) fn offline_list(groups: &[NameGroup], active_version: Option<&str>, foreign: &Foreign) {
     if groups.is_empty() {
-        eprintln!("No JDKs installed in {}.", base.display());
+        eprintln!("No JDKs installed in {}.", foreign.base.display());
+        print_foreign(foreign, false);
         return;
     }
 
-    print_listing(&build_rows(&[], groups, active_version));
+    print_listing(&build_rows(&[], groups, active_version), foreign);
 }
 
 /// The `jlo list` listing: what Adoptium offers, merged with what is
@@ -419,19 +412,53 @@ pub(crate) fn remote_list(
     available: &[RemoteJdk],
     groups: &[NameGroup],
     active_version: Option<&str>,
+    foreign: &Foreign,
 ) {
     if available.is_empty() {
         eprintln!("Adoptium offers no JDKs for this OS and architecture.");
         // Not a return: installs still present are still removable.
         if groups.is_empty() {
+            print_foreign(foreign, false);
             return;
         }
     }
 
-    print_listing(&build_rows(available, groups, active_version));
+    print_listing(&build_rows(available, groups, active_version), foreign);
 }
 
-fn print_listing(rows: &[NameRow]) {
+/// The directories in the store that are not jlo's, and where they are.
+pub(crate) struct Foreign<'a> {
+    pub(crate) names: &'a [String],
+    pub(crate) base: &'a Path,
+}
+
+/// Listed so the user sees what jlo will never delete for them - an earlier
+/// jlo's bare-version installs, an IDE's downloads - and can do it by hand.
+/// Rows to stdout like every other listed name, the heading to stderr.
+fn print_foreign(foreign: &Foreign, after_section: bool) {
+    if foreign.names.is_empty() {
+        return;
+    }
+    if after_section {
+        eprintln!();
+    }
+    eprintln!(
+        "{} {}",
+        style("Not managed by jlo").bold().for_stderr(),
+        dim(format!(
+            "(in {})",
+            tilde(foreign.base, std::env::home_dir().as_deref())
+        ))
+    );
+    print_lines(
+        foreign
+            .names
+            .iter()
+            .map(|name| format!("    {}", style(name).dim())),
+    );
+}
+
+fn print_listing(rows: &[NameRow], foreign: &Foreign) {
     let listing = render_rows(rows);
 
     // Headings and the tip go to stderr, so a pipe sees only the rows.
@@ -447,6 +474,7 @@ fn print_listing(rows: &[NameRow]) {
         eprintln!("{}", style("Available").bold().for_stderr());
         print_lines([available]);
     }
+    print_foreign(foreign, true);
 
     if let Some(tip) = tip_line(rows) {
         eprintln!("\n{tip}");
@@ -455,7 +483,7 @@ fn print_listing(rows: &[NameRow]) {
 
 /// `jlo current`'s stdout line: which JDK, and why.
 pub(crate) fn provenance_line(active: &Active) -> String {
-    // A JDK jlo did not install has no version to name; the path says "not
+    // A JDK that is not jlo's has no version to name; the path says "not
     // mine", and usually holds the version anyway.
     let subject = match &active.version {
         Some(version) => version.clone(),
@@ -564,7 +592,7 @@ struct Build {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct NameRow {
     name: Request,
-    /// The newest managed build of the name, as shown in the column.
+    /// The newest build of the name, as shown in the column.
     installed: Option<String>,
     /// The build Adoptium offers, when that exact build is not installed.
     /// Older than what is when the catalogue sits behind the store.
@@ -620,7 +648,7 @@ fn name_row(
     let update = !builds.is_empty()
         && offered.is_some_and(|jdk| supersedes_every_install(&jdk.version, &builds));
 
-    let head = group.and_then(|group| group.head);
+    let head = group.map(|group| group.head);
     let is_active = |version: &str| active_version == Some(version);
     let others = group
         .map(|group| {
@@ -659,7 +687,6 @@ enum Mark {
     Active,
     Update,
     Superseded,
-    Unmanaged,
 }
 
 impl Mark {
@@ -669,7 +696,6 @@ impl Mark {
             Mark::Active => style("\u{25cf}").green().to_string(),
             Mark::Update => style("\u{2191}").yellow().to_string(),
             Mark::Superseded => style("\u{2717}").dim().to_string(),
-            Mark::Unmanaged => style("?").dim().to_string(),
         }
     }
 }
@@ -685,7 +711,7 @@ struct Cells<'a> {
     tail: String,
 }
 
-/// Anything of the name on disk, managed or not.
+/// Anything of the name on disk.
 fn is_installed(row: &NameRow) -> bool {
     row.installed.is_some() || !row.others.is_empty()
 }
@@ -716,7 +742,6 @@ fn push_name<'a>(out: &mut Vec<Cells<'a>>, row: &'a NameRow) {
             mark: match (build.active, build.status) {
                 (true, _) => Mark::Active,
                 (false, Status::Superseded) => Mark::Superseded,
-                (false, Status::Unmanaged) => Mark::Unmanaged,
                 (false, Status::Installed) => Mark::None,
             },
             name: String::new(),
@@ -794,7 +819,6 @@ fn render_status(status: Status) -> String {
     match status {
         Status::Installed => String::new(),
         Status::Superseded => style("superseded").dim().to_string(),
-        Status::Unmanaged => style("unmanaged").dim().to_string(),
     }
 }
 
@@ -1111,7 +1135,6 @@ mod tests {
                 major,
                 stream: Stream::Ga,
             },
-            managed: true,
         }
     }
 
@@ -1122,18 +1145,6 @@ mod tests {
                 major,
                 stream: Stream::Ea,
             },
-            managed: true,
-        }
-    }
-
-    fn unmanaged(version: &str, major: i64) -> InstalledJdk {
-        InstalledJdk {
-            version: version.to_string(),
-            request: Request {
-                major,
-                stream: Stream::Ga,
-            },
-            managed: false,
         }
     }
 
@@ -1277,29 +1288,6 @@ mod tests {
         );
     }
 
-    /// `jlo update` counts an unmanaged install as the name being present:
-    /// an older one is moved past, an exact one reports "up to date". The row
-    /// has to say the same in both cases.
-    #[test]
-    fn an_unmanaged_install_is_measured_against_like_any_other() {
-        let rows = listed(
-            // Out of order on purpose: the rows are sorted, not inherited.
-            &[remote("17.0.20+101", 17), remote("21.0.12+7", 21)],
-            &[unmanaged("21.0.11+9", 21), unmanaged("17.0.20+101", 17)],
-            None,
-        );
-        assert_eq!(
-            rows,
-            vec![
-                name("21")
-                    .latest("21.0.12+7")
-                    .update()
-                    .other("21.0.11+9", Status::Unmanaged),
-                name("17").other("17.0.20+101", Status::Unmanaged),
-            ]
-        );
-    }
-
     /// A catalogue behind the store - Adoptium rolled back, or the install
     /// came from elsewhere - still shows what it offers, since that differs
     /// from what is installed; it is just not called an update.
@@ -1419,8 +1407,7 @@ mod tests {
             .installed("21.0.11+10.0.LTS")
             .latest("21.0.12+101.0.LTS")
             .update()
-            .other("21.0.9+10.0.LTS", Status::Superseded)
-            .other("21.0.8+9.0.LTS", Status::Unmanaged);
+            .other("21.0.9+10.0.LTS", Status::Superseded);
         outdated.others[0].active = true;
 
         let listing = render_rows(&[
@@ -1443,7 +1430,6 @@ mod tests {
                 "    27-ea  27.0.0-beta+30.0.ea",
                 "  \u{2191} 21     21.0.11+10.0.LTS     21.0.12+101.0.LTS update",
                 "  \u{25cf}        21.0.9+10.0.LTS      superseded",
-                "  ?        21.0.8+9.0.LTS       unmanaged",
             ]
         );
         assert_eq!(listing.available.as_deref(), Some("    26  20"));
@@ -1544,18 +1530,5 @@ mod tests {
             tip_line(&rows).as_deref(),
             Some("run 'jlo remove --superseded' (1 superseded)")
         );
-    }
-
-    #[test]
-    fn tip_line_does_not_offer_to_remove_an_unmanaged_install() {
-        plain();
-        // `jlo remove --superseded` leaves it alone, so counting it would
-        // promise a removal that will not happen.
-        let rows = vec![
-            name("21")
-                .installed("21.0.11+10.0.LTS")
-                .other("21.0.9+10.0.LTS", Status::Unmanaged),
-        ];
-        assert_eq!(tip_line(&rows), None);
     }
 }

@@ -15,8 +15,8 @@
 mod common;
 
 use common::{
-    INTERPRETERS, fake_jdk_archive, hermetic, install_fake_jdk, jdk_store_in, jlo_bin, offer,
-    shells, squote,
+    INTERPRETERS, fake_jdk_archive, hermetic, install_fake_jdk, jdk_entry, jlo_bin, offer, shells,
+    squote,
 };
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -781,8 +781,18 @@ fn a_partly_failed_wrapped_update_keeps_its_payload_status_and_single_error() {
         fs::set_permissions(old.join("bin"), fs::Permissions::from_mode(0o555)).unwrap();
         old
     }
+    /// The removal renames the build aside before deleting it, so the stuck
+    /// `bin` may be under a staging directory beside `old` by now.
     fn unstick(old: &Path) {
-        let _ = fs::set_permissions(old.join("bin"), fs::Permissions::from_mode(0o755));
+        let (store, name) = (old.parent().unwrap(), old.file_name().unwrap());
+        let aside = fs::read_dir(store)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| entry.path().join(name));
+        for dir in std::iter::once(old.to_path_buf()).chain(aside) {
+            let _ = fs::set_permissions(dir.join("bin"), fs::Permissions::from_mode(0o755));
+        }
     }
 
     // Straight at the binary: stdout is the update's payload and nothing else.
@@ -800,7 +810,7 @@ fn a_partly_failed_wrapped_update_keeps_its_payload_status_and_single_error() {
     unstick(&old);
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    let new = jdk_store_in(install.path()).join("21.0.9+10");
+    let new = jdk_entry(install.path(), "21.0.9+10");
     assert_eq!(out.status.code(), Some(1), "{stderr:?}");
     assert!(stderr.contains("could not be removed"), "{stderr:?}");
     assert_eq!(stderr.matches("Error:").count(), 1, "{stderr:?}");
@@ -838,7 +848,7 @@ fn a_partly_failed_wrapped_update_keeps_its_payload_status_and_single_error() {
         .unwrap();
     unstick(&old);
     let stdout = String::from_utf8_lossy(&out.stdout);
-    let new = jdk_store_in(install.path()).join("21.0.9+10");
+    let new = jdk_entry(install.path(), "21.0.9+10");
     assert!(stdout.contains("status=1"), "{stdout:?}");
     assert!(
         stdout.contains(&format!("java_home={}", new.display())),

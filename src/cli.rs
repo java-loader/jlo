@@ -300,10 +300,12 @@ some other version lives, see jlo home."
 Show available and installed JDKs
 
 One row per name (25, 28-ea). Other builds of a name sit on indented
-lines below it, with the exact version to pass to jlo remove and a
-status word: superseded, an older build jlo installed; unmanaged, a JDK
-jlo did not install - moved into the directory by hand under its version
-(21.0.11+9) - which jlo never deletes or updates."
+lines below it, with the exact version to pass to jlo remove; an older
+one is marked superseded.
+
+A JDK is a directory named jlo-temurin-<version> in the install
+directory, however it got there. Every other directory there is listed
+under \"Not managed by jlo\": jlo never uses, updates or deletes it."
     )]
     List {
         /// List only what is installed; never touch the network
@@ -383,15 +385,15 @@ one leaves the rest alone: jlo remove 17 removes every installed
 
   jlo remove 11 17
 
-An install J'Lo will not delete is reported and skipped; the others
-still go. There are three such cases: nothing installed matches the
-version, J'Lo did not install it, or JAVA_HOME points at it. Each is an
-error only when it leaves nothing to remove at all.
+A VERSION J'Lo will not remove is reported and skipped; the others
+still go. There are two such cases: nothing installed matches it, or
+JAVA_HOME points at it. Each is an error only when it leaves nothing
+to remove at all. Directories jlo list shows as not managed by jlo
+never match.
 
 --superseded names them by rule instead: keep the newest build of
 every installed name, delete the rest. It takes no VERSION - the
-rule is the selector - and, being nobody's explicit request, it leaves
-an install J'Lo did not make alone without calling it an error."
+rule is the selector."
     )]
     Remove {
         /// Java version: a major (21) or a pre-release stream (28-ea), or the exact version of a single install
