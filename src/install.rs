@@ -761,14 +761,29 @@ fn source_line(path: &str) -> String {
 /// keg's, named by the `opt` path the caveats print. `None` for any other
 /// binary - a build in `target/`, say - which has no such line.
 pub(crate) fn profile_line() -> Option<String> {
-    if let Ok(home) = crate::home::jlo_home_dir() {
-        let layout = Layout::curl(home);
-        if is_current_exe(layout.binary()) && layout.entry(&JLO_SH).is_file() {
-            let home_dir = std::env::home_dir();
-            return Some(source_line(&snippet(&layout, home_dir.as_deref(), &JLO_SH)));
-        }
+    let home_dir = std::env::home_dir();
+    let installer = |layout: Layout| {
+        (is_current_exe(layout.binary()) && layout.entry(&JLO_SH).is_file())
+            .then(|| source_line(&snippet(&layout, home_dir.as_deref(), &JLO_SH)))
+    };
+    // `$JLO_HOME` first, for the portable "$HOME/.jlo" spelling; then the
+    // directory the binary sits in, for a custom one this shell does not
+    // export - the very shell that lacks the profile line.
+    if let Some(line) = crate::home::jlo_home_dir()
+        .ok()
+        .and_then(|home| installer(Layout::curl(home)))
+    {
+        return Some(line);
     }
     let exe = std::env::current_exe().ok()?.canonicalize().ok()?;
+    if let Some(home) = exe
+        .parent()
+        .filter(|bin| bin.file_name().is_some_and(|n| n == "bin"))
+        .and_then(Path::parent)
+        && let Some(line) = installer(Layout::curl(home.to_path_buf()))
+    {
+        return Some(line);
+    }
     keg_jlo_sh(&exe).map(|jlo_sh| source_line(&shell_word(&display(&jlo_sh))))
 }
 

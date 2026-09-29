@@ -2175,6 +2175,24 @@ fn env_on_a_terminal_without_the_function_names_the_profile_line() {
         "the profile line is missing: {text}"
     );
 
+    // A custom JLO_HOME the shell does not export: found from the binary.
+    let custom = home.join("tools/jlo");
+    std::fs::create_dir_all(custom.join("bin")).unwrap();
+    std::fs::copy(jlo_bin(), custom.join("bin/jlo-bin")).unwrap();
+    let out = hermetic(custom.join("bin/jlo-bin"), home)
+        .arg("__install")
+        .env("JLO_HOME", &custom)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let out = common::on_a_terminal(home, &custom.join("bin/jlo-bin"), &["use", "21"]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    let jlo_sh = custom.canonicalize().unwrap().join("jlo.sh");
+    assert!(
+        text.contains(&format!("[ -s '{0}' ] && . '{0}'", jlo_sh.display())),
+        "the custom home's line is missing: {text}"
+    );
+
     let out = common::on_a_terminal(home, &jlo_bin(), &["use", "21"]);
     let text = String::from_utf8_lossy(&out.stdout);
     assert_eq!(out.status.code(), Some(1), "{text}");
