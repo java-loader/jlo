@@ -192,7 +192,16 @@ fn cmd_env(
         let line = install::profile_line();
         let error = CommandError::with_hint(
             anyhow!("{}", ui::UNSOURCED_ENV_ERROR),
-            ui::unsourced_env_hint(version.as_deref(), line.is_some()),
+            // Only a version that parses goes into a command meant to be
+            // copied: the raw argument could carry shell syntax.
+            ui::unsourced_env_hint(
+                version
+                    .as_deref()
+                    .and_then(|v| Request::parse(v).ok())
+                    .map(|r| r.to_string())
+                    .as_deref(),
+                line.is_some(),
+            ),
         );
         return Err(match line {
             Some(line) => error.with_command(line),

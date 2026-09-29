@@ -13,6 +13,7 @@
 use crate::CommandError;
 use crate::store::same_path;
 use crate::ui;
+use crate::ui::BASH_LOGIN_FILES;
 use crate::ui::tilde;
 use anyhow::{Context, Result, anyhow};
 use std::fs::{self, File};
@@ -695,10 +696,6 @@ fn report(layout: &Layout, reinstall: bool, symlink: Option<&Path>) {
     }
     path_nudge(symlink, home);
 }
-
-/// The files `bash -l` looks for, in the order it looks. It reads only the
-/// first one that exists.
-const BASH_LOGIN_FILES: &str = "~/.bash_profile, ~/.bash_login, ~/.profile";
 
 /// Only when the symlink exists and `~/.local/bin` is not on PATH. Names its
 /// files because `~/.zshrc`, beside the activation lines, is the one file the

@@ -517,6 +517,11 @@ pub(crate) fn pin_mismatch(pinned: &Resolved) {
 
 pub(crate) const NO_ACTIVE_JDK_HINT: &str = "Run 'jlo env' to activate a JDK in this shell.";
 
+/// The files `bash -l` looks for, in the order it looks. It reads only the
+/// first one that exists, so creating `~/.bash_profile` beside a `~/.profile`
+/// switches that one off.
+pub(crate) const BASH_LOGIN_FILES: &str = "~/.bash_profile, ~/.bash_login, ~/.profile";
+
 /// `jlo env` with stdout on a terminal: nothing is there to evaluate its
 /// exports. Keyed on the terminal, not on the wrapped prefix alone: the wrapper
 /// and the autoload hook capture stdout, and `jlo-bin env 21 > file` is a
@@ -536,7 +541,8 @@ pub(crate) fn unsourced_env_hint(version: Option<&str>, has_profile_line: bool) 
     if has_profile_line {
         format!(
             "{alternatives}\nThe function comes from a line in your shell profile. Add it to \
-             ~/.zshrc, or for bash to ~/.bash_profile, then open a new shell:"
+             ~/.zshrc; for bash, to the first of {BASH_LOGIN_FILES} that exists, else \
+             ~/.bash_profile. Then open a new shell:"
         )
     } else {
         alternatives
