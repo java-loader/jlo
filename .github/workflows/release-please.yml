@@ -219,3 +219,146 @@ jobs:
           make_latest=false
           [ "$newest" = "$this" ] && make_latest=true
           gh release edit "$TAG_NAME" --draft=false --latest="$make_latest"
+
+  # Homebrew users get a release through java-loader/homebrew-tap, whose
+  # formula is packaging/homebrew/jlo.rb of the tag with the version and the
+  # macOS tarball's checksum filled in. After upload, because the formula
+  # points at a release asset and the release is a draft until upload
+  # publishes it; and only for the latest release, so a manual dispatch for an
+  # older tag cannot move the tap back. The same run of the latest tag again
+  # (the recovery hatch) re-pushes an identical formula, which is a no-op.
+  homebrew:
+    needs: [resolve, upload]
+    if: ${{ always() && needs.resolve.result == 'success' && needs.upload.result == 'success' }}
+    # One push at a time, so two releases in quick succession cannot race each
+    # other into the tap.
+    concurrency:
+      group: homebrew-tap
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    runs-on: macos-latest
+    env:
+      TAG_NAME: ${{ needs.resolve.outputs.tag_name }}
+    steps:
+      - name: Is this the latest release?
+        id: latest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if ! printf '%s\n' "$TAG_NAME" | grep -Eq '^jlo-bin-v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::$TAG_NAME is not jlo-bin-vX.Y.Z" >&2
+            exit 1
+          fi
+          latest=$(gh release view --json tagName --jq .tagName)
+          if [ "$latest" != "$TAG_NAME" ]; then
+            echo "::notice::$TAG_NAME is not the latest release ($latest); the tap stays where it is"
+            echo "bump=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "bump=true" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG_NAME#jlo-bin-v}" >> "$GITHUB_OUTPUT"
+
+      # From the tag, like install.sh: the formula calls the binary's hidden
+      # install verb, so it must be the one written for that binary.
+      - name: Check out the formula of the tag
+        if: steps.latest.outputs.bump == 'true'
+        uses: actions/checkout@v7
+        with:
+          ref: refs/tags/${{ needs.resolve.outputs.tag_name }}
+          path: tagged
+          sparse-checkout: /packaging/homebrew/jlo.rb
+          sparse-checkout-cone-mode: false
+
+      - name: Render the formula
+        if: steps.latest.outputs.bump == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ steps.latest.outputs.version }}
+        run: |
+          gh release download "$TAG_NAME" -p jlo-macos-arm64.tar.gz.sha256 -D "$RUNNER_TEMP"
+          sha=$(cut -d ' ' -f 1 "$RUNNER_TEMP/jlo-macos-arm64.tar.gz.sha256")
+          if ! printf '%s\n' "$sha" | grep -Eq '^[0-9a-f]{64}$'; then
+            echo "::error::jlo-macos-arm64.tar.gz.sha256 of $TAG_NAME holds no SHA-256" >&2
+            exit 1
+          fi
+          sed -e "s/@VERSION@/$VERSION/g" -e "s/@SHA256@/$sha/g" \
+            tagged/packaging/homebrew/jlo.rb > "$RUNNER_TEMP/jlo.rb"
+          if grep -q '@[A-Z0-9_]*@' "$RUNNER_TEMP/jlo.rb"; then
+            echo "::error::the formula still holds a placeholder" >&2
+            exit 1
+          fi
+
+      # Everything a user would do, before the tap sees it - and without the
+      # deploy key, which only the next step gets: this one runs brew and the
+      # formula.
+      - name: Check the formula
+        if: steps.latest.outputs.bump == 'true'
+        env:
+          HOMEBREW_NO_ANALYTICS: 1
+        run: |
+          tap="$(brew --repository)/Library/Taps/java-loader/homebrew-tap"
+          mkdir -p "$tap/Formula"
+          cp "$RUNNER_TEMP/jlo.rb" "$tap/Formula/jlo.rb"
+          # Homebrew loads a tap's formula only once trusted; a user's
+          # fully qualified 'brew install' does this implicitly.
+          brew trust --formula java-loader/tap/jlo
+          brew style java-loader/tap/jlo
+          brew audit --strict --online java-loader/tap/jlo
+          brew install java-loader/tap/jlo
+          brew test java-loader/tap/jlo
+          # The caveats' profile line gives a shell the 'jlo' function.
+          share="$(brew --prefix)/opt/jlo/share/jlo"
+          for sh in zsh bash; do
+            "$sh" -c "[ -r '$share/jlo.sh' ] && . '$share/jlo.sh' && typeset -f jlo >/dev/null && jlo --version"
+          done
+
+      # Plain shell and git, no third-party action: the one step that holds the
+      # key. GitHub's host key is pinned (from https://api.github.com/meta), so
+      # nothing is trusted on first use.
+      - name: Push to the tap
+        if: steps.latest.outputs.bump == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+          VERSION: ${{ steps.latest.outputs.version }}
+        run: |
+          # Again: a newer release may have been published while brew ran.
+          latest=$(gh release view --json tagName --jq .tagName)
+          if [ "$latest" != "$TAG_NAME" ]; then
+            echo "::notice::$latest was published meanwhile; the tap is left to its run"
+            exit 0
+          fi
+          umask 077
+          key="$RUNNER_TEMP/homebrew-tap-key"
+          trap 'rm -f "$key"' EXIT
+          printf '%s\n' "$DEPLOY_KEY" > "$key"
+          printf 'github.com %s\n' \
+            'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl' \
+            > "$RUNNER_TEMP/known_hosts"
+          export GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$RUNNER_TEMP/known_hosts"
+          git clone --depth 1 git@github.com:java-loader/homebrew-tap.git "$RUNNER_TEMP/tap"
+          cd "$RUNNER_TEMP/tap"
+          # Never backwards, whatever raced: a tap already ahead stays there.
+          current=$(sed -n 's/^  version "\(.*\)"$/\1/p' Formula/jlo.rb 2>/dev/null || :)
+          if [ -n "$current" ]; then
+            newest=$(printf '%s\n%s\n' "$current" "$VERSION" | sort -t . -k 1,1n -k 2,2n -k 3,3n | tail -n 1)
+            if [ "$newest" != "$VERSION" ]; then
+              echo "::notice::the tap is at $current, ahead of $VERSION; left alone"
+              exit 0
+            fi
+          fi
+          mkdir -p Formula
+          cp "$RUNNER_TEMP/jlo.rb" Formula/jlo.rb
+          git add Formula/jlo.rb
+          if git diff --cached --quiet; then
+            echo "The tap already has jlo $VERSION"
+            exit 0
+          fi
+          git -c user.name='github-actions[bot]' \
+            -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+            commit -q -m "jlo $VERSION"
+          git push -q origin HEAD
