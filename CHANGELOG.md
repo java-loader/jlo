@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.8.0](https://github.com/java-loader/jlo/compare/jlo-bin-v0.7.0...jlo-bin-v0.8.0) (2026-09-29)
+
+
+### ⚠ BREAKING CHANGES
+
+* **env:** refuse on a terminal, naming the missing profile line
+
+### Features
+
+* **env:** refuse on a terminal, naming the missing profile line ([8af3e30](https://github.com/java-loader/jlo/commit/8af3e30efae4d971282261d6978a4fb5f17bde1d))
+
+
+### Bug Fixes
+
+* **env:** name the profile line of a custom JLO_HOME the shell does not export ([ad1d914](https://github.com/java-loader/jlo/commit/ad1d9146e7a1404a45c49ce118abfd21a64dff9b))
+* **env:** the refusal names bash's login files and echoes only a valid version ([ef4f4d2](https://github.com/java-loader/jlo/commit/ef4f4d216a46129c629b40c11845429e828c695f))
+* **homebrew:** caveats print the profile lines copyable, in the installer's form ([a9f5bd9](https://github.com/java-loader/jlo/commit/a9f5bd951733ebb39f9cb303e5f0e5f36e7bd77b))
+
 ## [0.7.0](https://github.com/java-loader/jlo/compare/jlo-bin-v0.6.0...jlo-bin-v0.7.0) (2026-09-29)
 
 
