@@ -843,6 +843,91 @@ fn a_replayed_wrapper_without_jlo_home_uses_the_default_install() {
     }
 }
 
+/// Brew's wrapper in a replayed shell: no `_JLO_BIN`, no curl install under
+/// `$HOME/.jlo`, and Homebrew's `jlo` on `PATH`. The wrapper must find that
+/// one - by path, not by calling itself - for a pass-through verb and for the
+/// eval branch; a relative `PATH` entry holding a `jlo` is passed over.
+#[test]
+fn a_replayed_wrapper_without_an_install_uses_the_jlo_on_path() {
+    for sh in shells(
+        "a_replayed_wrapper_without_an_install_uses_the_jlo_on_path",
+        INTERPRETERS,
+    ) {
+        let home = home_with_default_install();
+        let dump = dump_wrapper(sh, home.path());
+        std::fs::remove_file(home.path().join(".jlo/bin/jlo-bin")).unwrap();
+        let keg = home.path().join("keg");
+        std::fs::create_dir_all(&keg).unwrap();
+        let brew = keg.join("jlo");
+        std::fs::write(&brew, format!("#!/bin/sh\necho via-path\n{ARGV_STUB}\n")).unwrap();
+        chmod(&brew, 0o755);
+        let decoy = home.path().join("rel");
+        std::fs::create_dir_all(&decoy).unwrap();
+        std::fs::write(decoy.join("jlo"), "#!/bin/sh\necho decoy\n").unwrap();
+        chmod(&decoy.join("jlo"), 0o755);
+
+        let path = format!("rel:{}:{}", keg.display(), common::HERMETIC_PATH);
+        let out = replay_wrapper(
+            sh,
+            home.path(),
+            &dump,
+            &[("HOME", home.path().to_str().unwrap()), ("PATH", &path)],
+            &format!(
+                "cd '{}'\njlo exec -- a\njlo env\necho \"probe=[${{JLO_PROBE-}}]\"",
+                home.path().display()
+            ),
+        );
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stdout.contains("via-path") && stdout.contains("argv: [exec] [--] [a]"),
+            "{sh}: exec did not reach the jlo on PATH: stdout={stdout:?} stderr={stderr:?}"
+        );
+        assert!(
+            stdout.contains("probe=[reached]"),
+            "{sh}: env's export never reached the calling shell: \
+             stdout={stdout:?} stderr={stderr:?}"
+        );
+        assert!(
+            !stdout.contains("decoy"),
+            "{sh}: a relative PATH entry was used: {stdout:?}"
+        );
+    }
+}
+
+/// `jlo.sh` names the binary of its own install in `_JLO_BIN`, and that wins
+/// over an installer's binary under `$JLO_HOME` - a curl install left behind
+/// beside a Homebrew one must not be the J'Lo this shell runs.
+#[test]
+fn the_binary_jlo_sh_names_wins_over_the_one_under_jlo_home() {
+    for sh in shells(
+        "the_binary_jlo_sh_names_wins_over_the_one_under_jlo_home",
+        INTERPRETERS,
+    ) {
+        let home = jlo_home_with_stub("echo curl");
+        let named = home.path().join("named");
+        std::fs::write(&named, format!("#!/bin/sh\necho named\n{ARGV_STUB}\n")).unwrap();
+        chmod(&named, 0o755);
+        let out = run_in(
+            sh,
+            home.path(),
+            &format!(
+                "_JLO_BIN='{}'\njlo exec -- a\njlo env\necho \"probe=[${{JLO_PROBE-}}]\"",
+                named.display()
+            ),
+        );
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            stdout.contains("named") && !stdout.contains("curl"),
+            "{sh}: the wrapper ran the binary under JLO_HOME: {stdout:?}"
+        );
+        assert!(
+            stdout.contains("probe=[reached]"),
+            "{sh}: env through _JLO_BIN did not reach the shell: {stdout:?}"
+        );
+    }
+}
+
 /// With neither `JLO_HOME` nor `HOME` there is nothing to fall back to. The
 /// wrapper must say so and fail with 1 - not abort a `set -u` shell, and not
 /// run whatever `/.jlo/bin/jlo-bin` or `/bin/jlo-bin` might be. `unset HOME`

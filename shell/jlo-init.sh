@@ -4,19 +4,41 @@
 # The jlo wrapper function, sourced by jlo.sh under bash and zsh. Plain POSIX
 # plus `local`, so one file serves both and a stray `sh` can read it too.
 jlo() {
-  local J out rc=0
-  # jlo.sh exports JLO_HOME before defining this function, but a host can
-  # replay the function without the environment it was defined under -
-  # a shell rebuilt from a snapshot of functions and PATH, without JLO_HOME.
-  # Fall back to the default install, where jlo-bin itself looks; with no
-  # HOME either, fail rather than run /bin/jlo-bin. Empty counts as unset.
-  if [ -n "${JLO_HOME-}" ]; then
+  local J out rc=0 p
+  # jlo.sh sets _JLO_BIN to the binary of the install it belongs to - under
+  # $JLO_HOME for the installer's, in the keg for Homebrew's - and that is
+  # used as is: a missing file is an error, not a reason to run another J'Lo.
+  # A host can replay this function without the variables it was defined
+  # under - a shell rebuilt from a snapshot of functions and PATH. Then look
+  # where a J'Lo usually is: the installer's, else the first absolute 'jlo'
+  # on PATH (Homebrew's). The PATH walk splits by hand, so it needs neither
+  # word splitting (off in zsh) nor whence/type -P (one shell each); a
+  # relative entry is skipped, since running a 'jlo' found in the current
+  # directory is nobody's intent. Empty counts as unset throughout.
+  if [ -n "${_JLO_BIN-}" ]; then
+    J="$_JLO_BIN"
+  elif [ -n "${JLO_HOME-}" ] && [ -x "$JLO_HOME/bin/jlo-bin" ]; then
     J="$JLO_HOME/bin/jlo-bin"
-  elif [ -n "${HOME-}" ]; then
+  elif [ -n "${HOME-}" ] && [ -x "$HOME/.jlo/bin/jlo-bin" ]; then
     J="$HOME/.jlo/bin/jlo-bin"
   else
-    echo "jlo: neither JLO_HOME nor HOME is set, so jlo-bin cannot be found" >&2
-    return 1
+    J=
+    p="${PATH-}:"
+    while [ -n "$p" ]; do
+      case "${p%%:*}" in
+        /*)
+          if [ -f "${p%%:*}/jlo" ] && [ -x "${p%%:*}/jlo" ]; then
+            J="${p%%:*}/jlo"
+            break
+          fi
+          ;;
+      esac
+      p="${p#*:}"
+    done
+    if [ -z "$J" ]; then
+      echo "jlo: jlo-bin cannot be found: _JLO_BIN is not set, and there is no J'Lo under \$JLO_HOME, ~/.jlo or on PATH" >&2
+      return 1
+    fi
   fi
   # "${1-}", not "$1": a bare `jlo` must not abort a `set -u` shell.
   case "${1-}" in

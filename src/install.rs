@@ -435,10 +435,13 @@ fn write_completions(layout: &Layout) -> bool {
     partial
 }
 
+/// `_JLO_BIN` is a plain variable, not exported: only the wrapper function in
+/// this shell reads it, and it tells the function which J'Lo this shell runs.
 fn init_stub(layout: &Layout, note: &str) -> String {
     format!(
-        "{GENERATED_HEADER}{note}export JLO_HOME={home}\n{load}\n",
+        "{GENERATED_HEADER}{note}export JLO_HOME={home}\n_JLO_BIN={binary}\n{load}\n",
         home = sq(&display(&layout.home)),
+        binary = sq(&display(layout.binary())),
         load = guarded_source(&format!("\"$JLO_HOME/bin/{INIT_FILE}\""), None),
     )
 }

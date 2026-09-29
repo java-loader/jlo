@@ -16,7 +16,9 @@ jlo_find_jlorc() {
   # "${HOME%/}": a trailing slash must still stop the walk, as it does in
   # the component-wise Rust compare, or the hook would fire on a .jlorc
   # above HOME that the binary then refuses to read.
-  local home="${HOME%/}"
+  # "${HOME-}" first: a nounset shell without HOME must not abort on a cd.
+  local home="${HOME-}"
+  home="${home%/}"
   while :; do
     if [ -f "$dir/.jlorc" ]; then
       return 0
@@ -96,7 +98,8 @@ fi
 
 # Immediate call for freshly spawned shells. --offline for the same reason as
 # in the hook, and more sharply: a download here delays every new terminal.
-if jlo_find_jlorc || [ -f "${JLO_HOME-}/default.jlorc" ]; then
+# Without JLO_HOME there is no default to look for - not '/default.jlorc'.
+if jlo_find_jlorc || { [ -n "${JLO_HOME-}" ] && [ -f "$JLO_HOME/default.jlorc" ]; }; then
   _JLO_LAST_DIR="$PWD"
   # `|| :`: this runs while the profile is being sourced, and an
   # unsatisfiable --offline lookup would abort one running under `set -e`.

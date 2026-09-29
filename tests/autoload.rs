@@ -702,6 +702,8 @@ fn fresh_shell_survives_a_failing_jlo_env_under_set_e() {
 /// reads it, and a shell sourcing `autoload.sh` without `jlo.sh` - or before
 /// it - has never seen it. Leaving it set in every case made the `${JLO_HOME-}`
 /// default untested: a bare `$JLO_HOME` would have passed just as well.
+/// `HOME` goes too in the third: a Homebrew `jlo.sh` sets no `JLO_HOME` when
+/// there is no `HOME` to derive it from, and the walk-up reads `HOME`.
 #[test]
 fn sources_and_runs_the_hook_under_set_u() {
     let home = tempdir().unwrap();
@@ -712,7 +714,7 @@ fn sources_and_runs_the_hook_under_set_u() {
 
     for sh in hook_shells("sources_and_runs_the_hook_under_set_u") {
         let script = autoload_script();
-        for prologue in ["", "unset JLO_HOME\n"] {
+        for prologue in ["", "unset JLO_HOME\n", "unset JLO_HOME HOME\n"] {
             let body = format!(
                 "set -u\n{prologue}jlo() {{ return 1; }}\n. '{script}'\n\
                  jlo_after_cd\necho \"rc=$?\"\n"
