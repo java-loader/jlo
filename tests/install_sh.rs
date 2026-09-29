@@ -2159,7 +2159,7 @@ fn env_on_a_terminal_without_the_function_names_the_profile_line() {
     let home = home.path();
     let bin = home.join(".jlo/bin");
     std::fs::create_dir_all(&bin).unwrap();
-    std::fs::copy(jlo_bin(), bin.join("jlo-bin")).unwrap();
+    common::place_executable(&jlo_bin(), &bin.join("jlo-bin"));
     let out = hermetic(bin.join("jlo-bin"), home)
         .arg("__install")
         .output()
@@ -2178,7 +2178,7 @@ fn env_on_a_terminal_without_the_function_names_the_profile_line() {
     // A custom JLO_HOME the shell does not export: found from the binary.
     let custom = home.join("tools/jlo");
     std::fs::create_dir_all(custom.join("bin")).unwrap();
-    std::fs::copy(jlo_bin(), custom.join("bin/jlo-bin")).unwrap();
+    common::place_executable(&jlo_bin(), &custom.join("bin/jlo-bin"));
     let out = hermetic(custom.join("bin/jlo-bin"), home)
         .arg("__install")
         .env("JLO_HOME", &custom)

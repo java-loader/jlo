@@ -21,8 +21,8 @@
 mod common;
 
 use common::{
-    INTERPRETERS, bash_bin, chmod, fake_jdk_archive, hermetic, install_fake_jdk, jdk_store_in,
-    jlo_bin, offer, shells,
+    INTERPRETERS, bash_bin, fake_jdk_archive, hermetic, install_fake_jdk, jdk_store_in, jlo_bin,
+    offer, shells,
 };
 use std::path::{Path, PathBuf};
 use std::process::Output;
@@ -42,8 +42,7 @@ fn jlo_home() -> tempfile::TempDir {
 fn jlo_home_with_stub(body: &str) -> tempfile::TempDir {
     let home = init_sh_home();
     let stub = home.path().join("bin").join("jlo-bin");
-    std::fs::write(&stub, format!("#!/bin/sh\n{body}\n")).unwrap();
-    chmod(&stub, 0o755);
+    common::write_executable(&stub, &format!("#!/bin/sh\n{body}\n"));
     home
 }
 
@@ -765,8 +764,7 @@ fn home_with_default_install() -> tempfile::TempDir {
     std::fs::create_dir_all(&bin).unwrap();
     std::fs::copy(shell_source(WRAPPER), bin.join(WRAPPER)).unwrap();
     let stub = bin.join("jlo-bin");
-    std::fs::write(&stub, format!("#!/bin/sh\n{ARGV_STUB}\n")).unwrap();
-    chmod(&stub, 0o755);
+    common::write_executable(&stub, &format!("#!/bin/sh\n{ARGV_STUB}\n"));
     home
 }
 
@@ -859,12 +857,10 @@ fn a_replayed_wrapper_without_an_install_uses_the_jlo_on_path() {
         let keg = home.path().join("keg");
         std::fs::create_dir_all(&keg).unwrap();
         let brew = keg.join("jlo");
-        std::fs::write(&brew, format!("#!/bin/sh\necho via-path\n{ARGV_STUB}\n")).unwrap();
-        chmod(&brew, 0o755);
+        common::write_executable(&brew, &format!("#!/bin/sh\necho via-path\n{ARGV_STUB}\n"));
         let decoy = home.path().join("rel");
         std::fs::create_dir_all(&decoy).unwrap();
-        std::fs::write(decoy.join("jlo"), "#!/bin/sh\necho decoy\n").unwrap();
-        chmod(&decoy.join("jlo"), 0o755);
+        common::write_executable(&decoy.join("jlo"), "#!/bin/sh\necho decoy\n");
 
         let path = format!("rel:{}:{}", keg.display(), common::HERMETIC_PATH);
         let out = replay_wrapper(
@@ -906,8 +902,7 @@ fn the_binary_jlo_sh_names_wins_over_the_one_under_jlo_home() {
     ) {
         let home = jlo_home_with_stub("echo curl");
         let named = home.path().join("named");
-        std::fs::write(&named, format!("#!/bin/sh\necho named\n{ARGV_STUB}\n")).unwrap();
-        chmod(&named, 0o755);
+        common::write_executable(&named, &format!("#!/bin/sh\necho named\n{ARGV_STUB}\n"));
         let out = run_in(
             sh,
             home.path(),

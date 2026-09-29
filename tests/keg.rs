@@ -11,7 +11,7 @@
 
 mod common;
 
-use common::{INTERPRETERS, chmod, hermetic, jlo_bin, on_a_terminal, shells};
+use common::{INTERPRETERS, hermetic, jlo_bin, on_a_terminal, shells};
 use std::path::{Path, PathBuf};
 use std::process::Output;
 
@@ -59,8 +59,7 @@ fn keg() -> Keg {
     };
     std::fs::create_dir_all(keg.build_home()).unwrap();
     std::fs::create_dir_all(keg.binary().parent().unwrap()).unwrap();
-    std::fs::write(keg.binary(), ARGV_STUB).unwrap();
-    chmod(&keg.binary(), 0o755);
+    common::write_executable(&keg.binary(), ARGV_STUB);
     let out = install_keg(
         &[
             "--keg",
@@ -269,7 +268,7 @@ fn env_on_a_terminal_without_the_function_names_the_keg_line() {
     let keg = prefix.join("Cellar/jlo/0.7.0");
     let binary = keg.join("libexec/jlo-bin");
     std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
-    std::fs::copy(jlo_bin(), &binary).unwrap();
+    common::place_executable(&jlo_bin(), &binary);
     let out = install_keg(
         &[
             "--keg",

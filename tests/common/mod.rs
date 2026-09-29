@@ -221,3 +221,25 @@ sys.exit(child.wait())
         .output()
         .unwrap()
 }
+
+/// Put a copy of `from` at `to`, executable, by a child `cp`: these tests run
+/// as threads of one process, and a writable descriptor this process held on
+/// `to` would leak into any child another thread forks meanwhile - `execve`
+/// of `to` then fails with `ETXTBSY` on Linux, however long ago it was closed.
+#[allow(dead_code)]
+pub(crate) fn place_executable(from: &Path, to: &Path) {
+    let status = Command::new("/bin/cp").arg(from).arg(to).status().unwrap();
+    assert!(status.success(), "cp {from:?} {to:?} failed");
+    chmod(to, 0o755);
+}
+
+/// [`place_executable`] for a script given as text: written to a sibling
+/// first, which is never executed, then copied into place.
+#[allow(dead_code)]
+pub(crate) fn write_executable(to: &Path, contents: &str) {
+    let name = to.file_name().unwrap().to_string_lossy();
+    let staged = to.with_file_name(format!(".{name}.staged"));
+    std::fs::write(&staged, contents).unwrap();
+    place_executable(&staged, to);
+    std::fs::remove_file(&staged).unwrap();
+}
