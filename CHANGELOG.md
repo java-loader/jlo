@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.7.0](https://github.com/java-loader/jlo/compare/jlo-bin-v0.6.0...jlo-bin-v0.7.0) (2026-09-29)
+
+
+### ⚠ BREAKING CHANGES
+
+* **store:** JDKs installed by jlo 0.6.0 or earlier (directories named by bare version, e.g. 21.0.3+9) are no longer recognised: not used, updated or deleted. jlo list shows them under "Not managed by jlo"; delete them and their .jlo-managed files by hand, and run jlo install for the versions you need.
+
+### Features
+
+* **install:** keg mode for the install verb ([a01e4cf](https://github.com/java-loader/jlo/commit/a01e4cf42813a77329f7bf49ef6136286070bf1d))
+* **list:** say why the directories under "Not managed by jlo" are left alone ([f218519](https://github.com/java-loader/jlo/commit/f2185198699b064620acf696809705ec46111644))
+* **shell:** the wrapper runs the binary jlo.sh names ([258049d](https://github.com/java-loader/jlo/commit/258049d35e0a19258adb72c2345e9430e7412c72))
+* **store:** ownership is the directory name jlo-temurin-&lt;semver&gt; ([bccc45e](https://github.com/java-loader/jlo/commit/bccc45e12a57bce4d98399f09a327d0cec0285f6))
+
+
+### Bug Fixes
+
+* **homebrew:** profile lines that end a set -e profile cleanly after an uninstall ([0ad106c](https://github.com/java-loader/jlo/commit/0ad106cb994023008c703f5ab3b92da9637d143d))
+* **list:** drop the bare-version upgrade line ([4e40c95](https://github.com/java-loader/jlo/commit/4e40c95e60499a0197556e28e21ca396de660f0a))
+
 ## [0.6.0](https://github.com/java-loader/jlo/compare/jlo-bin-v0.5.0...jlo-bin-v0.6.0) (2026-09-27)
 
 
