@@ -33,10 +33,15 @@ const STAGING_PREFIX: &str = ".jlo-install";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 // Verbatim, no interpolation, which keeps them shellcheck-able files rather
-// than templates. Only the three stubs are generated.
+// than templates. Only the entry files are generated.
 const INIT: &str = include_str!("../shell/jlo-init.sh");
 const AUTOLOAD: &str = include_str!("../shell/jlo-autoload.sh");
 const COMPLETIONS_ZSH: &str = include_str!("../shell/jlo-completions.zsh");
+
+/// The implementation files under `bin/`, as the entry files name them.
+const INIT_FILE: &str = "jlo-init.sh";
+const AUTOLOAD_FILE: &str = "jlo-autoload.sh";
+const COMPLETIONS_ZSH_FILE: &str = "jlo-completions.zsh";
 
 /// The shell dialect files 0.4.0 and 0.5.0 wrote under `bin/`, which their
 /// stubs sourced and nothing sources any more.
@@ -65,18 +70,47 @@ const GENERATED_HEADER: &str = "\
 const AUTOLOAD_MARKER: &str = "_JLO_AUTOLOAD";
 const COMPLETIONS_MARKER: &str = "_JLO_COMPLETIONS";
 
+/// A file the user's profile sources. The names are the install contract: the
+/// lines a user pasted name them, so they never change.
+#[derive(Debug)]
+struct Entry {
+    name: &'static str,
+    /// The variable an opt-in entry sets once loaded; `None` for the required
+    /// one, which every reload sources.
+    marker: Option<&'static str>,
+}
+
+const JLO_SH: Entry = Entry {
+    name: "jlo.sh",
+    marker: None,
+};
+const AUTOLOAD_SH: Entry = Entry {
+    name: "autoload.sh",
+    marker: Some(AUTOLOAD_MARKER),
+};
+const COMPLETIONS_SH: Entry = Entry {
+    name: "completions.sh",
+    marker: Some(COMPLETIONS_MARKER),
+};
+
+/// In the order the activation text lists them.
+const ENTRIES: [&Entry; 3] = [&JLO_SH, &AUTOLOAD_SH, &COMPLETIONS_SH];
+
 /// The directories and files J'Lo owns under `$JLO_HOME`.
 #[derive(Debug)]
 pub(crate) struct Layout {
     home: PathBuf,
     bin: PathBuf,
+    binary: PathBuf,
     completions: PathBuf,
 }
 
 impl Layout {
-    pub(crate) fn new(home: PathBuf) -> Self {
+    pub(crate) fn curl(home: PathBuf) -> Self {
+        let bin = home.join("bin");
         Self {
-            bin: home.join("bin"),
+            binary: bin.join(BINARY_NAME),
+            bin,
             completions: home.join("completions"),
             home,
         }
@@ -90,6 +124,14 @@ impl Layout {
         &self.bin
     }
 
+    fn entry(&self, entry: &Entry) -> PathBuf {
+        self.home.join(entry.name)
+    }
+
+    fn implementation(&self, name: &str) -> PathBuf {
+        self.bin.join(name)
+    }
+
     /// Remove staging directories an earlier run abandoned, sparing `keep`.
     fn sweep_stale_staging(&self, keep: Option<&Path>) {
         crate::store::sweep_stale_staging(&self.bin, STAGING_PREFIX, keep);
@@ -98,14 +140,14 @@ impl Layout {
     /// Also the symlink target. The name is load-bearing: `~/.local/bin/jlo`
     /// is only refreshed when it already points at exactly this path, so a
     /// rename would leave every existing symlink dangling.
-    pub(crate) fn binary(&self) -> PathBuf {
-        self.bin.join(BINARY_NAME)
+    pub(crate) fn binary(&self) -> &Path {
+        &self.binary
     }
 }
 
 /// `args` is the raw argv *after* the verb token.
 pub(crate) fn cmd_install(args: &[String]) -> Result<(), CommandError> {
-    let layout = Layout::new(crate::jlo_home_dir()?);
+    let layout = Layout::curl(crate::home::jlo_home_dir()?);
     // Armed before the options are read: the installer that `exec`d us has no
     // line left to run, so even a rejected option is the last chance to clear
     // the directory we came out of.
@@ -122,7 +164,7 @@ pub(crate) fn cmd_install(args: &[String]) -> Result<(), CommandError> {
     layout.sweep_stale_staging(staging.dir());
     // Read before writing: a first install gets the activation block, a
     // reinstall one line.
-    let reinstall = layout.home.join("jlo.sh").exists();
+    let reinstall = layout.entry(&JLO_SH).exists();
 
     if publish_self {
         // Nothing under `$JLO_HOME` has been written yet.
@@ -203,7 +245,7 @@ fn is_retired_receipt(text: &str) -> bool {
 fn publish_binary(layout: &Layout) -> Result<()> {
     let exe = std::env::current_exe().context("could not find the running J'Lo binary")?;
     let target = layout.binary();
-    if same_path(&exe, &target) {
+    if same_path(&exe, target) {
         return Ok(());
     }
 
@@ -215,8 +257,7 @@ fn publish_binary(layout: &Layout) -> Result<()> {
     File::open(&exe)
         .and_then(|handle| handle.sync_all())
         .with_context(|| format!("could not flush {exe:?} to disk"))?;
-    fs::rename(&exe, &target)
-        .with_context(|| format!("could not publish {exe:?} to {target:?}"))?;
+    fs::rename(&exe, target).with_context(|| format!("could not publish {exe:?} to {target:?}"))?;
     // Durable before the layout written next vouches for it.
     sync_dir(layout.bin_dir());
 
@@ -251,7 +292,7 @@ impl Staging {
         let Ok(exe) = std::env::current_exe() else {
             return Self(None);
         };
-        if same_path(&exe, &layout.binary()) {
+        if same_path(&exe, layout.binary()) {
             return Self(None);
         }
         let dir = exe.parent().filter(|dir| {
@@ -290,17 +331,17 @@ impl Drop for Staging {
 /// `[ -n ... ]` would fail the `&&`-joined payload and turn a successful
 /// update into a non-zero `jlo selfupdate`.
 pub(crate) fn print_reload(layout: &Layout, wrapped: bool) -> Result<()> {
-    let jlo_sh = sq(&display(&layout.home.join("jlo.sh")));
-    let autoload = sq(&display(&layout.home.join("autoload.sh")));
-    let completions = sq(&display(&layout.home.join("completions.sh")));
-    crate::shellenv::emit(
-        &[
-            format!(". {jlo_sh}"),
-            format!("if [ -n \"${{{AUTOLOAD_MARKER}-}}\" ]; then . {autoload}; fi"),
-            format!("if [ -n \"${{{COMPLETIONS_MARKER}-}}\" ]; then . {completions}; fi"),
-        ],
-        wrapped,
-    )
+    let lines: Vec<String> = ENTRIES
+        .iter()
+        .map(|entry| {
+            let path = sq(&display(&layout.entry(entry)));
+            match entry.marker {
+                None => format!(". {path}"),
+                Some(marker) => format!("if [ -n \"${{{marker}-}}\" ]; then . {path}; fi"),
+            }
+        })
+        .collect();
+    crate::shellenv::emit(&lines, wrapped)
 }
 
 /// Everything under `$JLO_HOME` except the binary and the symlink. The
@@ -315,11 +356,11 @@ fn write_layout(layout: &Layout) -> Result<bool> {
 
     // The wrappers first: the stubs below are what point at them.
     for (name, body) in [
-        ("jlo-init.sh", INIT),
-        ("jlo-autoload.sh", AUTOLOAD),
-        ("jlo-completions.zsh", COMPLETIONS_ZSH),
+        (INIT_FILE, INIT),
+        (AUTOLOAD_FILE, AUTOLOAD),
+        (COMPLETIONS_ZSH_FILE, COMPLETIONS_ZSH),
     ] {
-        write_atomic(&layout.bin.join(name), body.as_bytes())?;
+        write_atomic(&layout.implementation(name), body.as_bytes())?;
     }
 
     let completions_partial = write_completions(layout);
@@ -334,7 +375,7 @@ fn write_layout(layout: &Layout) -> Result<bool> {
 # regenerates the files it points at.
 ",
     );
-    write_atomic(&layout.home.join("jlo.sh"), jlo_sh.as_bytes())
+    write_atomic(&layout.entry(&JLO_SH), jlo_sh.as_bytes())
         .context("could not write jlo.sh; J'Lo cannot be loaded from your shell profile.")?;
 
     let autoload_sh = autoload_stub(
@@ -343,12 +384,12 @@ fn write_layout(layout: &Layout) -> Result<bool> {
 # Optional: switches JDK on cd when a .jlorc is in scope. Source after jlo.sh.
 ",
     );
-    if let Err(e) = write_atomic(&layout.home.join("autoload.sh"), autoload_sh.as_bytes()) {
+    if let Err(e) = write_atomic(&layout.entry(&AUTOLOAD_SH), autoload_sh.as_bytes()) {
         ui::warning!("{e:#} cd autoloading is unavailable.");
         stubs_replaced = false;
     }
     if let Err(e) = write_atomic(
-        &layout.home.join("completions.sh"),
+        &layout.entry(&COMPLETIONS_SH),
         completions_sh(layout).as_bytes(),
     ) {
         ui::warning!("{e:#} Tab completion is unavailable.");
@@ -398,7 +439,7 @@ fn init_stub(layout: &Layout, note: &str) -> String {
     format!(
         "{GENERATED_HEADER}{note}export JLO_HOME={home}\n{load}\n",
         home = sq(&display(&layout.home)),
-        load = guarded_source("\"$JLO_HOME/bin/jlo-init.sh\"", None),
+        load = guarded_source(&format!("\"$JLO_HOME/bin/{INIT_FILE}\""), None),
     )
 }
 
@@ -428,7 +469,7 @@ if typeset -f jlo >/dev/null 2>&1; then
   {load}
 fi
 ",
-        load = guarded_source(&sq(&display(&layout.bin.join("jlo-autoload.sh"))), None),
+        load = guarded_source(&sq(&display(&layout.implementation(AUTOLOAD_FILE))), None),
     )
 }
 
@@ -454,7 +495,7 @@ fi
         comp_zsh = sq(&display(&layout.completions.join("_jlo"))),
         comp_dir = sq(&display(&layout.completions)),
         load_zsh = guarded_source(
-            &sq(&display(&layout.bin.join("jlo-completions.zsh"))),
+            &sq(&display(&layout.implementation(COMPLETIONS_ZSH_FILE))),
             Some(COMPLETIONS_MARKER)
         ),
         load_bash = guarded_source(
@@ -483,14 +524,14 @@ fn ensure_symlink(layout: &Layout) -> Option<PathBuf> {
         ui::warning!("{link:?} already exists and is not managed by J'Lo; leaving it untouched.");
         ui::hint!(
             "To put 'jlo' on PATH yourself: ln -s {} {}",
-            sq(&display(&target)),
+            sq(&display(target)),
             sq(&display(&link))
         );
         return None;
     }
 
     if let Err(e) =
-        fs::create_dir_all(&local_bin).and_then(|()| std::os::unix::fs::symlink(&target, &link))
+        fs::create_dir_all(&local_bin).and_then(|()| std::os::unix::fs::symlink(target, &link))
     {
         ui::warning!(
             "could not create {link:?}: {e}. 'jlo' may not be available in non-interactive shells."
@@ -515,7 +556,7 @@ fn report(layout: &Layout, reinstall: bool, symlink: Option<&Path>) {
 
     // Column 0, not indented: these lines are copied, and terminal selection
     // takes a leading indent with them.
-    let main = snippet(layout, home, "jlo.sh");
+    let main = snippet(layout, home, &JLO_SH);
 
     // The profile is not read: no text scan can prove a source line runs, and
     // a false "yes" withholds the one line that would fix a broken setup.
@@ -530,10 +571,10 @@ fn report(layout: &Layout, reinstall: bool, symlink: Option<&Path>) {
             "\n{}\n",
             ui::dim("To activate, add these lines to ~/.zshrc or ~/.bashrc:")
         );
-        for name in ["jlo.sh", "autoload.sh", "completions.sh"] {
+        for entry in ENTRIES {
             eprintln!(
                 "{}",
-                ui::command(&source_line(&snippet(layout, home, name)))
+                ui::command(&source_line(&snippet(layout, home, entry)))
             );
         }
         // The bash trap: macOS terminals start login shells, which never read
@@ -601,11 +642,15 @@ const PATH_LINE: &str = r#"case ":${PATH-}:" in *":$HOME/.local/bin:"*) ;; *) ex
 /// works on another machine; the generated files it points at hold the real
 /// paths. A custom `JLO_HOME` is quoted like any other baked path, so a `$` in
 /// it stays a `$`.
-fn snippet(layout: &Layout, home: Option<&Path>, name: &str) -> String {
-    if home.is_some_and(|h| layout.home == h.join(crate::JLO_HOME_DIR_NAME)) {
-        format!("\"$HOME/{}/{name}\"", crate::JLO_HOME_DIR_NAME)
+fn snippet(layout: &Layout, home: Option<&Path>, entry: &Entry) -> String {
+    if home.is_some_and(|h| layout.home == h.join(crate::home::JLO_HOME_DIR_NAME)) {
+        format!(
+            "\"$HOME/{}/{}\"",
+            crate::home::JLO_HOME_DIR_NAME,
+            entry.name
+        )
     } else {
-        sq(&display(&layout.home.join(name)))
+        sq(&display(&layout.entry(entry)))
     }
 }
 
@@ -665,7 +710,7 @@ mod tests {
     use super::*;
 
     fn layout_at(home: &Path) -> Layout {
-        Layout::new(home.to_path_buf())
+        Layout::curl(home.to_path_buf())
     }
 
     #[test]
@@ -673,7 +718,7 @@ mod tests {
         let home = Path::new("/home/u");
         let layout = layout_at(&home.join(".jlo"));
         assert_eq!(
-            snippet(&layout, Some(home), "jlo.sh"),
+            snippet(&layout, Some(home), &JLO_SH),
             "\"$HOME/.jlo/jlo.sh\""
         );
     }
@@ -682,7 +727,7 @@ mod tests {
     fn a_custom_home_is_spelled_out_and_quoted() {
         let home = Path::new("/home/u");
         let layout = layout_at(Path::new("/opt/jlo"));
-        assert_eq!(snippet(&layout, Some(home), "jlo.sh"), "'/opt/jlo/jlo.sh'");
+        assert_eq!(snippet(&layout, Some(home), &JLO_SH), "'/opt/jlo/jlo.sh'");
     }
 
     #[test]

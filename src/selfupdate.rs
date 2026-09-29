@@ -166,7 +166,7 @@ fn is_newer(candidate: &str, current: &str) -> Result<bool> {
 }
 
 pub(crate) fn cmd_selfupdate(wrapped: bool) -> Result<(), CommandError> {
-    let layout = Layout::new(crate::jlo_home_dir()?);
+    let layout = Layout::curl(crate::home::jlo_home_dir()?);
     // Before the network: a J'Lo this command may not replace has nothing to ask.
     check_owned(&layout)?;
 
@@ -187,10 +187,10 @@ pub(crate) fn cmd_selfupdate(wrapped: bool) -> Result<(), CommandError> {
 /// failure: an error here would read as the update failing. Asked only for the
 /// J'Lo `selfupdate` may replace.
 pub(crate) fn announce_newer_release() {
-    let Ok(home) = crate::jlo_home_dir() else {
+    let Ok(home) = crate::home::jlo_home_dir() else {
         return;
     };
-    if !install::is_current_exe(&Layout::new(home).binary()) {
+    if !install::is_current_exe(Layout::curl(home).binary()) {
         return;
     }
     let Ok(tag) = ReleaseClient::from_env()
@@ -212,7 +212,7 @@ pub(crate) fn announce_newer_release() {
 /// `target/` are updated the way they were installed; running the installer
 /// from either would publish a second J'Lo beside the one the user runs.
 fn check_owned(layout: &Layout) -> Result<(), CommandError> {
-    if install::is_current_exe(&layout.binary()) {
+    if install::is_current_exe(layout.binary()) {
         return Ok(());
     }
     Err(CommandError::with_hint(
