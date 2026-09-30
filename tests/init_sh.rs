@@ -253,10 +253,9 @@ fn the_installer_parses_under_every_supported_shell() {
 /// Sources the wrapper, runs `jlo selfupdate`, and reports both the status and
 /// whether the eval actually happened.
 ///
-/// No `curl` stub any more: the update is the binary's job from 0.4.0 on, so
-/// what this file still owns is the branch around it - capture stdout,
-/// propagate a failure without evaluating anything, and eval the reload line
-/// on success.
+/// No `curl` stub: the update is the binary's job, so what this file owns is
+/// the branch around it - capture stdout, propagate a failure without
+/// evaluating anything, and eval the reload line on success.
 fn run_selfupdate(sh: &str, home: &Path, args: &str) -> Output {
     let script = format!(
         r#"

@@ -105,7 +105,3 @@ if jlo_find_jlorc || { [ -n "${JLO_HOME-}" ] && [ -f "$JLO_HOME/default.jlorc" ]
   # unsatisfiable --offline lookup would abort one running under `set -e`.
   jlo env --offline || :
 fi
-
-# Read by selfupdate's reload line. Set here, not in the stub, so a 0.2.0
-# profile block that sources this file directly sets it too.
-_JLO_AUTOLOAD=1

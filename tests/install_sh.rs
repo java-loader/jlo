@@ -2,8 +2,8 @@
 //!
 //! `install.sh` is a bootstrap now: it downloads one file, verifies it,
 //! unpacks it and hands over to the binary, which owns everything under
-//! `$JLO_HOME` - the three entry stubs, the two wrapper dialects, the
-//! completions and the symlink. These tests run the real
+//! `$JLO_HOME` - the three entry stubs, the three implementation
+//! files, the completions and the symlink. These tests run the real
 //! `install.sh` against a temporary `HOME` with `curl` stubbed out, then
 //! source the generated files from real shells.
 //!
@@ -192,7 +192,7 @@ fn install(jlo_home: Option<&str>) -> (tempfile::TempDir, Output) {
 }
 
 /// The installer's human output is on stderr: stdout is the environment
-/// channel, and from 0.4.0 `selfupdate` prints a `. jlo.sh` line
+/// channel, and `selfupdate` prints a `. jlo.sh` line
 /// there for the shell wrapper to eval.
 fn printed(out: &Output) -> String {
     String::from_utf8_lossy(&out.stderr).into_owned()
@@ -1048,13 +1048,6 @@ fn the_binary_writes_the_whole_layout() {
     ] {
         assert!(jlo.join(rel).is_file(), "install did not write {rel}");
     }
-    // The path every released profile block sources, so it must be the hook
-    // itself rather than anything that merely points at one.
-    let body = std::fs::read_to_string(jlo.join("bin/jlo-autoload.sh")).unwrap();
-    assert!(
-        body.contains("jlo_after_cd()"),
-        "bin/jlo-autoload.sh does not define the cd hook: {body}"
-    );
 }
 
 /// The symlink target name is load-bearing: `jlo` on PATH is only ever
@@ -1517,200 +1510,6 @@ fn stubs_are_inert_under_set_e_when_the_target_is_missing_or_fails() {
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
-}
-
-// ---------------------------------------------------------------------------
-// The 0.2.0/0.3.0 profile block
-// ---------------------------------------------------------------------------
-
-/// The migration path from every version that was ever released.
-///
-/// 0.2.0 and 0.3.0 both print a profile block
-/// that sources `bin/jlo-init.sh` and `bin/jlo-autoload.sh` directly - the
-/// generated entry files landed after 0.3.0 was tagged, so no released
-/// installer knows `jlo.sh` exists. Leaving those two paths alone left every
-/// existing user loading the *old* wrapper permanently, `curl | bash`
-/// selfupdate and all, with nothing looking broken.
-///
-/// Both paths are now the real files - the wrapper and the cd hook - so the old
-/// block loads exactly what the new one does. The foreign contents below stand
-/// in for the 0.3.0 originals: the test is that none of it survives, in both
-/// shells.
-#[test]
-fn the_old_profile_paths_load_the_new_wrapper() {
-    let (dir, _) = install(None);
-    let home = dir.path().join("home");
-    let bin = home.join(".jlo").join("bin");
-
-    std::fs::write(
-        bin.join("jlo-init.sh"),
-        "jlo() { echo 'the 0.3.0 wrapper'; }\n",
-    )
-    .unwrap();
-    std::fs::write(
-        bin.join("jlo-autoload.sh"),
-        "jlo_after_cd() { echo 'the 0.3.0 hook'; }\n",
-    )
-    .unwrap();
-
-    let out = reinstall_over(&home);
-    assert!(
-        out.status.success(),
-        "the upgrade failed: {}",
-        printed(&out)
-    );
-
-    for sh in shells("the_old_profile_paths_load_the_new_wrapper", INTERPRETERS) {
-        // The old block's own three lines, verbatim.
-        let out = hermetic(sh, &home)
-            .arg("-c")
-            .arg(
-                "export JLO_HOME=\"$HOME/.jlo\"\n\
-                 [[ -s \"$JLO_HOME/bin/jlo-init.sh\" ]] && source \"$JLO_HOME/bin/jlo-init.sh\"\n\
-                 [[ -s \"$JLO_HOME/bin/jlo-autoload.sh\" ]] && source \"$JLO_HOME/bin/jlo-autoload.sh\"\n\
-                 typeset -f jlo\n\
-                 typeset -f jlo_after_cd\n\
-                 echo \"marker=[${_JLO_AUTOLOAD-}]\"\n\
-                 jlo --version",
-            )
-            .output()
-            .unwrap();
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        assert!(
-            !stdout.contains("0.3.0 wrapper"),
-            "{sh}: the old wrapper is still what the old path loads: {stdout:?}"
-        );
-        assert!(
-            stdout.contains("jlo-bin"),
-            "{sh}: the old path did not load the generated wrapper: {stdout:?} \
-             stderr={:?}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        assert!(
-            !stdout.contains("0.3.0 hook"),
-            "{sh}: the old cd hook is still resident: {stdout:?}"
-        );
-        assert!(
-            stdout.contains("--offline"),
-            "{sh}: the old path did not load the generated cd hook: {stdout:?}"
-        );
-        // The hook sets its own marker, so a later 'jlo selfupdate'
-        // re-sources for this shell exactly what it had.
-        assert!(
-            stdout.contains("marker=[1]"),
-            "{sh}: the old autoload path left no marker for the reload line: {stdout:?}"
-        );
-        assert!(
-            stdout.contains(&format!("jlo {}", env!("CARGO_PKG_VERSION"))),
-            "{sh}: the loaded wrapper did not reach the binary: {stdout:?}"
-        );
-    }
-}
-
-// ---------------------------------------------------------------------------
-// What 0.4.0 and 0.5.0 left behind
-// ---------------------------------------------------------------------------
-
-/// The dialect files 0.4.0 and 0.5.0 wrote, by their path under `$JLO_HOME`.
-const RETIRED_DIALECTS: [&str; 4] = [
-    "bin/jlo-init.bash",
-    "bin/jlo-init.zsh",
-    "bin/jlo-autoload.bash",
-    "bin/jlo-autoload.zsh",
-];
-
-/// Lays down what 0.5.0 left under `jlo`: its receipt, its dialect files and
-/// the empty lock file.
-fn leave_0_5_0_files(jlo: &Path) {
-    std::fs::write(
-        jlo.join("install-receipt.json"),
-        format!(
-            "{{\n  \"version\": \"0.5.0\",\n  \"method\": \"installer\",\n  \
-             \"jlo_home\": \"{home}\",\n  \"binary\": \"{home}/bin/jlo-bin\",\n  \
-             \"symlink\": \"/nowhere/.local/bin/jlo\"\n}}\n",
-            home = jlo.display()
-        ),
-    )
-    .unwrap();
-    for name in RETIRED_DIALECTS {
-        std::fs::write(
-            jlo.join(name),
-            "# Generated by J'Lo - do not edit. Rewritten on every install and update.\n\
-             #\n# a dialect\n",
-        )
-        .unwrap();
-    }
-    std::fs::write(jlo.join(".selfupdate.lock"), "").unwrap();
-}
-
-/// What 0.5.0 wrote and nothing reads any more goes on reinstall. The empty
-/// lock file proves nothing about who made it, so it stays.
-#[test]
-fn a_reinstall_removes_what_earlier_releases_left_behind() {
-    let (dir, _) = install(None);
-    let home = dir.path().join("home");
-    let jlo = home.join(".jlo");
-    leave_0_5_0_files(&jlo);
-
-    let out = reinstall_over(&home);
-    assert!(out.status.success(), "{}", printed(&out));
-    for name in RETIRED_DIALECTS.iter().chain(&["install-receipt.json"]) {
-        assert!(!jlo.join(name).exists(), "{name} survived the reinstall");
-    }
-    assert!(jlo.join(".selfupdate.lock").is_file());
-}
-
-/// `$JLO_HOME` can be a directory the user already kept things in, so a file
-/// with a retired name but not J'Lo's contents is theirs: kept, and not
-/// mentioned.
-#[test]
-fn a_foreign_file_with_a_retired_name_survives() {
-    let (dir, _) = install(None);
-    let home = dir.path().join("home");
-    let jlo = home.join(".jlo");
-    let names: Vec<&str> = RETIRED_DIALECTS
-        .iter()
-        .copied()
-        .chain(["install-receipt.json"])
-        .collect();
-    for name in &names {
-        std::fs::write(jlo.join(name), "{\"mine\": true}\n").unwrap();
-    }
-
-    let out = reinstall_over(&home);
-    assert!(out.status.success(), "{}", printed(&out));
-    for name in &names {
-        assert!(jlo.join(name).is_file(), "{name} was not J'Lo's to remove");
-    }
-    assert!(
-        !printed(&out).contains("no longer uses"),
-        "{}",
-        printed(&out)
-    );
-}
-
-/// An `autoload.sh` this run could not replace is still 0.5.0's, and sources
-/// the dialect files - so they stay until it is replaced. The receipt is read
-/// by no stub, so it goes regardless.
-#[test]
-fn an_old_stub_that_was_not_replaced_keeps_its_targets() {
-    let (dir, _) = install(None);
-    let home = dir.path().join("home");
-    let jlo = home.join(".jlo");
-    leave_0_5_0_files(&jlo);
-    std::fs::remove_file(jlo.join("autoload.sh")).unwrap();
-    std::fs::create_dir(jlo.join("autoload.sh")).unwrap();
-
-    let out = reinstall_over(&home);
-    assert!(out.status.success(), "{}", printed(&out));
-    assert!(printed(&out).contains("autoload.sh"), "{}", printed(&out));
-    for name in RETIRED_DIALECTS {
-        assert!(
-            jlo.join(name).is_file(),
-            "{name} went while a stub needs it"
-        );
-    }
-    assert!(!jlo.join("install-receipt.json").exists());
 }
 
 /// A newline in `JLO_HOME` would split a printed profile line, or end a
