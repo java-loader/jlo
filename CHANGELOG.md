@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.1](https://github.com/java-loader/jlo/compare/jlo-bin-v0.8.0...jlo-bin-v0.8.1) (2026-09-30)
+
+
+### Bug Fixes
+
+* **homebrew:** caveats print both profile lines as one block ([313bfe5](https://github.com/java-loader/jlo/commit/313bfe556f45fbd1191ea8a761fe9ce5fcb1b3ea))
+
 ## [0.8.0](https://github.com/java-loader/jlo/compare/jlo-bin-v0.7.0...jlo-bin-v0.8.0) (2026-09-29)
 
 
