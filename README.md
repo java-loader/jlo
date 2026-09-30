@@ -18,6 +18,10 @@ platform — from 8 on Linux, from 11 on macOS.
 
 ## Installing
 
+Install J'Lo with the install script on Linux and macOS, or with Homebrew on macOS — pick one, not both.
+
+### Install Script
+
 ```shell
 /bin/bash -c "$(curl -fsSL https://github.com/java-loader/jlo/releases/latest/download/install.sh)"
 ```
@@ -28,6 +32,17 @@ your profile itself.
 
 For upgrades, run `jlo selfupdate`. Re-running the installer is always safe, and it is the way back should
 `selfupdate` ever fail.
+
+### Homebrew
+
+On macOS (arm64), J'Lo is also in a Homebrew tap:
+
+```shell
+brew install java-loader/tap/jlo
+```
+
+Brew prints the profile lines to add; tab completion comes from Homebrew's own setup. Upgrade with `brew upgrade jlo`
+— `jlo selfupdate` is for installer installs only.
 
 ## Quick Start
 
@@ -62,11 +77,11 @@ way, `jlo env` has no shell to change. Use `exec` or `home`; they work with the 
 
 ```shell
 jlo exec 25 -- ./gradlew build          # one command on Java 25
-export JAVA_HOME="$(jlo home 25)"        # just the path
+export JAVA_HOME="$(jlo home 25)"       # just the path
 ```
 
 Outside your interactive profile the plain binary still needs `~/.local/bin` on `PATH`; when it is missing, the
-installer prints the line that adds it.
+installer prints the line that adds it. With Homebrew, the binary is on brew's `PATH` already.
 
 J'Lo puts no `java` of its own on your `PATH`. Outside a shell where `jlo env` ran — by hand or through autoload —
 `java` is whatever it was before.
@@ -80,5 +95,6 @@ J'Lo puts no `java` of its own on your `PATH`. Outside a shell where `jlo env` r
 
 ## Uninstalling
 
-Remove `~/.jlo/`, the `~/.local/bin/jlo` symlink and the lines you added to your shell profile. The JDKs stay in
+Remove `~/.jlo/`, the `~/.local/bin/jlo` symlink and the lines you added to your shell profile. With Homebrew,
+`brew uninstall jlo`, then remove the profile lines and `~/.jlo/` (it holds only your `jlo init --global` default). The JDKs stay in
 `~/.jdks/` or `~/Library/Java/JavaVirtualMachines/` — delete them too if you no longer need them.
