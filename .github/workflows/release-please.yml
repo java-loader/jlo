@@ -6,8 +6,9 @@ on:
       - main
   # Recovery hatch: release-please only creates a tag once, so if the build or
   # upload job fails the release is left a draft without assets and nothing
-  # re-triggers them. This lets you rebuild and upload for a tag that already
-  # exists, and publishes it if it is still a draft.
+  # re-triggers them. This rebuilds and uploads the assets of such a draft and
+  # publishes it. A published release is refused: its assets are what users
+  # already downloaded and checked against its .sha256.
   workflow_dispatch:
     inputs:
       tag_name:
@@ -46,6 +47,21 @@ jobs:
         env:
           TAG_NAME: ${{ inputs.tag_name || needs.release-please.outputs.tag_name }}
         run: echo "tag_name=$TAG_NAME" >> "$GITHUB_OUTPUT"
+
+      # Before the build, so a refused dispatch costs no runner time. A failed
+      # lookup (no such release) fails the step too.
+      - name: Refuse a published release
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG_NAME: ${{ steps.pick.outputs.tag_name }}
+        run: |
+          draft=$(gh release view "$TAG_NAME" --json isDraft --jq .isDraft)
+          if [ "$draft" != true ]; then
+            echo "::error::$TAG_NAME is published; the recovery hatch only rebuilds a draft" >&2
+            exit 1
+          fi
 
   build:
     needs: resolve
@@ -142,6 +158,21 @@ jobs:
       attestations: write
     runs-on: ubuntu-latest
     steps:
+      # Again here, inside the concurrency group: two runs for one draft (the
+      # release-please run and a dispatch) can both pass resolve, and once the
+      # first publishes, the second must not upload to a published release.
+      - name: Refuse a published release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG_NAME: ${{ needs.resolve.outputs.tag_name }}
+        run: |
+          draft=$(gh release view "$TAG_NAME" --json isDraft --jq .isDraft)
+          if [ "$draft" != true ]; then
+            echo "::error::$TAG_NAME is published already; its assets stay as they are" >&2
+            exit 1
+          fi
+
       # install.sh ships with the release, so the documented install line
       # (releases/latest/download/install.sh) fetches the script and the
       # tarball from one tag. Taken from the tagged checkout for the same reason
@@ -189,20 +220,15 @@ jobs:
       # release-please creates the release as a draft (release-please-config.json),
       # so releases/latest - the install line, install.sh's own download and
       # 'jlo update''s hint - moves only once every asset above is attached.
-      # A release that is already published is left alone: a manual dispatch
-      # for an older tag must not move latest back. A draft older than the
-      # current latest is published without becoming it.
+      # Only a draft gets here (the first step refuses a published release),
+      # so a manual dispatch for an older tag never moves latest back. A draft
+      # older than the current latest is published without becoming it.
       - name: Publish the release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
           TAG_NAME: ${{ needs.resolve.outputs.tag_name }}
         run: |
-          draft=$(gh release view "$TAG_NAME" --json isDraft --jq .isDraft)
-          if [ "$draft" != true ]; then
-            echo "$TAG_NAME is already published; latest stays where it is"
-            exit 0
-          fi
           # A failed lookup fails the step: the release stays a draft, which
           # is safe, where guessing could make an older release latest.
           latest=$(gh release view --json tagName --jq .tagName)
@@ -225,8 +251,7 @@ jobs:
   # macOS tarball's checksum filled in. After upload, because the formula
   # points at a release asset and the release is a draft until upload
   # publishes it; and only for the latest release, so a manual dispatch for an
-  # older tag cannot move the tap back. The same run of the latest tag again
-  # (the recovery hatch) re-pushes an identical formula, which is a no-op.
+  # older tag cannot move the tap back.
   homebrew:
     needs: [resolve, upload]
     if: ${{ always() && needs.resolve.result == 'success' && needs.upload.result == 'success' }}
