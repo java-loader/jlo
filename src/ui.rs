@@ -409,8 +409,61 @@ pub(crate) fn print_warning(args: std::fmt::Arguments) {
 }
 
 /// Dimmed rather than labelled: advice must not read as a second failure.
+/// The commands it quotes are bold, so the eye lands on what to run.
 pub(crate) fn print_hint(args: std::fmt::Arguments) {
-    note(args);
+    eprintln!("{}", hint_text(&args.to_string()));
+}
+
+/// Dim prose, its `'…'`-quoted commands bold. Built from segments, each with
+/// its own reset: bold and dim share SGR 22, so a bold span styled inside a
+/// dim one would end the dim early.
+fn hint_text(text: &str) -> String {
+    quoted_spans(text)
+        .into_iter()
+        .map(|(quoted, span)| {
+            if quoted {
+                style(span).bold().for_stderr().to_string()
+            } else {
+                dim(span)
+            }
+        })
+        .collect()
+}
+
+/// `text` cut into prose and the content of its `'…'`-quoted spans, in
+/// order; `true` marks a span's content, and the quotes stay with the prose.
+/// A quote opens a span only at the start of a word and closes it only at
+/// the end of one, so the apostrophe in `J'Lo` opens nothing.
+fn quoted_spans(text: &str) -> Vec<(bool, &str)> {
+    let opens = |before: Option<&u8>| before.is_none_or(|b| matches!(b, b' ' | b'\n' | b'('));
+    let closes = |after: Option<&u8>| {
+        after.is_none_or(|b| {
+            matches!(
+                b,
+                b' ' | b'\n' | b'.' | b',' | b';' | b':' | b')' | b'?' | b'!'
+            )
+        })
+    };
+    let bytes = text.as_bytes();
+    let mut spans = Vec::new();
+    let mut prose = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        let close = (bytes[i] == b'\'' && opens(i.checked_sub(1).and_then(|p| bytes.get(p))))
+            .then(|| (i + 1..bytes.len()).find(|&j| bytes[j] == b'\'' && closes(bytes.get(j + 1))))
+            .flatten();
+        if let Some(close) = close {
+            spans.push((false, &text[prose..=i]));
+            spans.push((true, &text[i + 1..close]));
+            prose = close;
+            i = close + 1;
+        } else {
+            i += 1;
+        }
+    }
+    spans.push((false, &text[prose..]));
+    spans.retain(|(_, span)| !span.is_empty());
+    spans
 }
 
 fn note(text: impl std::fmt::Display) {
@@ -1000,7 +1053,7 @@ fn tip_line(rows: &[NameRow]) -> Option<String> {
         return None;
     }
 
-    Some(dim(format!("run {}", offers.join(" \u{b7} "))))
+    Some(hint_text(&format!("run {}", offers.join(" \u{b7} "))))
 }
 
 /// Whether stderr can carry a bar that redraws over itself. A terminal is not
@@ -1732,6 +1785,42 @@ mod tests {
             ]
         );
         assert_eq!(listing.available, None);
+    }
+
+    // -- hints --
+
+    /// The command a hint quotes is what the eye should land on; prose
+    /// around it, the quotes and a brand apostrophe stay prose.
+    #[test]
+    fn a_hint_marks_only_its_quoted_commands() {
+        assert_eq!(
+            quoted_spans("J'Lo 0.9.0 is available. Run 'jlo selfupdate' to install it."),
+            vec![
+                (false, "J'Lo 0.9.0 is available. Run '"),
+                (true, "jlo selfupdate"),
+                (false, "' to install it."),
+            ]
+        );
+        assert_eq!(
+            quoted_spans("e.g. 'jlo env 21', then run it again."),
+            vec![
+                (false, "e.g. '"),
+                (true, "jlo env 21"),
+                (false, "', then run it again."),
+            ]
+        );
+        assert_eq!(
+            quoted_spans("run 'jlo update' (2 outdated)"),
+            vec![
+                (false, "run '"),
+                (true, "jlo update"),
+                (false, "' (2 outdated)")
+            ]
+        );
+        assert_eq!(
+            quoted_spans("no quotes here"),
+            vec![(false, "no quotes here")]
+        );
     }
 
     // -- tip_line --
