@@ -8,14 +8,51 @@ use crate::store::{
 };
 use clap::builder::styling::Styles;
 use console::style;
-use indicatif::{ProgressBar, ProgressBarIter, ProgressStyle};
-use std::io::{IsTerminal, Read, stderr};
+use indicatif::{ProgressBar, ProgressDrawTarget, ProgressState, ProgressStyle};
+use std::cell::{Cell, RefCell};
+use std::io::{IsTerminal, stderr};
 use std::path::Path;
 use std::process::exit;
 use std::time::{Duration, Instant};
 
-/// The live progress region for one JDK installation: download, extraction
-/// and the move share one line, erased on success, leaving one summary line.
+/// One download of an install run, as the progress region names it.
+#[derive(Debug, Clone)]
+pub(crate) struct Download {
+    pub(crate) request: Request,
+    pub(crate) version: String,
+    /// The API's size in bytes; 0 when it gave none.
+    pub(crate) size: u64,
+}
+
+/// The two columns every line of a store diff shares. Sized before the first
+/// line prints: a `+` line goes out while later downloads still run, and the
+/// `-` lines after them have to line up with it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct Columns {
+    name: usize,
+    version: usize,
+}
+
+impl Columns {
+    pub(crate) fn fit<'a>(
+        names: impl IntoIterator<Item = Request>,
+        versions: impl IntoIterator<Item = &'a str>,
+    ) -> Self {
+        Self {
+            name: names
+                .into_iter()
+                .map(|name| name.to_string().len())
+                .max()
+                .unwrap_or(0),
+            version: versions.into_iter().map(str::len).max().unwrap_or(0),
+        }
+    }
+}
+
+/// The live progress region of one install run. Every download shares one
+/// bar, which counts the bytes of the whole run, so "how much is left" has an
+/// answer; each build that lands leaves its `+` line above the bar, and the
+/// region is erased when the run ends.
 ///
 /// Output persists in proportion to how durable the side effect is: a JDK on
 /// disk earns a line; exporting `JAVA_HOME` prints nothing, which matters
@@ -23,67 +60,126 @@ use std::time::{Duration, Instant};
 #[derive(Debug)]
 pub(crate) struct InstallUi {
     bar: ProgressBar,
-    version: String,
-    started: Instant,
     tty: bool,
+    columns: Columns,
+    downloads: RefCell<Vec<Download>>,
+    /// Index into `downloads` of the one in progress.
+    current: Cell<usize>,
+    started: Cell<Instant>,
+    /// Bytes of the downloads already finished.
+    done: Cell<u64>,
+    /// The size of the download in progress: planned, then the response's.
+    length: Cell<u64>,
 }
 
 impl InstallUi {
-    pub(crate) fn new(version: &str) -> Self {
-        let tty = supports_live_region();
-        let bar = if tty {
-            // Styled via the builder, which does not draw: a bar configured
-            // after construction flashes indicatif's default style first.
-            ProgressBar::new(0)
-                .with_style(spinner_style())
-                .with_prefix(version.to_string())
-                .with_message("connecting")
-        } else {
-            // Plain phase lines carry the progress instead.
-            ProgressBar::hidden()
-        };
-        if tty {
-            bar.enable_steady_tick(TICK);
-        }
-        Self::with_bar(version, bar, tty)
+    /// `downloads` is what the run expects to fetch; a name it did not plan
+    /// can still [`Self::begin`].
+    pub(crate) fn run(downloads: Vec<Download>, columns: Columns) -> Self {
+        Self::with_tty(downloads, columns, supports_live_region())
     }
 
     #[cfg(test)]
-    pub(crate) fn hidden(version: &str) -> Self {
-        Self::with_bar(version, ProgressBar::hidden(), false)
+    pub(crate) fn hidden() -> Self {
+        Self::with_tty(Vec::new(), Columns::default(), false)
     }
 
-    fn with_bar(version: &str, bar: ProgressBar, tty: bool) -> Self {
+    fn with_tty(downloads: Vec<Download>, columns: Columns, tty: bool) -> Self {
+        let total = downloads.iter().map(|download| download.size).sum();
+        // Plain phase lines carry the progress without a terminal; the hidden
+        // bar still keeps the count they quote.
+        let target = if tty {
+            ProgressDrawTarget::stderr()
+        } else {
+            ProgressDrawTarget::hidden()
+        };
+        // Styled via the builder, which does not draw: a bar configured
+        // after construction flashes indicatif's default style first.
+        let bar = ProgressBar::with_draw_target(Some(total), target).with_style(phase_style());
         Self {
             bar,
-            version: version.to_string(),
-            started: Instant::now(),
             tty,
+            columns,
+            downloads: RefCell::new(downloads),
+            current: Cell::new(0),
+            started: Cell::new(Instant::now()),
+            done: Cell::new(0),
+            length: Cell::new(0),
         }
     }
 
-    pub(crate) fn start_download(&self, total_size: u64) {
+    pub(crate) fn begin(&self, request: Request, version: &str, size: u64) {
+        let mut downloads = self.downloads.borrow_mut();
+        let index = if let Some(index) = downloads.iter().position(|d| d.version == version) {
+            index
+        } else {
+            downloads.push(Download {
+                request,
+                version: version.to_string(),
+                size,
+            });
+            self.bar.inc_length(size);
+            downloads.len() - 1
+        };
+        self.current.set(index);
+        self.started.set(Instant::now());
+        self.length.set(downloads[index].size);
+
         if self.tty {
-            // Length first: with pos 0 and len 0 indicatif renders a *full*
-            // bar, so switching to the bar style before the length is known
-            // would flash a completed download on the first frame.
-            self.bar.set_length(total_size);
+            let width = downloads.iter().map(|d| d.version.len()).max().unwrap_or(0);
+            let counter = counter(index, downloads.len())
+                .map(|counter| format!("{} ", dim(counter)))
+                .unwrap_or_default();
+            self.bar.set_prefix(format!("{counter}{version:<width$}"));
+            self.bar.set_position(self.done.get());
+            self.phase("connecting");
+            self.bar.enable_steady_tick(TICK);
+        }
+    }
+
+    /// A planned download the run no longer needs: the name turned out to be
+    /// current when its turn came.
+    pub(crate) fn skip(&self, version: &str) {
+        let mut downloads = self.downloads.borrow_mut();
+        if let Some(index) = downloads.iter().position(|d| d.version == version) {
+            let skipped = downloads.remove(index);
+            let total = self.bar.length().unwrap_or(0);
+            self.bar.set_length(total.saturating_sub(skipped.size));
+        }
+    }
+
+    /// `content_length` is what is actually read; a planned size that
+    /// differs only moves the total, since the bar is all it ever sized.
+    pub(crate) fn start_download(&self, content_length: u64) {
+        let planned = self.length.replace(content_length);
+        let total = corrected_total(self.bar.length().unwrap_or(0), planned, content_length);
+        self.bar.set_length(total);
+        if self.tty {
             self.bar.set_style(download_style());
         } else {
-            eprintln!(
-                "Downloading JDK {} ({})",
-                self.version,
-                indicatif::HumanBytes(total_size)
-            );
+            let downloads = self.downloads.borrow();
+            let index = self.current.get();
+            // Absent only for a download nobody began, which no caller does.
+            if let Some(download) = downloads.get(index) {
+                eprintln!(
+                    "{}",
+                    downloading_line(
+                        counter(index, downloads.len()),
+                        &download.version,
+                        content_length,
+                        total
+                    )
+                );
+            }
         }
     }
 
     pub(crate) fn set_downloaded(&self, bytes: u64) {
-        self.bar.set_position(bytes);
+        self.bar.set_position(self.done.get() + bytes);
     }
 
-    /// A spinner, not a bar: compressed bytes read run ahead of the files
-    /// written, so a bar would complete before the work does.
+    /// The bar stands still from here: it counts downloaded bytes only, and
+    /// the steady tick keeps the spinner going while the archive unpacks.
     pub(crate) fn start_extract(&self) {
         self.phase("extracting");
     }
@@ -92,44 +188,116 @@ impl InstallUi {
         self.phase("installing");
     }
 
-    fn phase(&self, name: &str) {
+    fn phase(&self, name: &'static str) {
         if self.tty {
-            self.bar.set_style(spinner_style());
-            self.bar.set_message(name.to_string());
+            self.bar.set_style(phase_style());
+            self.bar.set_message(name);
         }
     }
 
-    /// Drives the spinner from the archive reader.
-    pub(crate) fn wrap_read<R: Read>(&self, read: R) -> ProgressBarIter<R> {
-        self.bar.wrap_read(read)
-    }
-
-    pub(crate) fn finish(&self, dest: &Path) {
-        self.bar.finish_and_clear();
-        eprintln!(
-            "{}",
-            format_summary(
-                &self.version,
-                &tilde(dest, std::env::home_dir().as_deref()),
-                self.started.elapsed()
-            )
+    /// The build is in the store: its `+` line goes above the bar.
+    pub(crate) fn landed(&self) {
+        let downloads = self.downloads.borrow();
+        self.done.set(self.done.get() + self.length.get());
+        let Some(download) = downloads.get(self.current.get()) else {
+            return;
+        };
+        let line = added_line(
+            self.columns,
+            download.request,
+            &download.version,
+            self.started.get().elapsed(),
         );
+        if self.tty {
+            self.bar.println(line);
+        } else {
+            eprintln!("{line}");
+        }
     }
 
-    /// Erase the live region without a summary, before the caller's error.
-    pub(crate) fn abandon(&self) {
+    #[cfg(test)]
+    pub(crate) fn position(&self) -> u64 {
+        self.bar.position()
+    }
+
+    /// Erase the live region: at the end of the run, or before its error.
+    pub(crate) fn finish(&self) {
         self.bar.finish_and_clear();
     }
 }
 
-/// `version` is the newest build installed.
-fn up_to_date(name: &str, version: &str) {
-    eprintln!(
-        "{} JDK {} is up to date {}",
-        style("✓").green().for_stderr(),
-        name,
-        dim(format!("({version})"))
-    );
+/// `1/2`, for a run of more than one download.
+fn counter(index: usize, count: usize) -> Option<String> {
+    (count > 1).then(|| format!("{}/{count}", index + 1))
+}
+
+/// The run's total once a download's real size is known: the planned size
+/// came from the API, the response's is what is read.
+fn corrected_total(total: u64, planned: u64, actual: u64) -> u64 {
+    total.saturating_sub(planned) + actual
+}
+
+/// Without a terminal: one line per download, naming what the whole run
+/// fetches when it is more than this one.
+fn downloading_line(counter: Option<String>, version: &str, size: u64, total: u64) -> String {
+    match counter {
+        Some(counter) => format!(
+            "Downloading {counter} {version} ({} MiB of {} MiB)",
+            mib(size),
+            mib(total)
+        ),
+        None => format!("Downloading {version} ({} MiB)", mib(size)),
+    }
+}
+
+/// `+ 25  25.0.4+101.0.LTS  12s`: a build that landed.
+fn added_line(columns: Columns, request: Request, version: &str, elapsed: Duration) -> String {
+    let Columns {
+        name: name_width,
+        version: version_width,
+    } = columns;
+    format!(
+        "{} {}  {version:<version_width$}  {}",
+        style("+").green().for_stderr(),
+        style(format!("{:<name_width$}", request.to_string()))
+            .bold()
+            .for_stderr(),
+        dim(format_elapsed(elapsed))
+    )
+}
+
+/// `- 25  25.0.1+8.0.LTS`: a build that went, named the way `jlo list` names
+/// it - which is also what tells a replaced pre-release (`28-ea`) apart.
+fn removed_line(columns: Columns, version: &str) -> String {
+    let name_width = columns.name;
+    let name = build_name(version)
+        .map(|r| r.to_string())
+        .unwrap_or_default();
+    format!(
+        "{}{}",
+        dim(format!("- {name:<name_width$}  ")),
+        style(version).dim().strikethrough().for_stderr()
+    )
+}
+
+/// `  17  17.0.20+101  up to date`: a name the run left alone, with its
+/// newest build.
+fn current_line(columns: Columns, request: Request, version: &str) -> String {
+    let Columns {
+        name: name_width,
+        version: version_width,
+    } = columns;
+    format!(
+        "  {:<name_width$}  {}",
+        request.to_string(),
+        dim(format!("{version:<version_width$}  up to date"))
+    )
+}
+
+/// The name a store build answers to; `None` for a version that does not
+/// parse, which no build in the store has.
+fn build_name(version: &str) -> Option<Request> {
+    Request::of_build(&crate::version::parse(version).ok()?)
 }
 
 /// Names the platform, the half of the fact the user may not know: Adoptium
@@ -154,34 +322,27 @@ fn skipping_not_offered(request: Request) {
 
 pub(crate) const NOT_OFFERED_HINT: &str = "Run 'jlo list' to see what is available.";
 
-/// What a new build replaced. A pre-release says so: its stream publishes
-/// weekly, and the line would otherwise pass for a patch release.
-fn replaced(request: Request, removed: &[String], failures: &[String]) {
-    if !removed.is_empty() {
-        note(replaced_line(request, removed));
-    }
-    print_failures(failures);
-}
-
-fn replaced_line(request: Request, removed: &[String]) -> String {
-    format!(
-        "  replaced {}{}",
-        if request.is_ea() { "pre-release " } else { "" },
-        removed.join(", ")
-    )
-}
-
-/// Everything `install` and `update` say but the live progress. Grouped by
-/// kind, not per name, because the `replaced` lines belong directly under the
-/// install summaries the downloads left.
+/// Everything `install` and `update` say after the live region: the `+`
+/// lines are already out, so the `-` lines follow directly under them, then
+/// the names left alone, then what needs the reader.
 pub(crate) fn update_report(run: &InstallRun) {
+    let replacements = || {
+        run.names.iter().filter_map(|(_, result)| match result {
+            NameResult::Installed { replaced, failures } => Some((replaced, failures)),
+            _ => None,
+        })
+    };
+    for (replaced, _) in replacements() {
+        for version in replaced {
+            eprintln!("{}", removed_line(run.columns, version));
+        }
+    }
+    for (_, failures) in replacements() {
+        print_failures(failures);
+    }
     for (request, result) in &run.names {
-        if let NameResult::Installed {
-            replaced: removed,
-            failures,
-        } = result
-        {
-            replaced(*request, removed, failures);
+        if let NameResult::UpToDate(newest) = result {
+            eprintln!("{}", current_line(run.columns, *request, newest));
         }
     }
     for (request, result) in &run.names {
@@ -189,24 +350,14 @@ pub(crate) fn update_report(run: &InstallRun) {
             skipping_not_offered(*request);
         }
     }
-    for (request, result) in &run.names {
-        if let NameResult::UpToDate(newest) = result {
-            up_to_date(&request.to_string(), newest);
-        }
-    }
     let mut requests: Vec<Request> = run.names.iter().map(|(request, _)| *request).collect();
     requests.sort_unstable_by_key(|request| request.listing_order());
     announce_released_ea(&requests, &run.released);
 
-    let count = run.removed_count();
-    if count > 0 {
-        print_removed(count, "superseded JDK");
-    }
     if let Some(java_home) = &run.repointed {
-        note(format!(
-            "  JAVA_HOME now points at {}",
-            tilde(java_home, std::env::home_dir().as_deref())
-        ));
+        let target = crate::store::version_in(java_home)
+            .unwrap_or_else(|| tilde(java_home, std::env::home_dir().as_deref()));
+        note(format!("JAVA_HOME now points at {target}"));
     }
     if let Some(version) = &run.kept_active {
         hint!("{}", kept_active_hint(version));
@@ -275,10 +426,6 @@ pub(crate) fn plural(n: usize) -> &'static str {
     if n == 1 { "" } else { "s" }
 }
 
-fn print_removed(count: usize, noun: &str) {
-    print_created(format_args!("Removed {count} {noun}{}", plural(count)));
-}
-
 fn print_failures(failures: &[String]) {
     for failure in failures {
         eprintln!("{} {}", style("!").red().for_stderr(), failure);
@@ -332,33 +479,26 @@ macro_rules! created {
 
 pub(crate) use {created, error, hint, warning};
 
-/// Replaces the green tick when some deletions failed, so the `!` lines above
-/// read as the remainder rather than as the whole run.
-fn partial_line(removed: usize, failures: usize) -> String {
-    format!(
-        "  removed {removed} JDK{} before the failure{}",
-        plural(removed),
-        plural(failures)
-    )
-}
-
-/// Deletion cannot be undone, so it always says what it did - including
-/// "nothing", which only `--superseded` reaches.
+/// Deletion cannot be undone, so it always says what it did - one `-` line
+/// per build that went - including "nothing", which only `--superseded`
+/// reaches.
 pub(crate) fn remove_report(report: &RemoveReport) {
+    let columns = Columns::fit(
+        report
+            .removed
+            .iter()
+            .filter_map(|version| build_name(version)),
+        report.removed.iter().map(String::as_str),
+    );
     for version in &report.removed {
-        eprintln!("{}  {}", dim("removed"), version);
+        eprintln!("{}", removed_line(columns, version));
     }
 
     print_failures(&report.failures);
 
-    // No green tick and no "Nothing to remove" after a failure: either would
-    // be a false claim about a store still holding those builds.
-    let count = report.removed.len();
-    if !report.failures.is_empty() {
-        if count > 0 {
-            note(partial_line(count, report.failures.len()));
-        }
-    } else if count == 0 {
+    // No "Nothing to remove" after a failure: it would be a false claim about
+    // a store still holding those builds.
+    if report.removed.is_empty() && report.failures.is_empty() {
         // The parenthetical is the *reason* nothing went, which is false when
         // the in-use skip below kept a superseded build.
         eprintln!(
@@ -373,15 +513,13 @@ pub(crate) fn remove_report(report: &RemoveReport) {
                 )
             }
         );
-    } else {
-        print_removed(count, "JDK");
     }
 
     // Not a failure - already absent is what was asked for - but usually a
     // typo, so still said.
     if !report.not_installed.is_empty() {
         note(format!(
-            "  nothing installed matched {}",
+            "nothing installed matched {}",
             quoted_list(&report.not_installed)
         ));
     }
@@ -880,32 +1018,77 @@ fn supports_live_region() -> bool {
 
 const TICK: Duration = Duration::from_millis(100);
 
-/// Fits 80 columns even for the longest versions (`21.0.12+101.0.LTS`): a
-/// wrapped line makes the redraw repaint two rows and flicker.
+const BAR_WIDTH: usize = 22;
+const MIB: u64 = 1024 * 1024;
+
+/// Whole MiB, rounded: the run's total is a few hundred of them, and
+/// decimals would only make the line flicker.
+fn mib(bytes: u64) -> u64 {
+    (bytes + MIB / 2) / MIB
+}
+
+/// Fits 80 columns for the longest versions (`21.0.12+101.0.LTS`) with a
+/// counter and the longest phase word: a wrapped line makes the redraw repaint
+/// two rows and flicker.
 ///
-/// Dim only: the region is erased on success, and a colour that disappears
-/// would cost the same colour its meaning elsewhere.
+/// No palette colour: the region is erased when the run ends, and a colour
+/// that disappears would cost the same colour its meaning elsewhere. Weight
+/// carries the bar instead - a heavy line done, a light one to go - which
+/// also survives `NO_COLOR`.
 fn download_style() -> ProgressStyle {
-    ProgressStyle::default_bar()
-        .template("{spinner:.dim} JDK {prefix}  [{bar:20.dim}]  {bytes}/{total_bytes}  {eta}")
-        .expect("progress bar template is a valid literal")
-        .progress_chars("#>-")
+    run_style("{spinner:.dim} {prefix}  {fill}  {pct}  {mib}  {eta:.dim}")
 }
 
-fn spinner_style() -> ProgressStyle {
-    ProgressStyle::default_spinner()
-        .template("{spinner:.dim} JDK {prefix}  {msg}")
-        .expect("spinner template is a valid literal")
+/// Download done, the bar stands still and the phase word replaces the ETA.
+fn phase_style() -> ProgressStyle {
+    run_style("{spinner:.dim} {prefix}  {fill}  {pct}  {mib}  {msg:.dim}")
 }
 
-/// E.g. `✓ JDK 21.0.8+9 → ~/Library/Java/JavaVirtualMachines/21.0.8  (18s)`.
-fn format_summary(version: &str, dest: &str, elapsed: Duration) -> String {
+fn run_style(template: &str) -> ProgressStyle {
+    ProgressStyle::with_template(template)
+        .expect("progress template is a valid literal")
+        .with_key(
+            "fill",
+            |state: &ProgressState, w: &mut dyn std::fmt::Write| {
+                let _ = w.write_str(&fill(state.pos(), state.len().unwrap_or(0)));
+            },
+        )
+        .with_key(
+            "pct",
+            |state: &ProgressState, w: &mut dyn std::fmt::Write| {
+                let _ = write!(w, "{:>3}%", percent(state.pos(), state.len().unwrap_or(0)));
+            },
+        )
+        .with_key(
+            "mib",
+            |state: &ProgressState, w: &mut dyn std::fmt::Write| {
+                let total = dim(format!("/{} MiB", mib(state.len().unwrap_or(0))));
+                let _ = write!(w, "{:>3}{total}", mib(state.pos()));
+            },
+        )
+}
+
+fn percent(pos: u64, len: u64) -> u64 {
+    (pos.min(len) * 100).checked_div(len).unwrap_or(0)
+}
+
+/// `━━━━╾───`: the done part and the rest styled apart. indicatif's own
+/// `{bar:N.bold/dim}` nests the rest's dim inside the bold, and the two share
+/// one SGR reset.
+fn fill(pos: u64, len: u64) -> String {
+    let done = usize::try_from(percent(pos, len)).unwrap_or(100) * BAR_WIDTH / 100;
+    if done >= BAR_WIDTH {
+        return style("\u{2501}".repeat(BAR_WIDTH))
+            .bold()
+            .for_stderr()
+            .to_string();
+    }
     format!(
-        "{} JDK {version} {} {}  {}",
-        style("✓").green().for_stderr(),
-        dim("→"),
-        dest,
-        dim(format!("({})", format_elapsed(elapsed)))
+        "{}{}",
+        style(format!("{}\u{257e}", "\u{2501}".repeat(done)))
+            .bold()
+            .for_stderr(),
+        dim("\u{2500}".repeat(BAR_WIDTH - done - 1))
     )
 }
 
@@ -977,22 +1160,99 @@ mod tests {
         );
     }
 
-    // -- replaced_line --
+    // -- the store diff --
 
     /// A pre-release stream publishes weekly and a bare `jlo update` moves
-    /// it, so its replacement line has to read as a preview swapped for the
-    /// next, not as a patch release.
+    /// it, so a replaced build has to read as a preview swapped for the next,
+    /// not as a patch release: its line is named `28-ea`, as `jlo list` names
+    /// the stream.
     #[test]
-    fn a_replaced_pre_release_says_so() {
-        let removed = vec!["28.0.0-beta+14.0.ea".to_string()];
+    fn a_removed_pre_release_is_named_as_its_stream() {
+        plain();
+        let columns = Columns::fit([request("28-ea")], ["28.0.0-beta+14.0.ea"]);
         assert_eq!(
-            replaced_line(request("28-ea"), &removed),
-            "  replaced pre-release 28.0.0-beta+14.0.ea"
+            removed_line(columns, "28.0.0-beta+14.0.ea"),
+            "- 28-ea  28.0.0-beta+14.0.ea"
+        );
+        assert_eq!(removed_line(columns, "21.0.8+9"), "- 21     21.0.8+9");
+    }
+
+    /// The `+`, `-` and up-to-date lines of one run share their columns,
+    /// whichever line is the widest, so the report reads as one table.
+    #[test]
+    fn the_diff_lines_of_a_run_share_their_columns() {
+        plain();
+        let columns = Columns::fit(
+            [request("25"), request("21"), request("28-ea")],
+            [
+                "25.0.4+101.0.LTS",
+                "21.0.12+101.0.LTS",
+                "28.0.0-beta+17.0.ea",
+            ],
         );
         assert_eq!(
-            replaced_line(request("21"), &["21.0.8+9".to_string()]),
-            "  replaced 21.0.8+9"
+            added_line(
+                columns,
+                request("25"),
+                "25.0.4+101.0.LTS",
+                Duration::from_secs(12)
+            ),
+            "+ 25     25.0.4+101.0.LTS     12s"
         );
+        assert_eq!(
+            removed_line(columns, "21.0.8+9.0.LTS"),
+            "- 21     21.0.8+9.0.LTS"
+        );
+        assert_eq!(
+            current_line(columns, request("28-ea"), "28.0.0-beta+17.0.ea"),
+            "  28-ea  28.0.0-beta+17.0.ea  up to date"
+        );
+    }
+
+    // -- the progress region --
+
+    /// The API's size only sized the bar: once the response says otherwise,
+    /// the run's total follows the response, in either direction.
+    #[test]
+    fn the_total_follows_the_size_actually_read() {
+        assert_eq!(corrected_total(300, 100, 120), 320);
+        assert_eq!(corrected_total(300, 100, 90), 290);
+        assert_eq!(corrected_total(300, 0, 120), 420, "no size from the API");
+    }
+
+    /// Without a terminal the total is only said when the run fetches more
+    /// than this one download.
+    #[test]
+    fn a_downloading_line_names_the_run_total_only_for_several() {
+        assert_eq!(
+            downloading_line(counter(0, 2), "25.0.4+101.0.LTS", 130 * MIB, 315 * MIB),
+            "Downloading 1/2 25.0.4+101.0.LTS (130 MiB of 315 MiB)"
+        );
+        assert_eq!(
+            downloading_line(counter(0, 1), "25.0.4+101.0.LTS", 130 * MIB, 130 * MIB),
+            "Downloading 25.0.4+101.0.LTS (130 MiB)"
+        );
+    }
+
+    /// Heavy for done, light for the rest, always the same width - and an
+    /// unknown total (no size, no response yet) is an empty bar, not a
+    /// division by zero.
+    #[test]
+    fn the_bar_keeps_its_width_from_empty_to_full() {
+        plain();
+        for (pos, len) in [
+            (0, 0),
+            (0, 100),
+            (50, 100),
+            (99, 100),
+            (100, 100),
+            (120, 100),
+        ] {
+            assert_eq!(fill(pos, len).chars().count(), BAR_WIDTH, "{pos}/{len}");
+        }
+        assert_eq!(fill(100, 100), "\u{2501}".repeat(BAR_WIDTH));
+        assert!(fill(50, 100).starts_with(&"\u{2501}".repeat(BAR_WIDTH / 2)));
+        assert_eq!(percent(1, 0), 0);
     }
 
     // -- unsourced_env_hint --
@@ -1116,15 +1376,16 @@ mod tests {
         assert_eq!(tilde(path, None), "/opt/jdks/21.0.8");
     }
 
+    /// The exact version is the one fact a landed line exists to record; the
+    /// major is what the user typed.
     #[test]
-    fn summary_names_the_exact_version_and_destination() {
-        // The major version is what the user typed; the exact version is the
-        // one fact the summary exists to record.
-        let line = format_summary("21.0.8+9", "~/.jdks/21.0.8", Duration::from_secs(18));
-        assert!(line.contains("JDK 21.0.8+9"), "got: {line}");
-        assert!(line.contains("~/.jdks/21.0.8"), "got: {line}");
-        assert!(line.contains("(18s)"), "got: {line}");
-        assert_eq!(line.lines().count(), 1, "got: {line}");
+    fn a_landed_line_names_the_exact_version() {
+        plain();
+        let columns = Columns::fit([request("21")], ["21.0.8+9"]);
+        assert_eq!(
+            added_line(columns, request("21"), "21.0.8+9", Duration::from_secs(18)),
+            "+ 21  21.0.8+9  18s"
+        );
     }
 
     fn remote(version: &str, major: i64) -> RemoteJdk {

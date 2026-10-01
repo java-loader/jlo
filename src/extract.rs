@@ -23,8 +23,7 @@ fn extract_tar_gz(source: &Path, dest: &Path, ui: &InstallUi) -> anyhow::Result<
     let file = File::open(source).with_context(|| format!("could not open archive {source:?}"))?;
     ui.start_extract();
 
-    let progress_reader = ui.wrap_read(BufReader::new(file));
-    let decompressor = GzDecoder::new(progress_reader);
+    let decompressor = GzDecoder::new(BufReader::new(file));
     let mut archive = Archive::new(decompressor);
 
     archive
@@ -47,7 +46,7 @@ mod tests {
         let err = extract(
             &dir.path().join("jdk.zip"),
             dir.path(),
-            &InstallUi::hidden("test"),
+            &InstallUi::hidden(),
         )
         .unwrap_err();
         let message = format!("{err:#}");
@@ -55,15 +54,37 @@ mod tests {
         assert!(!message.contains("unsupported archive format"), "{message}");
     }
 
+    /// The bar counts downloaded bytes only: unpacking reads the archive
+    /// again, and counting that too would run the bar past its total.
+    #[test]
+    fn extracting_leaves_the_download_count_alone() {
+        let dir = tempdir().unwrap();
+        let archive = dir.path().join("jdk.tar.gz");
+        let mut builder = tar::Builder::new(flate2::write::GzEncoder::new(
+            File::create(&archive).unwrap(),
+            flate2::Compression::default(),
+        ));
+        let mut header = tar::Header::new_gnu();
+        header.set_size(4);
+        header.set_mode(0o755);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, "jdk/bin/java", &b"java"[..])
+            .unwrap();
+        builder.into_inner().unwrap().finish().unwrap();
+
+        let ui = InstallUi::hidden();
+        let dest = dir.path().join("out");
+        extract(&archive, &dest, &ui).unwrap();
+        assert!(dest.join("jdk/bin/java").exists());
+        assert_eq!(ui.position(), 0);
+    }
+
     #[test]
     fn rejects_unsupported_archive_format() {
         let dir = tempdir().unwrap();
-        let err = extract(
-            &dir.path().join("jdk.7z"),
-            dir.path(),
-            &InstallUi::hidden("test"),
-        )
-        .unwrap_err();
+        let err =
+            extract(&dir.path().join("jdk.7z"), dir.path(), &InstallUi::hidden()).unwrap_err();
         assert!(format!("{err:#}").contains("unsupported archive format"));
     }
 }

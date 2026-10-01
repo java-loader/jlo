@@ -234,8 +234,7 @@ fn remove_superseded_deletes_only_the_older_builds() {
         .success()
         // Deletion is not the environment channel.
         .stdout(predicate::str::is_empty())
-        .stderr(predicate::str::contains("21.0.9+10"))
-        .stderr(predicate::str::contains("Removed 1 JDK"))
+        .stderr(predicate::str::contains("- 21  21.0.9+10"))
         .stderr(predicate::str::contains("temurin-21.0.1").not())
         .stderr(predicate::str::contains("21.0.5+11").not());
 
@@ -778,7 +777,13 @@ fn wrapped_install_and_update_replace_the_live_build_and_move_the_shell() {
         assert_eq!(lines[0], format!("export JAVA_HOME='{}' &&", new.display()));
         assert!(lines[1].starts_with("export PATH='"), "{verb}: {stdout:?}");
         assert_eq!(lines[2], "# jlo'end", "{verb}: {stdout:?}");
-        assert!(stderr.contains("replaced 21.0.5+11"), "{verb}: {stderr}");
+        assert!(stderr.contains("- 21  21.0.5+11"), "{verb}: {stderr}");
+        assert!(stderr.contains("+ 21  21.0.9+10"), "{verb}: {stderr}");
+        // No terminal, so a plain line carries the progress instead.
+        assert!(
+            stderr.contains("Downloading 21.0.9+10 ("),
+            "{verb}: {stderr}"
+        );
     }
 }
 
@@ -806,7 +811,7 @@ fn unwrapped_install_and_update_keep_the_live_build() {
         assert!(store.join("jlo-temurin-21.0.9+10").exists());
         assert!(out.stdout.is_empty(), "{verb}: {:?}", out.stdout);
         assert!(stderr.contains("Kept 21.0.5+11"), "{verb}: {stderr}");
-        assert!(!stderr.contains("replaced"), "{verb}: {stderr}");
+        assert!(!stderr.contains("- 21"), "{verb}: {stderr}");
     }
 }
 
@@ -1368,10 +1373,10 @@ fn remove_reports_a_failed_deletion_as_a_failure() {
             .stdout(predicate::str::is_empty())
             .stderr(predicate::str::contains("could not be removed"));
 
-        // The tick is reserved for a run that did what it was asked, so
-        // neither of the two success lines may appear over a failure.
+        // A `-` line says a build went, and the tick is reserved for a run
+        // that did what it was asked: neither may appear over a failure.
         assertion
-            .stderr(predicate::str::contains("Removed").not())
+            .stderr(predicate::str::contains("- 21").not())
             .stderr(predicate::str::contains("Nothing to remove").not());
 
         std::fs::set_permissions(&store, restore).unwrap();
@@ -1380,6 +1385,38 @@ fn remove_reports_a_failed_deletion_as_a_failure() {
             "{args:?}: nothing was actually deleted"
         );
     }
+}
+
+/// One deletion fails, the other goes: the `-` lines name only the build
+/// that went, so the report never claims a build the store still holds.
+///
+/// The failing build has a read-only `bin`: the entry is moved aside, and
+/// emptying it fails.
+#[test]
+fn remove_lists_only_the_builds_that_went() {
+    let home = tempfile::tempdir().unwrap();
+    install_fake_jdk(home.path(), "21.0.11+10");
+    let stuck = install_fake_jdk(home.path(), "17.0.11+10").join("bin");
+    chmod(&stuck, 0o555);
+
+    let out = jlo(home.path())
+        .args(["remove", "21", "17"])
+        .output()
+        .unwrap();
+
+    // The entry now sits in a staging directory; open it up again so the
+    // temp directory can be cleaned up.
+    for staged in std::fs::read_dir(jdk_store_in(home.path())).unwrap() {
+        let bin = staged.unwrap().path().join("jlo-temurin-17.0.11+10/bin");
+        if bin.exists() {
+            chmod(&bin, 0o755);
+        }
+    }
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains("- 21  21.0.11+10"), "{stderr}");
+    assert!(!stderr.contains("- 17"), "{stderr}");
+    assert!(stderr.contains("could not be removed"), "{stderr}");
 }
 
 /// Naming a major removes every build of it, and says which ones went.
@@ -1396,7 +1433,8 @@ fn remove_deletes_every_build_of_the_major_named() {
         .success()
         .code(0)
         .stdout(predicate::str::is_empty())
-        .stderr(predicate::str::contains("Removed 2 JDKs"));
+        .stderr(predicate::str::contains("- 21  21.0.11+10"))
+        .stderr(predicate::str::contains("- 21  21.0.9+10"));
 
     let store = jdk_store_in(home.path());
     assert!(!store.join("jlo-temurin-21.0.11+10").exists());

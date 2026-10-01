@@ -65,6 +65,10 @@ pub(crate) struct JdkMetadata {
     pub package_name: String,
     pub download_link: String,
     pub checksum: String,
+    /// The package's size in bytes as the API states it; 0 when it does not.
+    /// Sizes the progress bar before the download starts, nothing more: the
+    /// bytes read are the response's, and the checksum vouches for them.
+    pub size: u64,
 }
 
 pub(crate) const ADOPTIUM_API_URL: &str = "https://api.adoptium.net";
@@ -92,6 +96,10 @@ struct AssetPackage {
     name: String,
     link: String,
     checksum: String,
+    // Optional: only the progress bar reads it, and a missing size must not
+    // stop an install.
+    #[serde(default)]
+    size: u64,
 }
 
 /// Require a field to be a single ordinary path component.
@@ -136,6 +144,7 @@ impl TryFrom<Release> for JdkMetadata {
             package_name: binary.package.name,
             download_link: binary.package.link,
             checksum: binary.package.checksum,
+            size: binary.package.size,
         };
         if metadata.semver.is_empty()
             || metadata.package_name.is_empty()
@@ -432,6 +441,7 @@ mod tests {
                     name: package_name.to_string(),
                     link: "https://example.invalid/jdk.tar.gz".to_string(),
                     checksum: "0".repeat(64),
+                    size: 0,
                 },
             }],
         }
@@ -502,6 +512,7 @@ mod tests {
             package_name: "fake.tar.gz".to_string(),
             download_link,
             checksum: checksum.to_string(),
+            size: 0,
         }
     }
 
@@ -530,6 +541,21 @@ mod tests {
             metadata.checksum,
             "6ebcf221c9b41507b14c098e93c6ead6440b8d9bd154f8ec666c4c73abbdb201"
         );
+        assert_eq!(metadata.size, 200_030_394);
+    }
+
+    /// The size only sizes the progress bar, so a response without one still
+    /// installs: it parses as 0 and the bar falls back to Content-Length.
+    #[test]
+    fn metadata_without_a_package_size_parses_as_zero() {
+        let mut server = mockito::Server::new();
+        let _m = major_mock(&mut server, 21, 200, &fixture_without_package_field("size"));
+
+        let metadata = AdoptiumClient::new(server.url())
+            .fetch_metadata(request("21"))
+            .unwrap()
+            .expect("the fixture offers a build");
+        assert_eq!(metadata.size, 0);
     }
 
     #[test]
@@ -842,7 +868,7 @@ mod tests {
 
         let mut file = tempfile::tempfile().unwrap();
         client
-            .download(&metadata, &mut file, &InstallUi::hidden("test"))
+            .download(&metadata, &mut file, &InstallUi::hidden())
             .unwrap();
 
         file.rewind().unwrap();
@@ -864,7 +890,7 @@ mod tests {
 
         let mut file = tempfile::tempfile().unwrap();
         let err = client
-            .download(&metadata, &mut file, &InstallUi::hidden("test"))
+            .download(&metadata, &mut file, &InstallUi::hidden())
             .unwrap_err();
 
         assert!(
@@ -889,7 +915,7 @@ mod tests {
 
         let mut file = tempfile::tempfile().unwrap();
         let err = client
-            .download(&metadata, &mut file, &InstallUi::hidden("test"))
+            .download(&metadata, &mut file, &InstallUi::hidden())
             .unwrap_err();
 
         assert!(
@@ -931,7 +957,7 @@ mod tests {
 
         let mut file = tempfile::tempfile().unwrap();
         let err = client
-            .download(&metadata, &mut file, &InstallUi::hidden("test"))
+            .download(&metadata, &mut file, &InstallUi::hidden())
             .unwrap_err();
 
         let msg = format!("{err:#}");

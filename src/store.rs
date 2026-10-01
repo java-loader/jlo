@@ -3,7 +3,7 @@ use crate::adoptium::{AdoptiumClient, JdkMetadata};
 use crate::extract;
 use crate::request::{OLDEST_MAJOR, Request, Stream};
 use crate::shellenv::Payload;
-use crate::ui::{self, InstallUi};
+use crate::ui::{self, Download, InstallUi};
 use crate::version::{cmp_desc, compare};
 use anyhow::{Context, anyhow, bail};
 use std::cmp::Ordering;
@@ -29,6 +29,14 @@ fn parse_entry(name: &str) -> Option<(String, Request)> {
     let version = name.strip_prefix(ENTRY_PREFIX)?;
     let semver = crate::version::parse(version).ok()?;
     Some((version.to_string(), Request::of_build(&semver)?))
+}
+
+/// The version of the store entry `path` lies in - a java home, or the entry
+/// itself; `None` outside any entry jlo owns.
+pub(crate) fn version_in(path: &Path) -> Option<String> {
+    path.ancestors()
+        .find_map(|dir| parse_entry(dir.file_name()?.to_str()?))
+        .map(|(version, _)| version)
 }
 
 /// A macOS bundle's java home, relative to the bundle. One constant because
@@ -570,6 +578,8 @@ pub(crate) struct InstallRun {
     /// shell could not be told to follow.
     pub(crate) kept_active: Option<String>,
     pub(crate) error: Option<CommandError>,
+    /// The widths every line of the run's report shares.
+    pub(crate) columns: ui::Columns,
     /// The majors Adoptium has released, asked only when a pre-release name is
     /// in play and the run succeeded: a `28-ea` pin whose major is out is worth
     /// a note.
@@ -582,12 +592,6 @@ impl InstallRun {
             NameResult::Installed { replaced, failures } => Some((&replaced[..], &failures[..])),
             _ => None,
         })
-    }
-
-    pub(crate) fn removed_count(&self) -> usize {
-        self.replacements()
-            .map(|(replaced, _)| replaced.len())
-            .sum()
     }
 
     pub(crate) fn failure_count(&self) -> usize {
@@ -625,9 +629,20 @@ pub(crate) fn install_each<W: std::io::Write>(
         }
     };
 
+    let ui = match plan_downloads(store, &requests, &offered) {
+        Ok((downloads, columns)) => {
+            run.columns = columns;
+            InstallUi::run(downloads, columns)
+        }
+        Err(e) => {
+            run.error = Some(e.into());
+            return run;
+        }
+    };
+
     let mut installed = Vec::new();
     for (request, metadata) in offered {
-        match install_latest(client, store, request, &metadata) {
+        match install_latest(client, store, request, &metadata, &ui) {
             Ok(Latest::Installed(java_home)) => {
                 installed.push((request, metadata.semver, java_home));
             }
@@ -641,6 +656,7 @@ pub(crate) fn install_each<W: std::io::Write>(
             }
         }
     }
+    ui.finish();
 
     if let Err(e) = store
         .plan_replacement(installed, active)
@@ -772,6 +788,43 @@ fn resolve_offered(
     Ok(offered)
 }
 
+/// Which names the run will download, decided up front only to size the
+/// progress bar and the report's columns: [`install_latest`] asks again right
+/// before each download, since another shell may have installed the name
+/// meanwhile.
+fn plan_downloads(
+    store: &JdkStore,
+    requests: &[Request],
+    offered: &[(Request, JdkMetadata)],
+) -> anyhow::Result<(Vec<Download>, ui::Columns)> {
+    let installed = store.list()?;
+    let mut downloads = Vec::new();
+    for (request, metadata) in offered {
+        let builds: Vec<&InstalledJdk> = installed
+            .iter()
+            .filter(|jdk| jdk.request == *request)
+            .collect();
+        if builds.is_empty() || supersedes_every_install(&metadata.semver, &builds) {
+            downloads.push(Download {
+                request: *request,
+                version: metadata.semver.clone(),
+                size: metadata.size,
+            });
+        }
+    }
+    let versions = offered
+        .iter()
+        .map(|(_, metadata)| metadata.semver.as_str())
+        .chain(
+            installed
+                .iter()
+                .filter(|jdk| requests.contains(&jdk.request))
+                .map(|jdk| jdk.version.as_str()),
+        );
+    let columns = ui::Columns::fit(requests.iter().copied(), versions);
+    Ok((downloads, columns))
+}
+
 enum Latest {
     /// With the newest build installed.
     Current(String),
@@ -787,6 +840,7 @@ fn install_latest(
     store: &JdkStore,
     request: Request,
     jdk_metadata: &JdkMetadata,
+    ui: &InstallUi,
 ) -> anyhow::Result<Latest> {
     let installed = store.list()?;
     // Only this name: an installed EA of a later patch would otherwise keep
@@ -799,34 +853,53 @@ fn install_latest(
     match builds.first() {
         // `list` is newest first.
         Some(newest) if !supersedes_every_install(&jdk_metadata.semver, &builds) => {
+            ui.skip(&jdk_metadata.semver);
             Ok(Latest::Current(newest.version.clone()))
         }
         _ => {
-            let java_home =
-                install_jdk(client, store, jdk_metadata).context("could not install JDK")?;
+            let java_home = install_jdk(client, store, request, jdk_metadata, ui)
+                .context("could not install JDK")?;
             Ok(Latest::Installed(java_home))
         }
     }
 }
 
-pub(crate) fn install_jdk(
+/// The on-demand install `env`, `home` and `exec` perform: a run of one.
+pub(crate) fn install_one(
     client: &AdoptiumClient,
     store: &JdkStore,
+    request: Request,
     jdk_metadata: &JdkMetadata,
 ) -> anyhow::Result<PathBuf> {
-    // One progress region spans all three phases, so they share one line.
-    let ui = InstallUi::new(&jdk_metadata.semver);
+    let download = Download {
+        request,
+        version: jdk_metadata.semver.clone(),
+        size: jdk_metadata.size,
+    };
+    let columns = ui::Columns::fit([request], [jdk_metadata.semver.as_str()]);
+    let ui = InstallUi::run(vec![download], columns);
+    let result = install_jdk(client, store, request, jdk_metadata, &ui);
+    ui.finish();
+    result
+}
 
-    match install_jdk_inner(client, store, jdk_metadata, &ui) {
-        Ok(dest_dir) => {
-            ui.finish(&dest_dir);
-            Ok(dest_dir)
-        }
-        Err(e) => {
-            ui.abandon();
-            Err(e)
-        }
+/// One download, extraction and move, all on the run's progress region.
+fn install_jdk(
+    client: &AdoptiumClient,
+    store: &JdkStore,
+    request: Request,
+    jdk_metadata: &JdkMetadata,
+    ui: &InstallUi,
+) -> anyhow::Result<PathBuf> {
+    ui.begin(request, &jdk_metadata.semver, jdk_metadata.size);
+    let result = install_jdk_inner(client, store, jdk_metadata, ui);
+    match &result {
+        Ok(_) => ui.landed(),
+        // Erased before the caller's error, which would otherwise print
+        // over a half-drawn bar.
+        Err(_) => ui.finish(),
     }
+    result
 }
 
 fn install_jdk_inner(
@@ -1100,6 +1173,7 @@ mod tests {
             package_name: String::new(),
             download_link: String::new(),
             checksum: String::new(),
+            size: 0,
         }
     }
 
@@ -1134,6 +1208,42 @@ mod tests {
         fs::create_dir_all(java_home.join("bin")).unwrap();
         fs::write(java_home.join("bin").join("java"), "").unwrap();
         source.join(release)
+    }
+
+    // -- plan_downloads --
+
+    /// The bar is sized for what will actually be fetched: a name already on
+    /// its newest build adds nothing to the total, an outdated or missing one
+    /// its whole package. The columns cover every line the report can print,
+    /// the superseded build included.
+    #[test]
+    fn the_planned_downloads_are_the_names_not_yet_current() {
+        let dir = tempdir().unwrap();
+        create_jdk_dir(dir.path(), "21.0.5+11");
+        create_jdk_dir(dir.path(), "17.0.20+101");
+        let sized = |semver: &str, size| JdkMetadata {
+            size,
+            ..metadata(semver)
+        };
+        let offered = vec![
+            (request("25"), sized("25.0.4+101.0.LTS", 130)),
+            (request("21"), sized("21.0.9+10", 185)),
+            (request("17"), sized("17.0.20+101", 170)),
+        ];
+        let requests: Vec<Request> = offered.iter().map(|(r, _)| *r).collect();
+
+        let (downloads, columns) =
+            plan_downloads(&JdkStore::at(dir.path()), &requests, &offered).unwrap();
+
+        let planned: Vec<(&str, u64)> = downloads
+            .iter()
+            .map(|d| (d.version.as_str(), d.size))
+            .collect();
+        assert_eq!(planned, vec![("25.0.4+101.0.LTS", 130), ("21.0.9+10", 185)]);
+        assert_eq!(
+            columns,
+            ui::Columns::fit(requests, ["25.0.4+101.0.LTS", "21.0.5+11"])
+        );
     }
 
     // -- ownership is the name --
@@ -2803,7 +2913,7 @@ mod tests {
             .install(
                 &metadata("21.0.3+9"),
                 source_dir.path(),
-                &InstallUi::hidden("test"),
+                &InstallUi::hidden(),
             )
             .unwrap();
 
@@ -2840,7 +2950,7 @@ mod tests {
         let result = JdkStore::at(dest_parent.path()).install(
             &metadata("21.0.3+9"),
             source_dir.path(),
-            &InstallUi::hidden("test"),
+            &InstallUi::hidden(),
         );
 
         assert!(result.is_err(), "installed over an existing entry");
