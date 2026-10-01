@@ -398,7 +398,7 @@ pub(crate) fn remove_report(report: &RemoveReport) {
 pub(crate) fn offline_list(groups: &[NameGroup], active_version: Option<&str>, foreign: &Foreign) {
     if groups.is_empty() {
         eprintln!("No JDKs installed in {}.", foreign.base.display());
-        print_foreign(foreign, false);
+        print_footer(Vec::new(), foreign, false);
         return;
     }
 
@@ -418,7 +418,7 @@ pub(crate) fn remote_list(
         eprintln!("Adoptium offers no JDKs for this OS and architecture.");
         // Not a return: installs still present are still removable.
         if groups.is_empty() {
-            print_foreign(foreign, false);
+            print_footer(Vec::new(), foreign, false);
             return;
         }
     }
@@ -432,56 +432,64 @@ pub(crate) struct Foreign<'a> {
     pub(crate) base: &'a Path,
 }
 
-/// Listed so the user sees what jlo will never delete for them - an earlier
-/// jlo's bare-version installs, an IDE's downloads - and can do it by hand.
-/// Rows to stdout like every other listed name, the heading to stderr.
-fn print_foreign(foreign: &Foreign, after_section: bool) {
-    if foreign.names.is_empty() {
+/// The footer labels share one width, so their values line up.
+const AVAILABLE_LABEL: &str = "available:";
+const NOT_MANAGED_LABEL: &str = "not managed:";
+const FOOTER_LABEL_WIDTH: usize = NOT_MANAGED_LABEL.len();
+
+/// A footer row: a dim label, then its value. `label` is `None` on a
+/// continuation row, which keeps the label's width blank.
+fn footer_row(label: Option<&str>, value: &str) -> String {
+    let label = format!("{:<FOOTER_LABEL_WIDTH$}", label.unwrap_or(""));
+    format!("  {}  {value}", style(label).dim())
+}
+
+/// The directories jlo will never delete - an earlier jlo's bare-version
+/// installs, an IDE's downloads - one per row, so a name with spaces in it
+/// stays readable and the user can delete them by hand.
+fn foreign_rows(names: &[String]) -> Vec<String> {
+    names
+        .iter()
+        .enumerate()
+        .map(|(i, name)| {
+            let label = (i == 0).then_some(NOT_MANAGED_LABEL);
+            footer_row(label, &style(name).dim().to_string())
+        })
+        .collect()
+}
+
+/// The footer rows to stdout, like every other listed name; the blank line
+/// before them, only when rows precede, and the reason after them to stderr.
+fn print_footer(mut rows: Vec<String>, foreign: &Foreign, after_rows: bool) {
+    rows.extend(foreign_rows(foreign.names));
+    if rows.is_empty() {
         return;
     }
-    if after_section {
+    if after_rows {
         eprintln!();
     }
-    eprintln!(
-        "{} {}",
-        style("Not managed by jlo").bold().for_stderr(),
-        dim(format!(
-            "(in {})",
-            tilde(foreign.base, std::env::home_dir().as_deref())
-        ))
-    );
-    print_lines(
-        foreign
-            .names
-            .iter()
-            .map(|name| format!("    {}", style(name).dim())),
-    );
-    eprintln!();
-    // Without it, a JDK that works but is never used, updated or deleted
-    // reads as a bug.
-    note("jlo only manages jlo-temurin-<version> directories and never touches these.");
+    print_lines(rows);
+    if !foreign.names.is_empty() {
+        // Without it, a JDK that works but is never used, updated or deleted
+        // reads as a bug.
+        note("  (jlo manages only jlo-temurin-* directories)");
+    }
 }
 
 fn print_listing(rows: &[NameRow], foreign: &Foreign) {
     let listing = render_rows(rows);
 
-    // Headings and the tip go to stderr, so a pipe sees only the rows.
+    // Blank lines and the tip go to stderr, so a pipe sees only the rows.
     let installed_any = !listing.installed.is_empty();
-    if installed_any {
-        eprintln!("{}", style("Installed").bold().for_stderr());
-        print_lines(listing.installed);
-    }
-    if let Some(available) = listing.available {
-        if installed_any {
-            eprintln!();
-        }
-        eprintln!("{}", style("Available").bold().for_stderr());
-        print_lines([available]);
-    }
-    print_foreign(foreign, true);
+    print_lines(listing.installed);
+    print_footer(
+        listing.available.into_iter().collect(),
+        foreign,
+        installed_any,
+    );
 
     if let Some(tip) = tip_line(rows) {
-        eprintln!("\n{tip}");
+        eprintln!("\n  {tip}");
     }
 }
 
@@ -703,36 +711,17 @@ struct Listing {
     available: Option<String>,
 }
 
-/// The gutter glyph. Characters, not colour, carry the distinction, so it
-/// survives `NO_COLOR` and a pipe.
-#[derive(Clone, Copy)]
-enum Mark {
-    None,
-    Active,
-    Update,
-    Superseded,
-}
-
-impl Mark {
-    fn render(self) -> String {
-        match self {
-            Mark::None => " ".to_string(),
-            Mark::Active => style("\u{25cf}").green().to_string(),
-            Mark::Update => style("\u{2191}").yellow().to_string(),
-            Mark::Superseded => style("\u{2717}").dim().to_string(),
-        }
-    }
-}
-
 /// One printed line before padding.
 struct Cells<'a> {
-    mark: Mark,
     /// Empty on a build line: the blank is what ties it to the name above.
     name: String,
     version: &'a str,
     active: bool,
-    /// Already styled.
-    tail: String,
+    /// A superseded build's line is dim throughout, its `active` aside.
+    superseded: bool,
+    /// The state words, already styled. Words rather than glyphs, so
+    /// `jlo list | grep update` works and nothing depends on colour.
+    states: String,
 }
 
 /// Anything of the name on disk.
@@ -740,38 +729,44 @@ fn is_installed(row: &NameRow) -> bool {
     row.installed.is_some() || !row.others.is_empty()
 }
 
+/// `active` first: it is the one word a glance looks for.
+fn states(active: bool, rest: Option<String>) -> String {
+    let active = active.then(|| style("active").cyan().to_string());
+    active
+        .into_iter()
+        .chain(rest)
+        .collect::<Vec<_>>()
+        .join("  ")
+}
+
 fn push_name<'a>(out: &mut Vec<Cells<'a>>, row: &'a NameRow) {
-    let mark = if row.active {
-        Mark::Active
-    } else if row.update {
-        Mark::Update
-    } else {
-        Mark::None
-    };
-    // Words as well as a colour, so `jlo list | grep update` works.
-    let tail = match (&row.latest, row.update) {
-        (Some(latest), true) => format!("{} {}", style(latest).yellow(), style("update").dim()),
-        (Some(latest), false) => style(format!("{latest} offered")).dim().to_string(),
-        (None, _) => String::new(),
+    let offer = match (&row.latest, row.update) {
+        (Some(latest), true) => Some(format!(
+            "{}{}{latest}",
+            style("update").yellow(),
+            style(" \u{2192} ").dim()
+        )),
+        (Some(latest), false) => Some(style(format!("{latest} offered")).dim().to_string()),
+        (None, _) => None,
     };
     out.push(Cells {
-        mark,
         name: row.name.to_string(),
         version: row.installed.as_deref().unwrap_or(""),
         active: row.active,
-        tail,
+        superseded: false,
+        states: states(row.active, offer),
     });
     for build in &row.others {
+        let superseded = build.status == Status::Superseded;
         out.push(Cells {
-            mark: match (build.active, build.status) {
-                (true, _) => Mark::Active,
-                (false, Status::Superseded) => Mark::Superseded,
-                (false, Status::Installed) => Mark::None,
-            },
             name: String::new(),
             version: &build.version,
             active: build.active,
-            tail: render_status(build.status),
+            superseded,
+            states: states(
+                build.active,
+                superseded.then(|| style("superseded").dim().to_string()),
+            ),
         });
     }
 }
@@ -798,7 +793,7 @@ fn render_rows(rows: &[NameRow]) -> Listing {
         .map(|row| row.name.to_string())
         .collect();
     let available = (!not_installed.is_empty())
-        .then(|| format!("    {}", style(not_installed.join("  ")).dim()));
+        .then(|| footer_row(Some(AVAILABLE_LABEL), &not_installed.join("  ")));
 
     Listing {
         installed,
@@ -816,15 +811,20 @@ fn render_line(c: &Cells, name_width: usize, version_width: usize) -> String {
             format!("{text:<width$}")
         }
     };
-    let version_last = c.tail.is_empty();
+    let version_last = c.states.is_empty();
     let name_last = version_last && c.version.is_empty();
 
     let name = pad(&c.name, name_width, name_last);
     let version = pad(c.version, version_width, version_last);
-    let (name, version) = if c.active {
-        (style(name).green().bold(), style(version).green())
+    let name = if c.active {
+        style(name).cyan().bold()
     } else {
-        (style(name).bold(), style(version).dim())
+        style(name).bold()
+    };
+    let version = if c.superseded {
+        style(version).dim()
+    } else {
+        style(version)
     };
 
     let mut fields = vec![name.to_string()];
@@ -832,18 +832,9 @@ fn render_line(c: &Cells, name_width: usize, version_width: usize) -> String {
         fields.push(version.to_string());
     }
     if !version_last {
-        fields.push(c.tail.clone());
+        fields.push(c.states.clone());
     }
-    format!("  {} {}", c.mark.render(), fields.join("  "))
-}
-
-/// A single token each, so `jlo list | grep superseded` shows what
-/// `jlo remove --superseded` would take.
-fn render_status(status: Status) -> String {
-    match status {
-        Status::Installed => String::new(),
-        Status::Superseded => style("superseded").dim().to_string(),
-    }
+    format!("  {}", fields.join("  "))
 }
 
 /// One line whatever applies: this prints on every `jlo list`, and a stack of
@@ -1429,7 +1420,7 @@ mod tests {
     }
 
     #[test]
-    fn render_rows_puts_installed_names_first_and_marks_each_exception() {
+    fn render_rows_puts_installed_names_first_and_names_each_state() {
         plain();
         let mut outdated = name("21")
             .installed("21.0.11+10.0.LTS")
@@ -1453,18 +1444,18 @@ mod tests {
         assert_eq!(
             listing.installed,
             vec![
-                "  \u{2191} 28-ea  28.0.0-beta+14.0.ea  28.0.0-beta+16.0.ea update",
-                "  \u{25cf} 27     27.0.0+35",
-                "    27-ea  27.0.0-beta+30.0.ea",
-                "  \u{2191} 21     21.0.11+10.0.LTS     21.0.12+101.0.LTS update",
-                "  \u{25cf}        21.0.9+10.0.LTS      superseded",
+                "  28-ea  28.0.0-beta+14.0.ea  update \u{2192} 28.0.0-beta+16.0.ea",
+                "  27     27.0.0+35            active",
+                "  27-ea  27.0.0-beta+30.0.ea",
+                "  21     21.0.11+10.0.LTS     update \u{2192} 21.0.12+101.0.LTS",
+                "         21.0.9+10.0.LTS      active  superseded",
             ]
         );
-        assert_eq!(listing.available.as_deref(), Some("    26  20"));
+        assert_eq!(listing.available.as_deref(), Some("  available:    26  20"));
     }
 
     /// A catalogue sitting behind the store is shown, but as an offer rather
-    /// than an update, and a superseded build is marked in the gutter.
+    /// than an update, and a superseded build says so in words.
     #[test]
     fn render_rows_says_offered_for_an_older_build_on_offer() {
         plain();
@@ -1475,8 +1466,8 @@ mod tests {
         assert_eq!(
             listing.installed,
             vec![
-                "    21  21.0.12+101.0.LTS  21.0.11+10.0.LTS offered",
-                "  \u{2717}     21.0.9+10.0.LTS    superseded",
+                "  21  21.0.12+101.0.LTS  21.0.11+10.0.LTS offered",
+                "      21.0.9+10.0.LTS    superseded",
             ]
         );
         assert_eq!(listing.available, None);

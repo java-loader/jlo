@@ -436,12 +436,9 @@ fn list_offline_names_the_directories_jlo_does_not_manage() {
         .args(["list", "--offline"])
         .assert()
         .success()
-        .stdout("    21.0.5+11\n    temurin-21.0.1\n")
+        .stdout("  not managed:  21.0.5+11\n                temurin-21.0.1\n")
         .stderr(predicate::str::contains("No JDKs installed"))
-        .stderr(predicate::str::contains("Not managed by jlo"))
-        .stderr(predicate::str::contains(
-            "jlo-temurin-<version> directories",
-        ));
+        .stderr(predicate::str::contains("jlo-temurin-* directories"));
 
     install_fake_jdk(home.path(), "21.0.9+10");
 
@@ -451,9 +448,9 @@ fn list_offline_names_the_directories_jlo_does_not_manage() {
         .success()
         .stdout(predicate::str::contains("21.0.9+10"))
         .stdout(predicate::str::contains(
-            "    21.0.5+11\n    temurin-21.0.1\n",
+            "  not managed:  21.0.5+11\n                temurin-21.0.1\n",
         ))
-        .stderr(predicate::str::contains("Not managed by jlo"));
+        .stderr(predicate::str::contains("jlo-temurin-* directories"));
 }
 
 #[test]
@@ -475,15 +472,15 @@ fn list_remote_shows_available_versions() {
         .success()
         // Nothing is installed, so 21 is only named in the available line -
         // by the name `jlo install` takes.
-        .stdout("    21\n")
-        // The section heading goes to stderr, so a pipe sees rows only.
-        .stderr("Available\n");
+        .stdout("  available:    21\n")
+        // No heading and no blank line: nothing precedes the footer row.
+        .stderr("");
 }
 
 /// The case `jlo remove 17.0.11+10` had nowhere to read its argument from:
 /// a build older than the newest of its name used to collapse into a
 /// parenthetical on the row above it. It is an indented line of its own, and
-/// the active mark follows it there.
+/// the `active` word follows it there.
 #[test]
 fn list_remote_gives_a_superseded_build_its_own_line() {
     let mut server = mockito::Server::new();
@@ -506,7 +503,7 @@ fn list_remote_gives_a_superseded_build_its_own_line() {
         .env("JLO_ADOPTIUM_API_URL", server.url())
         .assert()
         .success()
-        .stdout("    21  21.0.11+10.0.LTS\n  \u{25cf}     21.0.9+10.0.LTS   superseded\n")
+        .stdout("  21  21.0.11+10.0.LTS\n      21.0.9+10.0.LTS   active  superseded\n")
         // The advice belongs on stderr, so a pipe sees only the rows.
         .stderr(predicate::str::contains(
             "'jlo remove --superseded' (1 superseded)",

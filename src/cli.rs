@@ -300,13 +300,14 @@ some other version lives, see jlo home."
         long_about = "\
 Show available and installed JDKs
 
-One row per name (25, 28-ea). Other builds of a name sit on indented
-lines below it, with the exact version to pass to jlo remove; an older
-one is marked superseded.
+One row per name (25, 28-ea), with its state in words: active, update,
+superseded. Other builds of a name sit on lines of their own below it,
+with the exact version to pass to jlo remove. Names not installed follow
+on one line after available:.
 
 A JDK is a directory named jlo-temurin-<version> in the install
 directory, however it got there. Every other directory there is listed
-under \"Not managed by jlo\": jlo never uses, updates or deletes it."
+after not managed: - jlo never uses, updates or deletes it."
     )]
     List {
         /// List only what is installed; never touch the network
