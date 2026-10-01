@@ -1219,7 +1219,8 @@ mod tests {
     #[test]
     fn the_planned_downloads_are_the_names_not_yet_current() {
         let dir = tempdir().unwrap();
-        create_jdk_dir(dir.path(), "21.0.5+11");
+        // Older, but the widest version of the run: the columns follow it.
+        create_jdk_dir(dir.path(), "21.0.5+11.0.LTS.ea.long");
         create_jdk_dir(dir.path(), "17.0.20+101");
         let sized = |semver: &str, size| JdkMetadata {
             size,
@@ -1242,7 +1243,7 @@ mod tests {
         assert_eq!(planned, vec![("25.0.4+101.0.LTS", 130), ("21.0.9+10", 185)]);
         assert_eq!(
             columns,
-            ui::Columns::fit(requests, ["25.0.4+101.0.LTS", "21.0.5+11"])
+            ui::Columns::fit(requests, ["21.0.5+11.0.LTS.ea.long"])
         );
     }
 

@@ -65,6 +65,12 @@ pub(crate) struct InstallUi {
     downloads: RefCell<Vec<Download>>,
     /// Index into `downloads` of the one in progress.
     current: Cell<usize>,
+    /// How many downloads have begun: the counter's number, which a skipped
+    /// or an unplanned download must not reorder.
+    begun: Cell<usize>,
+    /// The bar's width for the download in progress: what is left of 80
+    /// columns once the counter, the version and the totals are placed.
+    bar_width: Cell<usize>,
     started: Cell<Instant>,
     /// Bytes of the downloads already finished.
     done: Cell<u64>,
@@ -95,13 +101,16 @@ impl InstallUi {
         };
         // Styled via the builder, which does not draw: a bar configured
         // after construction flashes indicatif's default style first.
-        let bar = ProgressBar::with_draw_target(Some(total), target).with_style(phase_style());
+        let bar = ProgressBar::with_draw_target(Some(total), target)
+            .with_style(phase_style(MAX_BAR_WIDTH));
         Self {
             bar,
             tty,
             columns,
             downloads: RefCell::new(downloads),
             current: Cell::new(0),
+            begun: Cell::new(0),
+            bar_width: Cell::new(MAX_BAR_WIDTH),
             started: Cell::new(Instant::now()),
             done: Cell::new(0),
             length: Cell::new(0),
@@ -122,12 +131,20 @@ impl InstallUi {
             downloads.len() - 1
         };
         self.current.set(index);
+        self.begun.set(self.begun.get() + 1);
         self.started.set(Instant::now());
         self.length.set(downloads[index].size);
 
         if self.tty {
             let width = downloads.iter().map(|d| d.version.len()).max().unwrap_or(0);
-            let counter = counter(index, downloads.len())
+            let counter = self.counter(downloads.len());
+            let counter_width = counter.as_ref().map_or(0, |c| c.len() + 1);
+            let total = self.bar.length().unwrap_or(0);
+            self.bar_width.set(bar_width(
+                counter_width + width,
+                mib(total).to_string().len(),
+            ));
+            let counter = counter
                 .map(|counter| format!("{} ", dim(counter)))
                 .unwrap_or_default();
             self.bar.set_prefix(format!("{counter}{version:<width$}"));
@@ -155,16 +172,15 @@ impl InstallUi {
         let total = corrected_total(self.bar.length().unwrap_or(0), planned, content_length);
         self.bar.set_length(total);
         if self.tty {
-            self.bar.set_style(download_style());
+            self.bar.set_style(download_style(self.bar_width.get()));
         } else {
             let downloads = self.downloads.borrow();
-            let index = self.current.get();
             // Absent only for a download nobody began, which no caller does.
-            if let Some(download) = downloads.get(index) {
+            if let Some(download) = downloads.get(self.current.get()) {
                 eprintln!(
                     "{}",
                     downloading_line(
-                        counter(index, downloads.len()),
+                        self.counter(downloads.len()),
                         &download.version,
                         content_length,
                         total
@@ -190,7 +206,7 @@ impl InstallUi {
 
     fn phase(&self, name: &'static str) {
         if self.tty {
-            self.bar.set_style(phase_style());
+            self.bar.set_style(phase_style(self.bar_width.get()));
             self.bar.set_message(name);
         }
     }
@@ -215,20 +231,26 @@ impl InstallUi {
         }
     }
 
+    /// `2/3` once the second of three downloads began; `None` for a run of
+    /// one.
+    fn counter(&self, count: usize) -> Option<String> {
+        (count > 1).then(|| format!("{}/{count}", self.begun.get()))
+    }
+
     #[cfg(test)]
     pub(crate) fn position(&self) -> u64 {
         self.bar.position()
+    }
+
+    #[cfg(test)]
+    fn length(&self) -> u64 {
+        self.bar.length().unwrap_or(0)
     }
 
     /// Erase the live region: at the end of the run, or before its error.
     pub(crate) fn finish(&self) {
         self.bar.finish_and_clear();
     }
-}
-
-/// `1/2`, for a run of more than one download.
-fn counter(index: usize, count: usize) -> Option<String> {
-    (count > 1).then(|| format!("{}/{count}", index + 1))
 }
 
 /// The run's total once a download's real size is known: the planned size
@@ -435,30 +457,38 @@ fn hint_text(text: &str) -> String {
 /// A quote opens a span only at the start of a word and closes it only at
 /// the end of one, so the apostrophe in `J'Lo` opens nothing.
 fn quoted_spans(text: &str) -> Vec<(bool, &str)> {
-    let opens = |before: Option<&u8>| before.is_none_or(|b| matches!(b, b' ' | b'\n' | b'('));
-    let closes = |after: Option<&u8>| {
-        after.is_none_or(|b| {
-            matches!(
-                b,
-                b' ' | b'\n' | b'.' | b',' | b';' | b':' | b')' | b'?' | b'!'
-            )
-        })
+    // Chars, not bytes, around a quote: whitespace may be a tab or wider
+    // than one byte. The quote itself is ASCII, so its byte index is always a
+    // char boundary to slice at.
+    let opens = |i: usize| {
+        text[..i]
+            .chars()
+            .next_back()
+            .is_none_or(|c| c.is_whitespace() || c == '(')
     };
-    let bytes = text.as_bytes();
+    let closes = |i: usize| {
+        text[i + 1..]
+            .chars()
+            .next()
+            .is_none_or(|c| c.is_whitespace() || ".,;:)?!".contains(c))
+    };
+    let quotes: Vec<usize> = text.match_indices('\'').map(|(i, _)| i).collect();
     let mut spans = Vec::new();
     let mut prose = 0;
-    let mut i = 0;
-    while i < bytes.len() {
-        let close = (bytes[i] == b'\'' && opens(i.checked_sub(1).and_then(|p| bytes.get(p))))
-            .then(|| (i + 1..bytes.len()).find(|&j| bytes[j] == b'\'' && closes(bytes.get(j + 1))))
+    let mut k = 0;
+    while k < quotes.len() {
+        let open = quotes[k];
+        let close = opens(open)
+            .then(|| quotes[k + 1..].iter().position(|&q| closes(q)))
             .flatten();
-        if let Some(close) = close {
-            spans.push((false, &text[prose..=i]));
-            spans.push((true, &text[i + 1..close]));
+        if let Some(offset) = close {
+            let close = quotes[k + 1 + offset];
+            spans.push((false, &text[prose..=open]));
+            spans.push((true, &text[open + 1..close]));
             prose = close;
-            i = close + 1;
+            k += offset + 2;
         } else {
-            i += 1;
+            k += 1;
         }
     }
     spans.push((false, &text[prose..]));
@@ -1071,7 +1101,13 @@ fn supports_live_region() -> bool {
 
 const TICK: Duration = Duration::from_millis(100);
 
-const BAR_WIDTH: usize = 22;
+const MAX_BAR_WIDTH: usize = 22;
+const MIN_BAR_WIDTH: usize = 8;
+/// The live line has to fit 80 columns: a wrapped one makes the redraw
+/// repaint two rows and flicker.
+const LINE_WIDTH: usize = 80;
+/// The longest thing the last field shows: the phase word `extracting`.
+const TAIL_WIDTH: usize = "extracting".len();
 const MIB: u64 = 1024 * 1024;
 
 /// Whole MiB, rounded: the run's total is a few hundred of them, and
@@ -1088,22 +1124,39 @@ fn mib(bytes: u64) -> u64 {
 /// that disappears would cost the same colour its meaning elsewhere. Weight
 /// carries the bar instead - a heavy line done, a light one to go - which
 /// also survives `NO_COLOR`.
-fn download_style() -> ProgressStyle {
-    run_style("{spinner:.dim} {prefix}  {fill}  {pct}  {mib}  {eta:.dim}")
+fn download_style(bar_width: usize) -> ProgressStyle {
+    run_style(
+        "{spinner:.dim} {prefix}  {fill}  {pct}  {mib}  {eta:.dim}",
+        bar_width,
+    )
 }
 
 /// Download done, the bar stands still and the phase word replaces the ETA.
-fn phase_style() -> ProgressStyle {
-    run_style("{spinner:.dim} {prefix}  {fill}  {pct}  {mib}  {msg:.dim}")
+fn phase_style(bar_width: usize) -> ProgressStyle {
+    run_style(
+        "{spinner:.dim} {prefix}  {fill}  {pct}  {mib}  {msg:.dim}",
+        bar_width,
+    )
 }
 
-fn run_style(template: &str) -> ProgressStyle {
+/// What is left of the line for the bar, given the prefix (counter and
+/// version) and the digits of the total in MiB: spinner, the four gaps,
+/// `100%`, `pos/total MiB` and the tail take the rest.
+fn bar_width(prefix: usize, total_digits: usize) -> usize {
+    let mib = 2 * total_digits + "/ MiB".len();
+    let fixed = 2 + prefix + 2 + 2 + "100%".len() + 2 + mib + 2 + TAIL_WIDTH;
+    LINE_WIDTH
+        .saturating_sub(fixed)
+        .clamp(MIN_BAR_WIDTH, MAX_BAR_WIDTH)
+}
+
+fn run_style(template: &str, bar_width: usize) -> ProgressStyle {
     ProgressStyle::with_template(template)
         .expect("progress template is a valid literal")
         .with_key(
             "fill",
-            |state: &ProgressState, w: &mut dyn std::fmt::Write| {
-                let _ = w.write_str(&fill(state.pos(), state.len().unwrap_or(0)));
+            move |state: &ProgressState, w: &mut dyn std::fmt::Write| {
+                let _ = w.write_str(&fill(state.pos(), state.len().unwrap_or(0), bar_width));
             },
         )
         .with_key(
@@ -1115,8 +1168,14 @@ fn run_style(template: &str) -> ProgressStyle {
         .with_key(
             "mib",
             |state: &ProgressState, w: &mut dyn std::fmt::Write| {
-                let total = dim(format!("/{} MiB", mib(state.len().unwrap_or(0))));
-                let _ = write!(w, "{:>3}{total}", mib(state.pos()));
+                let total = mib(state.len().unwrap_or(0)).to_string();
+                let digits = total.len();
+                let _ = write!(
+                    w,
+                    "{:>digits$}{}",
+                    mib(state.pos()),
+                    dim(format!("/{total} MiB"))
+                );
             },
         )
 }
@@ -1128,10 +1187,10 @@ fn percent(pos: u64, len: u64) -> u64 {
 /// `━━━━╾───`: the done part and the rest styled apart. indicatif's own
 /// `{bar:N.bold/dim}` nests the rest's dim inside the bold, and the two share
 /// one SGR reset.
-fn fill(pos: u64, len: u64) -> String {
-    let done = usize::try_from(percent(pos, len)).unwrap_or(100) * BAR_WIDTH / 100;
-    if done >= BAR_WIDTH {
-        return style("\u{2501}".repeat(BAR_WIDTH))
+fn fill(pos: u64, len: u64, width: usize) -> String {
+    let done = usize::try_from(percent(pos, len)).unwrap_or(100) * width / 100;
+    if done >= width {
+        return style("\u{2501}".repeat(width))
             .bold()
             .for_stderr()
             .to_string();
@@ -1141,7 +1200,7 @@ fn fill(pos: u64, len: u64) -> String {
         style(format!("{}\u{257e}", "\u{2501}".repeat(done)))
             .bold()
             .for_stderr(),
-        dim("\u{2500}".repeat(BAR_WIDTH - done - 1))
+        dim("\u{2500}".repeat(width - done - 1))
     )
 }
 
@@ -1278,13 +1337,78 @@ mod tests {
     #[test]
     fn a_downloading_line_names_the_run_total_only_for_several() {
         assert_eq!(
-            downloading_line(counter(0, 2), "25.0.4+101.0.LTS", 130 * MIB, 315 * MIB),
+            downloading_line(Some("1/2".into()), "25.0.4+101.0.LTS", 130 * MIB, 315 * MIB),
             "Downloading 1/2 25.0.4+101.0.LTS (130 MiB of 315 MiB)"
         );
         assert_eq!(
-            downloading_line(counter(0, 1), "25.0.4+101.0.LTS", 130 * MIB, 130 * MIB),
+            downloading_line(None, "25.0.4+101.0.LTS", 130 * MIB, 130 * MIB),
             "Downloading 25.0.4+101.0.LTS (130 MiB)"
         );
+    }
+
+    fn planned(sizes: &[(&str, u64)]) -> InstallUi {
+        let downloads = sizes
+            .iter()
+            .map(|&(version, size)| Download {
+                request: request("21"),
+                version: version.to_string(),
+                size,
+            })
+            .collect();
+        InstallUi::with_tty(downloads, Columns::default(), false)
+    }
+
+    /// The bar counts the run, not the download: the second download starts
+    /// where the first ended, a response bigger than the API said moves the
+    /// total, and a planned download that turns out unneeded leaves it.
+    #[test]
+    fn the_bar_counts_the_bytes_of_the_whole_run() {
+        let ui = planned(&[("21.0.9+10", 100), ("21.0.10+7", 200), ("21.0.11+9", 50)]);
+        assert_eq!(ui.length(), 350);
+
+        ui.begin(request("21"), "21.0.9+10", 100);
+        ui.start_download(120);
+        assert_eq!(ui.length(), 370, "the response's size wins");
+        ui.set_downloaded(60);
+        assert_eq!(ui.position(), 60);
+        ui.landed();
+
+        ui.skip("21.0.10+7");
+        assert_eq!(ui.length(), 170, "a skipped download leaves the total");
+
+        ui.begin(request("21"), "21.0.11+9", 50);
+        assert_eq!(ui.counter(2).as_deref(), Some("2/2"));
+        ui.start_download(50);
+        ui.set_downloaded(10);
+        assert_eq!(ui.position(), 130, "offset by the finished download");
+    }
+
+    /// A download the up-front plan did not have joins the total and the
+    /// count after the ones already begun, so the counter never runs back.
+    #[test]
+    fn an_unplanned_download_counts_on_from_where_the_run_is() {
+        let ui = planned(&[("21.0.9+10", 100), ("17.0.20+101", 100)]);
+        ui.begin(request("21"), "21.0.9+10", 100);
+        assert_eq!(ui.counter(2).as_deref(), Some("1/2"));
+        ui.landed();
+        ui.begin(request("25"), "25.0.4+101.0.LTS", 130);
+        assert_eq!(ui.length(), 330);
+        assert_eq!(ui.counter(3).as_deref(), Some("2/3"));
+    }
+
+    /// The live line fits 80 columns: the bar gives way to a long counter,
+    /// version and total, and never vanishes.
+    #[test]
+    fn the_bar_gives_way_to_fit_80_columns() {
+        // `2/2 21.0.12+101.0.LTS`, 315 MiB: the common case keeps the full bar.
+        assert_eq!(bar_width(21, 3), MAX_BAR_WIDTH);
+        // `10/12 21.0.12+101.0.LTS`, 2200 MiB.
+        let width = bar_width(23, 4);
+        assert_eq!(
+            2 + 23 + 2 + width + 2 + 4 + 2 + 13 + 2 + TAIL_WIDTH,
+            LINE_WIDTH
+        );
+        assert_eq!(bar_width(70, 5), MIN_BAR_WIDTH);
     }
 
     /// Heavy for done, light for the rest, always the same width - and an
@@ -1301,10 +1425,10 @@ mod tests {
             (100, 100),
             (120, 100),
         ] {
-            assert_eq!(fill(pos, len).chars().count(), BAR_WIDTH, "{pos}/{len}");
+            assert_eq!(fill(pos, len, 22).chars().count(), 22, "{pos}/{len}");
         }
-        assert_eq!(fill(100, 100), "\u{2501}".repeat(BAR_WIDTH));
-        assert!(fill(50, 100).starts_with(&"\u{2501}".repeat(BAR_WIDTH / 2)));
+        assert_eq!(fill(100, 100, 22), "\u{2501}".repeat(22));
+        assert!(fill(50, 100, 22).starts_with(&"\u{2501}".repeat(11)));
         assert_eq!(percent(1, 0), 0);
     }
 
@@ -1820,6 +1944,17 @@ mod tests {
         assert_eq!(
             quoted_spans("no quotes here"),
             vec![(false, "no quotes here")]
+        );
+        // Any whitespace ends a span, a tab or a non-breaking space too.
+        assert_eq!(
+            quoted_spans("Run 'jlo env 21'\tthen\u{a0}'jlo update'."),
+            vec![
+                (false, "Run '"),
+                (true, "jlo env 21"),
+                (false, "'\tthen\u{a0}'"),
+                (true, "jlo update"),
+                (false, "'."),
+            ]
         );
     }
 
