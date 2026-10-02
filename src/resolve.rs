@@ -195,7 +195,7 @@ fn resolve_java_home(
         let metadata = client
             .fetch_metadata(request)?
             .ok_or_else(|| anyhow!("{}", ui::not_offered(&[request])))?;
-        store::install_one(client, store, request, &metadata)
+        store::install_one(client, store, request, metadata)
     }
 }
 

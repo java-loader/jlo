@@ -1,3 +1,4 @@
+use crate::cancel::Cancel;
 use crate::request::{Request, Stream};
 use crate::ui::InstallUi;
 use crate::version::cmp_desc;
@@ -34,7 +35,12 @@ pub(crate) fn agent() -> Agent {
 }
 
 /// Returns the SHA256 of what was written, as lowercase hex.
-fn stream_hashed(body: &mut Body, file: &mut File, ui: &InstallUi) -> anyhow::Result<String> {
+fn stream_hashed(
+    body: &mut Body,
+    file: &mut File,
+    ui: &InstallUi,
+    cancel: Cancel,
+) -> anyhow::Result<String> {
     let total_size = body
         .content_length()
         .context("could not determine the download size: no Content-Length header")?;
@@ -43,7 +49,7 @@ fn stream_hashed(body: &mut Body, file: &mut File, ui: &InstallUi) -> anyhow::Re
     let mut hasher = Sha256::new();
     let mut downloaded: u64 = 0;
     let mut buffer = [0; 8192];
-    let mut reader = body.as_reader();
+    let mut reader = cancel.reader(body.as_reader());
     loop {
         let n = reader
             .read(&mut buffer)
@@ -371,6 +377,7 @@ impl AdoptiumClient {
         metadata: &JdkMetadata,
         file: &mut File,
         ui: &InstallUi,
+        cancel: Cancel,
     ) -> anyhow::Result<()> {
         let mut response = self.agent.get(&metadata.download_link).call()?;
 
@@ -383,7 +390,7 @@ impl AdoptiumClient {
             );
         }
 
-        let hash = stream_hashed(response.body_mut(), file, ui)?;
+        let hash = stream_hashed(response.body_mut(), file, ui, cancel)?;
         if hash != metadata.checksum {
             bail!(
                 "checksum mismatch: expected {}, got {}",
@@ -868,7 +875,12 @@ mod tests {
 
         let mut file = tempfile::tempfile().unwrap();
         client
-            .download(&metadata, &mut file, &InstallUi::hidden())
+            .download(
+                &metadata,
+                &mut file,
+                &InstallUi::hidden(),
+                Cancel::process(),
+            )
             .unwrap();
 
         file.rewind().unwrap();
@@ -890,7 +902,12 @@ mod tests {
 
         let mut file = tempfile::tempfile().unwrap();
         let err = client
-            .download(&metadata, &mut file, &InstallUi::hidden())
+            .download(
+                &metadata,
+                &mut file,
+                &InstallUi::hidden(),
+                Cancel::process(),
+            )
             .unwrap_err();
 
         assert!(
@@ -915,7 +932,12 @@ mod tests {
 
         let mut file = tempfile::tempfile().unwrap();
         let err = client
-            .download(&metadata, &mut file, &InstallUi::hidden())
+            .download(
+                &metadata,
+                &mut file,
+                &InstallUi::hidden(),
+                Cancel::process(),
+            )
             .unwrap_err();
 
         assert!(
@@ -957,7 +979,12 @@ mod tests {
 
         let mut file = tempfile::tempfile().unwrap();
         let err = client
-            .download(&metadata, &mut file, &InstallUi::hidden())
+            .download(
+                &metadata,
+                &mut file,
+                &InstallUi::hidden(),
+                Cancel::process(),
+            )
             .unwrap_err();
 
         let msg = format!("{err:#}");

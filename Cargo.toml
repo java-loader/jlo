@@ -58,6 +58,11 @@ serde = { version = "1", features = ["derive"] }
 semver = "1"
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
+# Already in the lockfile through ureq, tempfile and others, so no new package:
+# `sigaction` lets SIGINT/SIGTERM stop an install at its next read and delete
+# its staging directories, where ctrlc or signal-hook would add crates for one
+# handler that stores to an atomic.
+libc = "0.2"
 
 [profile.release]
 lto = true

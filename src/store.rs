@@ -1,5 +1,6 @@
 use crate::CommandError;
 use crate::adoptium::{AdoptiumClient, JdkMetadata};
+use crate::cancel::{Cancel, Cancelled};
 use crate::extract;
 use crate::request::{OLDEST_MAJOR, Request, Stream};
 use crate::shellenv::Payload;
@@ -560,6 +561,10 @@ pub(crate) enum NameResult {
         replaced: Vec<String>,
         failures: Vec<String>,
     },
+    /// The name's download, checksum, unpacking or move failed, and nothing
+    /// of the attempt is left in the store. The error chain, formatted once,
+    /// so results stay comparable.
+    Failed(String),
 }
 
 /// What [`install_each`] did, handed back whole rather than as a `Result`: a
@@ -567,9 +572,9 @@ pub(crate) enum NameResult {
 /// build the shell was on.
 #[derive(Debug, Default)]
 pub(crate) struct InstallRun {
-    /// Not offered, then already current, then newly installed - each kind in
-    /// processing order. A name the run stopped before, or a new build whose
-    /// payload could not be written, has no entry.
+    /// Not offered, then already current or failed in processing order, then
+    /// newly installed. A name a signal stopped, or a new build whose payload
+    /// could not be written, has no entry.
     pub(crate) names: Vec<(Request, NameResult)>,
     /// The new build's java home, when the live build was deleted and the
     /// shell told to follow.
@@ -577,6 +582,8 @@ pub(crate) struct InstallRun {
     /// The superseded build kept because `$JAVA_HOME` points at it and the
     /// shell could not be told to follow.
     pub(crate) kept_active: Option<String>,
+    /// What stopped the run as a whole: a failed lookup, a payload that could
+    /// not be written, a signal. A name that failed is in `names` instead.
     pub(crate) error: Option<CommandError>,
     /// The widths every line of the run's report shares.
     pub(crate) columns: ui::Columns,
@@ -599,10 +606,21 @@ impl InstallRun {
             .map(|(_, failures)| failures.len())
             .sum()
     }
+
+    /// The names that could not be installed.
+    pub(crate) fn failed_count(&self) -> usize {
+        self.names
+            .iter()
+            .filter(|(_, result)| matches!(result, NameResult::Failed(_)))
+            .count()
+    }
 }
 
 /// `install` and `update`: per name, download the latest build if it
 /// supersedes every install of the name, then delete the builds it supersedes.
+///
+/// The next name downloads while the previous one unpacks. A name that fails
+/// is reported and recorded, and the others carry on.
 ///
 /// `payload` is the calling shell's stdout when it evaluates it, and only then
 /// may the build `active` (`$JAVA_HOME`) points at be deleted; without one it
@@ -610,12 +628,26 @@ impl InstallRun {
 /// deletion: a run killed before it has deleted nothing, one killed after has
 /// already told the shell where to go. When it cannot be written, nothing is
 /// deleted.
+///
+/// SIGINT or SIGTERM stops both stages at their next read and deletes their
+/// staging directories; see [`commit`] for what a signal leaves behind.
 pub(crate) fn install_each<W: std::io::Write>(
+    client: &AdoptiumClient,
+    store: &JdkStore,
+    requests: Vec<Request>,
+    active: Option<&Path>,
+    payload: Option<Payload<W>>,
+) -> InstallRun {
+    install_each_with(client, store, requests, active, payload, Cancel::process())
+}
+
+fn install_each_with<W: std::io::Write>(
     client: &AdoptiumClient,
     store: &JdkStore,
     mut requests: Vec<Request>,
     active: Option<&Path>,
     payload: Option<Payload<W>>,
+    cancel: Cancel,
 ) -> InstallRun {
     requests.sort_unstable_by_key(|request| request.listing_order());
     requests.dedup();
@@ -640,31 +672,60 @@ pub(crate) fn install_each<W: std::io::Write>(
         }
     };
 
+    // Not before: the lookups above leave nothing to clean up, so a signal
+    // may simply kill them.
+    let armed = match cancel.arm() {
+        Ok(armed) => armed,
+        Err(e) => {
+            run.error = Some(e.into());
+            return run;
+        }
+    };
+
+    // Once, before either stage starts, and not per download: a package can
+    // wait staged behind a long extraction, and a sweep at the next download
+    // would take it for abandoned once it is an hour old.
+    sweep_staging(store);
+
     let mut installed = Vec::new();
-    for (request, metadata) in offered {
-        match install_latest(client, store, request, &metadata, &ui) {
-            Ok(Latest::Installed(java_home)) => {
-                installed.push((request, metadata.semver, java_home));
-            }
-            Ok(Latest::Current(newest)) => {
+    pipeline(
+        offered,
+        cancel,
+        |(request, metadata)| fetch(client, store, &ui, cancel, request, metadata),
+        |handover| match handover {
+            Handover::Current { request, newest } => {
                 run.names.push((request, NameResult::UpToDate(newest)));
             }
-            Err(e) => {
-                // Stop, but the names before it still get replaced.
-                run.error = Some(e.into());
-                break;
+            Handover::Failed { request, error } => {
+                run.names.push((request, NameResult::Failed(error)));
             }
-        }
-    }
+            Handover::Staged(staged) => {
+                let request = staged.request;
+                let version = staged.metadata.semver.clone();
+                let job = staged.job.clone();
+                match unpack(store, &ui, cancel, staged) {
+                    Ok(java_home) => {
+                        ui.landed(&job);
+                        installed.push((request, version, java_home));
+                    }
+                    // Neither a failure nor a result: the pipeline stops
+                    // before the next package.
+                    Err(e) if e.is::<Cancelled>() => {}
+                    Err(e) => {
+                        let error = install_failure(e);
+                        ui.failed(request, &error);
+                        run.names.push((request, NameResult::Failed(error)));
+                    }
+                }
+                ui.unpacked();
+            }
+        },
+    );
     ui.finish();
 
-    if let Err(e) = store
-        .plan_replacement(installed, active)
-        .apply(payload, &mut run)
-    {
-        run.error.get_or_insert(e.into());
-        return run;
-    }
+    let plan = store.plan_replacement(installed, active);
+    commit(plan, payload, cancel, &mut run);
+    drop(armed);
 
     // A failed lookup is swallowed: a note is not worth failing a successful
     // command over.
@@ -673,6 +734,169 @@ pub(crate) fn install_each<W: std::io::Write>(
     }
 
     run
+}
+
+/// One name, handed from the download stage to the unpacking stage. One per
+/// offered name, in the order offered, unless a signal stopped the run.
+enum Handover {
+    Current {
+        request: Request,
+        newest: String,
+    },
+    Staged(Staged),
+    /// Already reported, when it happened.
+    Failed {
+        request: Request,
+        error: String,
+    },
+}
+
+/// A package downloaded and verified, waiting to be unpacked. Dropped, it
+/// deletes its staging directory - wherever that happens: a stage that fails,
+/// or a handover refused because the unpacking stage stopped.
+struct Staged {
+    request: Request,
+    metadata: JdkMetadata,
+    dir: tempfile::TempDir,
+    archive: PathBuf,
+    job: ui::Job,
+}
+
+/// Runs `download` over `items` on a thread of its own and `process` over
+/// what it returns on this one, in order. The handover is a rendezvous, so at
+/// most one item is downloading or waiting while one is processed.
+///
+/// After a signal neither stage takes another item. The unpacking side drops
+/// its receiver *before* the scope joins: a downloader blocked handing over a
+/// finished package then gets it back and drops it, where joining first would
+/// wait for it forever.
+fn pipeline<I: Send, M: Send>(
+    items: Vec<I>,
+    cancel: Cancel,
+    download: impl FnMut(I) -> M + Send,
+    mut process: impl FnMut(M),
+) {
+    let (handover, arrivals) = std::sync::mpsc::sync_channel::<M>(0);
+    std::thread::scope(|scope| {
+        scope.spawn(move || {
+            let mut download = download;
+            for item in items {
+                if cancel.signal().is_some() {
+                    break;
+                }
+                // Handed over even after a signal: the receiver either takes
+                // it and drops it unprocessed, or is gone and the send fails.
+                // Either way it is dropped, and no check between download
+                // and send can race the unpacking side's shutdown.
+                if handover.send(download(item)).is_err() {
+                    break;
+                }
+            }
+        });
+        while cancel.signal().is_none() {
+            let Ok(message) = arrivals.recv() else {
+                break;
+            };
+            if cancel.signal().is_some() {
+                break;
+            }
+            process(message);
+        }
+        drop(arrivals);
+    });
+}
+
+/// The download stage, one name: whether it needs a download - asked right
+/// before it, since another shell may have installed the name meanwhile -
+/// then the download. A failure is said the moment it is known, and handed on
+/// as the name's result.
+fn fetch(
+    client: &AdoptiumClient,
+    store: &JdkStore,
+    ui: &InstallUi,
+    cancel: Cancel,
+    request: Request,
+    metadata: JdkMetadata,
+) -> Handover {
+    match fetch_latest(client, store, ui, cancel, request, metadata) {
+        Ok(handover) => handover,
+        Err(e) => {
+            let e = cancel.explain(e);
+            let error = install_failure(e);
+            if cancel.signal().is_none() {
+                ui.failed(request, &error);
+            }
+            Handover::Failed { request, error }
+        }
+    }
+}
+
+/// Downloads only an offer that supersedes every install of the name. Asking
+/// "is this exact build on disk?" instead would follow a catalogue behind the
+/// store, and the name would end up holding two builds.
+fn fetch_latest(
+    client: &AdoptiumClient,
+    store: &JdkStore,
+    ui: &InstallUi,
+    cancel: Cancel,
+    request: Request,
+    metadata: JdkMetadata,
+) -> anyhow::Result<Handover> {
+    let installed = store.list().inspect_err(|_| ui.skip(&metadata.semver))?;
+    // Only this name: an installed EA of a later patch would otherwise keep
+    // a GA offer from counting as newer.
+    let builds: Vec<&InstalledJdk> = installed
+        .iter()
+        .filter(|jdk| jdk.request == request)
+        .collect();
+
+    match builds.first() {
+        // `list` is newest first.
+        Some(newest) if !supersedes_every_install(&metadata.semver, &builds) => {
+            ui.skip(&metadata.semver);
+            Ok(Handover::Current {
+                request,
+                newest: newest.version.clone(),
+            })
+        }
+        _ => stage(client, store, ui, cancel, request, metadata).map(Handover::Staged),
+    }
+}
+
+/// `could not install JDK: <the chain>`, the one wording of a name's failure.
+fn install_failure(e: anyhow::Error) -> String {
+    format!("{:#}", e.context("could not install JDK"))
+}
+
+/// The replacement, `plan` already made: the run's commit point is the check
+/// right before `apply`, after the listing the plan took, so a signal at any
+/// time up to it skips the replacement - no payload, no deletion. The builds
+/// that landed stay as their names' new heads, and the builds they would
+/// have replaced are what `jlo list` then shows as superseded. Once `apply`
+/// has begun it runs to the end without asking: it is short, and it already
+/// writes the payload before it deletes. A signal that arrived meanwhile is
+/// honoured after it.
+fn commit<W: std::io::Write>(
+    plan: Replacement,
+    payload: Option<Payload<W>>,
+    cancel: Cancel,
+    run: &mut InstallRun,
+) {
+    // Nothing landed and a name failed: nothing to replace, and no payload,
+    // as for a run that stopped before its first download.
+    if plan.names.is_empty() && run.failed_count() > 0 && cancel.signal().is_none() {
+        return;
+    }
+    if let Err(cancelled) = cancel.check() {
+        run.error = Some(anyhow::Error::from(cancelled).into());
+        return;
+    }
+    let applied = plan.apply(payload, run);
+    if let Err(cancelled) = cancel.check() {
+        run.error = Some(anyhow::Error::from(cancelled).into());
+    } else if let Err(e) = applied {
+        run.error = Some(e.into());
+    }
 }
 
 /// What one name's new build supersedes.
@@ -789,7 +1013,7 @@ fn resolve_offered(
 }
 
 /// Which names the run will download, decided up front only to size the
-/// progress bar and the report's columns: [`install_latest`] asks again right
+/// progress bar and the report's columns: [`fetch_latest`] asks again right
 /// before each download, since another shell may have installed the name
 /// meanwhile.
 fn plan_downloads(
@@ -806,7 +1030,6 @@ fn plan_downloads(
             .collect();
         if builds.is_empty() || supersedes_every_install(&metadata.semver, &builds) {
             downloads.push(Download {
-                request: *request,
                 version: metadata.semver.clone(),
                 size: metadata.size,
             });
@@ -825,103 +1048,120 @@ fn plan_downloads(
     Ok((downloads, columns))
 }
 
-enum Latest {
-    /// With the newest build installed.
-    Current(String),
-    /// With the new build's java home.
-    Installed(PathBuf),
-}
-
-/// Downloads only an offer that supersedes every install of the name. Asking
-/// "is this exact build on disk?" instead would follow a catalogue behind the
-/// store, and the name would end up holding two builds.
-fn install_latest(
-    client: &AdoptiumClient,
-    store: &JdkStore,
-    request: Request,
-    jdk_metadata: &JdkMetadata,
-    ui: &InstallUi,
-) -> anyhow::Result<Latest> {
-    let installed = store.list()?;
-    // Only this name: an installed EA of a later patch would otherwise keep
-    // a GA offer from counting as newer.
-    let builds: Vec<&InstalledJdk> = installed
-        .iter()
-        .filter(|jdk| jdk.request == request)
-        .collect();
-
-    match builds.first() {
-        // `list` is newest first.
-        Some(newest) if !supersedes_every_install(&jdk_metadata.semver, &builds) => {
-            ui.skip(&jdk_metadata.semver);
-            Ok(Latest::Current(newest.version.clone()))
-        }
-        _ => {
-            let java_home = install_jdk(client, store, request, jdk_metadata, ui)
-                .context("could not install JDK")?;
-            Ok(Latest::Installed(java_home))
-        }
-    }
-}
-
-/// The on-demand install `env`, `home` and `exec` perform: a run of one.
+/// The on-demand install `env`, `home` and `exec` perform: a run of one, its
+/// download and unpacking one after the other.
 pub(crate) fn install_one(
     client: &AdoptiumClient,
     store: &JdkStore,
     request: Request,
-    jdk_metadata: &JdkMetadata,
+    metadata: JdkMetadata,
 ) -> anyhow::Result<PathBuf> {
-    let download = Download {
-        request,
-        version: jdk_metadata.semver.clone(),
-        size: jdk_metadata.size,
-    };
-    let columns = ui::Columns::fit([request], [jdk_metadata.semver.as_str()]);
-    let ui = InstallUi::run(vec![download], columns);
-    let result = install_jdk(client, store, request, jdk_metadata, &ui);
-    ui.finish();
-    result
+    install_one_with(client, store, request, metadata, Cancel::process(), || {})
 }
 
-/// One download, extraction and move, all on the run's progress region.
-fn install_jdk(
+/// `landed` runs once the build is in the store: where a test sends the
+/// signal that comes after the archive's last read.
+fn install_one_with(
     client: &AdoptiumClient,
     store: &JdkStore,
     request: Request,
-    jdk_metadata: &JdkMetadata,
-    ui: &InstallUi,
+    metadata: JdkMetadata,
+    cancel: Cancel,
+    landed: impl FnOnce(),
 ) -> anyhow::Result<PathBuf> {
-    ui.begin(request, &jdk_metadata.semver, jdk_metadata.size);
-    let result = install_jdk_inner(client, store, jdk_metadata, ui);
-    match &result {
-        Ok(_) => ui.landed(),
-        // Erased before the caller's error, which would otherwise print
-        // over a half-drawn bar.
-        Err(_) => ui.finish(),
-    }
-    result
+    let _armed = cancel.arm()?;
+    let download = Download {
+        version: metadata.semver.clone(),
+        size: metadata.size,
+    };
+    let columns = ui::Columns::fit([request], [metadata.semver.as_str()]);
+    let ui = InstallUi::run(vec![download], columns);
+    sweep_staging(store);
+
+    let result = stage(client, store, &ui, cancel, request, metadata).and_then(|staged| {
+        let job = staged.job.clone();
+        let java_home = unpack(store, &ui, cancel, staged)?;
+        ui.landed(&job);
+        Ok(java_home)
+    });
+    // Erased before the caller's error, which would otherwise print over a
+    // half-drawn bar.
+    ui.finish();
+    let java_home = result?;
+
+    landed();
+    // A signal during the move or the staging cleanup came after the last
+    // read, so nothing above noticed it. The build stays, but `jlo exec` must
+    // not go on to launch the command.
+    cancel.check()?;
+    Ok(java_home)
 }
 
-fn install_jdk_inner(
+/// Download and verify one package into a staging directory of its own.
+fn stage(
     client: &AdoptiumClient,
     store: &JdkStore,
-    jdk_metadata: &JdkMetadata,
     ui: &InstallUi,
+    cancel: Cancel,
+    request: Request,
+    metadata: JdkMetadata,
+) -> anyhow::Result<Staged> {
+    let job = ui.begin(request, &metadata.semver, metadata.size);
+    match download_into(client, store, ui, cancel, &metadata) {
+        Ok((dir, archive)) => {
+            ui.downloaded();
+            Ok(Staged {
+                request,
+                metadata,
+                dir,
+                archive,
+                job,
+            })
+        }
+        Err(e) => {
+            ui.download_failed();
+            Err(cancel.explain(e))
+        }
+    }
+}
+
+fn download_into(
+    client: &AdoptiumClient,
+    store: &JdkStore,
+    ui: &InstallUi,
+    cancel: Cancel,
+    metadata: &JdkMetadata,
+) -> anyhow::Result<(tempfile::TempDir, PathBuf)> {
+    let dir = staging_dir(store)?;
+    let archive = dir.path().join(&metadata.package_name);
+    let file = &mut File::create(&archive).context("could not create temporary file")?;
+    client.download(metadata, file, ui, cancel)?;
+    Ok((dir, archive))
+}
+
+/// The unpacking stage, one package: extract it and move it into the store.
+/// Returns the new build's java home.
+fn unpack(
+    store: &JdkStore,
+    ui: &InstallUi,
+    cancel: Cancel,
+    staged: Staged,
 ) -> anyhow::Result<PathBuf> {
-    let temp_dir = staging_dir(store)?;
-    let temp_file = temp_dir.path().join(&jdk_metadata.package_name);
-    let file = &mut File::create(&temp_file).context("could not create temporary file")?;
-    client.download(jdk_metadata, file, ui)?;
+    let Staged {
+        metadata,
+        dir,
+        archive,
+        ..
+    } = staged;
+    let java_home = extract::extract(&archive, dir.path(), ui, cancel)
+        .and_then(|()| store.install(&metadata, dir.path(), ui))
+        .map_err(|e| cancel.explain(e))?;
 
-    extract::extract(&temp_file, temp_dir.path(), ui)?;
-
-    let dest_dir = store.install(jdk_metadata, temp_dir.path(), ui)?;
-
-    temp_dir.close().unwrap_or_else(|err| {
+    dir.close().unwrap_or_else(|err| {
         ui::warning!("could not delete temporary directory: {err}");
     });
 
-    Ok(dest_dir)
+    Ok(java_home)
 }
 
 /// Where an install is downloaded and unpacked: inside the store, not in
@@ -929,16 +1169,21 @@ fn install_jdk_inner(
 /// within one filesystem, and a tmpfs `/tmp` (Fedora, Arch, Debian 13) would
 /// fail it with `EXDEV` after the whole download. Its name is no entry name,
 /// so `list` passes over it.
+///
+/// Sweeps nothing: see [`sweep_staging`].
 fn staging_dir(store: &JdkStore) -> anyhow::Result<tempfile::TempDir> {
     std::fs::create_dir_all(store.base())
         .with_context(|| format!("could not create {}", store.base().display()))?;
 
-    // An install killed with Ctrl-C runs no destructor, and nothing else
-    // would ever clear its half a gigabyte from the store.
-    sweep_stale_staging(store.base(), STAGING_PREFIX, None);
-
     tempfile::tempdir_in(store.base())
         .context("could not create a staging directory in the JDK install directory")
+}
+
+/// Clear what an install left behind when it could not clean up after itself,
+/// killed outright or by a second signal: nothing else would ever clear it
+/// from the store. Once per run, before its first download.
+fn sweep_staging(store: &JdkStore) {
+    sweep_stale_staging(store.base(), STAGING_PREFIX, None);
 }
 
 /// The prefix `tempfile` gives staging directories, for downloads and
@@ -1142,6 +1387,9 @@ mod tests {
     use crate::request::request;
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
+    use std::sync::atomic::{AtomicI32, Ordering as AtomicOrdering};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
     use tempfile::tempdir;
 
     /// The store entry holding `version`.
@@ -1672,17 +1920,21 @@ mod tests {
         assert_eq!(staging.path().parent(), Some(base.as_path()));
     }
 
-    /// An install killed with Ctrl-C runs no destructor, so its staging
+    /// An install killed outright runs no destructor, so its staging
     /// directory survives - holding the tarball and the unpacked JDK in the
     /// user's JDK directory rather than in `$TMPDIR`, where the system would
-    /// have cleared it. Nothing else ever will, so the next install does.
+    /// have cleared it. Nothing else ever will, so the next run sweeps it -
+    /// once, up front. A staging directory created *during* a run sweeps
+    /// nothing: a package can wait staged behind a long extraction until it
+    /// is over an hour old, and the next download must not take it for
+    /// abandoned.
     #[test]
-    fn a_stale_staging_directory_is_swept_by_the_next_install() {
+    fn a_stale_staging_directory_is_swept_by_the_next_run_only() {
         let dir = tempdir().unwrap();
         let store = JdkStore::at(dir.path());
         let stale = dir.path().join(".tmpLEFTOVER");
         fs::create_dir_all(stale.join("jdk-21.0.5+11")).unwrap();
-        // Two hours old, i.e. no install could still be using it.
+        // Two hours old, i.e. no download could still be writing it.
         let long_ago = std::time::SystemTime::now() - std::time::Duration::from_hours(2);
         fs::File::options()
             .read(true)
@@ -1692,7 +1944,9 @@ mod tests {
             .unwrap();
 
         let fresh = staging_dir(&store).unwrap();
+        assert!(stale.exists(), "a new staging directory swept an old one");
 
+        sweep_staging(&store);
         assert!(!stale.exists(), "the abandoned staging directory is gone");
         assert!(fresh.path().exists(), "the new one is not");
     }
@@ -2821,11 +3075,11 @@ mod tests {
         }
     }
 
-    /// A failed download stops the run, but the names before it stay
-    /// updated and replaced - and it is that failure the run reports, not a
-    /// payload failure after it.
+    /// A failed name does not stop the run: the others still install and
+    /// replace, the failure is recorded under its name rather than as the
+    /// run's error, and the shell is still told where to go.
     #[test]
-    fn a_failed_download_keeps_what_the_names_before_it_did() {
+    fn a_failed_name_leaves_the_others_to_install_and_replace() {
         let dir = tempdir().unwrap();
         create_jdk_dir(dir.path(), "17.0.5+8");
         create_jdk_dir(dir.path(), "21.0.5+11");
@@ -2843,42 +3097,328 @@ mod tests {
         );
 
         adoptium.assert();
-        let error = run.error.expect("the download failed");
+        assert!(run.error.is_none(), "{:?}", run.error);
+        let [(failed, NameResult::Failed(error)), (replaced, result)] = &run.names[..] else {
+            panic!("{:?}", run.names);
+        };
+        assert_eq!(*failed, request("17"));
         assert!(
-            format!("{:#}", error.error).contains("checksum"),
-            "{error:?}"
+            error.starts_with("could not install JDK: checksum mismatch"),
+            "{error}"
         );
-        assert!(!entry(dir.path(), "21.0.5+11").exists());
+        assert_eq!(
+            (*replaced, result),
+            (request("21"), &installed(&["21.0.5+11"]))
+        );
         assert!(entry(dir.path(), "21.0.9+10").exists());
         assert!(entry(dir.path(), "17.0.5+8").exists());
         assert!(!entry(dir.path(), "17.0.9+1").exists());
+        assert_eq!(staging_left(dir.path()), Vec::<String>::new());
         assert_eq!(String::from_utf8(out).unwrap(), "# jlo'end\n");
     }
 
-    /// The download failure is the error the user sees, even when the
-    /// payload after it cannot be written either.
+    /// With every name failed there is nothing to replace and nothing for the
+    /// shell to do: no payload at all, as for a run that never downloaded.
     #[test]
-    fn an_earlier_error_survives_a_failed_payload() {
+    fn a_run_whose_every_name_failed_writes_no_payload() {
         let dir = tempdir().unwrap();
         create_jdk_dir(dir.path(), "21.0.5+11");
-        let adoptium = Adoptium::new()
-            .offer("21", "21.0.9+10", 1, true)
-            .offer("17", "17.0.9+1", 1, false);
+        let live = entry(dir.path(), "21.0.5+11");
+        let adoptium = Adoptium::new().offer("21", "21.0.9+10", 1, false);
+        let mut out = Vec::new();
 
         let run = run_wrapped(
             &adoptium,
             &JdkStore::at(dir.path()),
-            &["17", "21"],
-            None,
-            &mut Gone { writes: false },
+            &["21"],
+            Some(&live),
+            &mut out,
         );
 
-        let error = run.error.expect("the download failed");
-        assert!(
-            format!("{:#}", error.error).contains("checksum"),
-            "{error:?}"
+        assert!(run.error.is_none(), "{:?}", run.error);
+        assert_eq!(run.failed_count(), 1);
+        assert!(out.is_empty(), "{out:?}");
+        assert!(live.exists());
+    }
+
+    /// The staging directories left in `base`, by name.
+    fn staging_left(base: &Path) -> Vec<String> {
+        fs::read_dir(base)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with(STAGING_PREFIX))
+            .collect()
+    }
+
+    // -- the two stages and signals --
+
+    /// The point of two stages: the second name's download starts while the
+    /// first name's package is still being processed. Done serially, the
+    /// process step would wait out its timeout for a download that only
+    /// starts after it.
+    #[test]
+    fn the_next_download_runs_while_the_previous_package_unpacks() {
+        let token = AtomicI32::new(0);
+        let (started, second_started) = std::sync::mpsc::channel();
+        let mut overlapped = None;
+
+        pipeline(
+            vec![0, 1],
+            Cancel::token(&token),
+            |item| {
+                if item == 1 {
+                    started.send(()).unwrap();
+                }
+                item
+            },
+            |item| {
+                if item == 0 {
+                    overlapped = Some(second_started.recv_timeout(Duration::from_secs(5)).is_ok());
+                }
+            },
         );
-        assert!(entry(dir.path(), "21.0.5+11").exists());
+
+        assert_eq!(
+            overlapped,
+            Some(true),
+            "the download waited for the unpacking"
+        );
+    }
+
+    /// A package that drops records its id, standing in for a staging
+    /// directory that deletes itself.
+    struct Package {
+        id: usize,
+        dropped: Arc<Mutex<Vec<usize>>>,
+    }
+
+    impl Drop for Package {
+        fn drop(&mut self) {
+            self.dropped.lock().unwrap().push(self.id);
+        }
+    }
+
+    /// A signal while the downloader holds a finished package the busy
+    /// unpacking stage has not taken: the run still returns - the receiver
+    /// goes before the join, so the blocked handover fails - and the package
+    /// is dropped, its staging directory with it, never processed.
+    #[test]
+    fn a_signal_drops_the_package_waiting_at_the_handover() {
+        let token: &'static AtomicI32 = Box::leak(Box::new(AtomicI32::new(0)));
+        let dropped = Arc::new(Mutex::new(Vec::new()));
+        let processed = Arc::new(Mutex::new(Vec::new()));
+        let (returned, run_returned) = std::sync::mpsc::channel();
+
+        // A thread of its own, so a run that never returns fails the test
+        // instead of hanging it.
+        let (dropped_by_run, processed_by_run) = (dropped.clone(), processed.clone());
+        std::thread::spawn(move || {
+            let (finished, second_finished) = std::sync::mpsc::channel();
+            pipeline(
+                vec![0, 1],
+                Cancel::token(token),
+                |id| {
+                    let package = Package {
+                        id,
+                        dropped: dropped_by_run.clone(),
+                    };
+                    if id == 1 {
+                        finished.send(()).unwrap();
+                    }
+                    package
+                },
+                |package: Package| {
+                    processed_by_run.lock().unwrap().push(package.id);
+                    if package.id == 0 {
+                        second_finished
+                            .recv_timeout(Duration::from_secs(5))
+                            .unwrap();
+                        // No wait for the downloader to reach the handover:
+                        // nothing between its download and its send looks
+                        // at the token, so it gets there whatever the timing.
+                        token.store(libc::SIGINT, AtomicOrdering::SeqCst);
+                    }
+                },
+            );
+            returned.send(()).unwrap();
+        });
+
+        assert!(
+            run_returned.recv_timeout(Duration::from_secs(10)).is_ok(),
+            "the run waited for a handover nobody would take"
+        );
+        assert_eq!(*processed.lock().unwrap(), [0]);
+        let mut dropped = dropped.lock().unwrap().clone();
+        dropped.sort_unstable();
+        assert_eq!(dropped, [0, 1], "the waiting package was not dropped");
+    }
+
+    /// A signal reaches extraction at its next read of the archive: the
+    /// package's staging directory is deleted, nothing lands, and the result
+    /// says why.
+    #[test]
+    fn a_signal_during_unpacking_deletes_the_staging_directory() {
+        let dir = tempdir().unwrap();
+        let store = JdkStore::at(dir.path());
+        let staging = staging_dir(&store).unwrap();
+        let staging_path = staging.path().to_path_buf();
+        let archive = staging.path().join("jdk.tar.gz");
+        fs::write(&archive, jdk_archive("21.0.9+10")).unwrap();
+        let ui = InstallUi::hidden();
+        let job = ui.begin(request("21"), "21.0.9+10", 0);
+        let token = AtomicI32::new(libc::SIGTERM);
+
+        let result = unpack(
+            &store,
+            &ui,
+            Cancel::token(&token),
+            Staged {
+                request: request("21"),
+                metadata: metadata("21.0.9+10"),
+                dir: staging,
+                archive,
+                job,
+            },
+        );
+
+        let error = result.unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<Cancelled>(),
+            Some(&Cancelled(libc::SIGTERM))
+        );
+        assert!(!staging_path.exists(), "the staging directory survived");
+        assert!(!entry(dir.path(), "21.0.9+10").exists());
+    }
+
+    /// A store with a live build and the build that just landed to replace
+    /// it, ready for [`commit`].
+    fn landed_beside_the_live_build() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let dir = tempdir().unwrap();
+        create_jdk_dir(dir.path(), "21.0.5+11");
+        create_jdk_dir(dir.path(), "21.0.9+10");
+        let live = entry(dir.path(), "21.0.5+11");
+        let new = entry(dir.path(), "21.0.9+10");
+        (dir, live, new)
+    }
+
+    fn cancelled_with(run: &InstallRun) -> Option<Cancelled> {
+        run.error
+            .as_ref()
+            .and_then(|e| e.error.downcast_ref::<Cancelled>().copied())
+    }
+
+    /// A signal before the commit point: no payload, no deletion. The build
+    /// that landed stays, and so does every build it would have replaced,
+    /// the live one included.
+    #[test]
+    fn a_signal_before_the_commit_point_replaces_nothing() {
+        let (dir, live, new) = landed_beside_the_live_build();
+        let store = JdkStore::at(dir.path());
+        let token = AtomicI32::new(0);
+        let mut out = Vec::new();
+        let mut run = InstallRun::default();
+
+        // The plan takes its listing before the signal: the commit point is
+        // after planning, right before `apply`.
+        let plan = store.plan_replacement(
+            vec![(request("21"), "21.0.9+10".to_string(), new.clone())],
+            Some(&live),
+        );
+        token.store(libc::SIGINT, AtomicOrdering::SeqCst);
+        commit(
+            plan,
+            Some(Payload::new(&mut out)),
+            Cancel::token(&token),
+            &mut run,
+        );
+
+        assert_eq!(cancelled_with(&run), Some(Cancelled(libc::SIGINT)));
+        assert!(live.exists(), "the live build was deleted");
+        assert!(new.exists());
+        assert!(out.is_empty(), "the shell was told something: {out:?}");
+        assert!(run.repointed.is_none());
+    }
+
+    /// A payload reader that sends the run a signal while it is being
+    /// written: a signal *during* the replacement.
+    struct Signalling<'a> {
+        token: &'a AtomicI32,
+        written: Vec<u8>,
+    }
+
+    impl std::io::Write for Signalling<'_> {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.token.store(libc::SIGTERM, AtomicOrdering::SeqCst);
+            self.written.write(buf)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Once the replacement has begun it runs to the end - payload, then
+    /// deletion - and only then is the signal honoured.
+    #[test]
+    fn a_signal_during_the_replacement_lets_it_finish() {
+        let (dir, live, new) = landed_beside_the_live_build();
+        let token = AtomicI32::new(0);
+        let mut reader = Signalling {
+            token: &token,
+            written: Vec::new(),
+        };
+        let mut run = InstallRun::default();
+
+        commit(
+            JdkStore::at(dir.path()).plan_replacement(
+                vec![(request("21"), "21.0.9+10".to_string(), new.clone())],
+                Some(&live),
+            ),
+            Some(Payload::new(&mut reader)),
+            Cancel::token(&token),
+            &mut run,
+        );
+
+        assert_eq!(cancelled_with(&run), Some(Cancelled(libc::SIGTERM)));
+        let payload = String::from_utf8(reader.written).unwrap();
+        assert!(payload.ends_with("# jlo'end\n"), "{payload}");
+        assert!(
+            payload.contains(&format!("export JAVA_HOME='{}'", new.display())),
+            "{payload}"
+        );
+        assert!(!live.exists(), "the replacement stopped halfway");
+        assert_eq!(run.repointed.as_deref(), Some(new.as_path()));
+    }
+
+    /// A signal after the archive's last read - during the move or the
+    /// cleanup - is still a cancel: `jlo exec` must not launch the command.
+    /// The build that landed stays.
+    #[test]
+    fn a_signal_after_the_move_still_cancels_the_on_demand_install() {
+        let dir = tempdir().unwrap();
+        let store = JdkStore::at(dir.path());
+        let adoptium = Adoptium::new().offer("21", "21.0.9+10", 1, true);
+        let client = adoptium.client();
+        let metadata = client.fetch_metadata(request("21")).unwrap().unwrap();
+        let token = AtomicI32::new(0);
+
+        let result = install_one_with(
+            &client,
+            &store,
+            request("21"),
+            metadata,
+            Cancel::token(&token),
+            || token.store(libc::SIGINT, AtomicOrdering::SeqCst),
+        );
+
+        adoptium.assert();
+        let error = result.unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<Cancelled>(),
+            Some(&Cancelled(libc::SIGINT))
+        );
+        assert!(entry(dir.path(), "21.0.9+10").exists());
+        assert_eq!(staging_left(dir.path()), Vec::<String>::new());
     }
 
     /// A name given twice is one lookup and one download.

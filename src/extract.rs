@@ -1,3 +1,4 @@
+use crate::cancel::Cancel;
 use crate::ui::InstallUi;
 use anyhow::{Context, bail};
 use flate2::bufread::GzDecoder;
@@ -6,9 +7,14 @@ use std::io::BufReader;
 use std::path::Path;
 use tar::Archive;
 
-pub(crate) fn extract(file: &Path, dest: &Path, ui: &InstallUi) -> anyhow::Result<()> {
+pub(crate) fn extract(
+    file: &Path,
+    dest: &Path,
+    ui: &InstallUi,
+    cancel: Cancel,
+) -> anyhow::Result<()> {
     match file.extension().and_then(|s| s.to_str()) {
-        Some("gz") => extract_tar_gz(file, dest, ui),
+        Some("gz") => extract_tar_gz(file, dest, ui, cancel),
         // Adoptium ships .zip only for Windows: reaching here is a platform
         // detection fault, so the message names that, not the extension.
         Some("zip") => bail!(
@@ -19,11 +25,18 @@ pub(crate) fn extract(file: &Path, dest: &Path, ui: &InstallUi) -> anyhow::Resul
     }
 }
 
-fn extract_tar_gz(source: &Path, dest: &Path, ui: &InstallUi) -> anyhow::Result<()> {
+/// The archive is read through `cancel`, so a signal stops the unpacking at its
+/// next read without restructuring `tar::Archive::unpack`.
+fn extract_tar_gz(
+    source: &Path,
+    dest: &Path,
+    ui: &InstallUi,
+    cancel: Cancel,
+) -> anyhow::Result<()> {
     let file = File::open(source).with_context(|| format!("could not open archive {source:?}"))?;
     ui.start_extract();
 
-    let decompressor = GzDecoder::new(BufReader::new(file));
+    let decompressor = GzDecoder::new(BufReader::new(cancel.reader(file)));
     let mut archive = Archive::new(decompressor);
 
     archive
@@ -47,6 +60,7 @@ mod tests {
             &dir.path().join("jdk.zip"),
             dir.path(),
             &InstallUi::hidden(),
+            Cancel::process(),
         )
         .unwrap_err();
         let message = format!("{err:#}");
@@ -75,7 +89,7 @@ mod tests {
 
         let ui = InstallUi::hidden();
         let dest = dir.path().join("out");
-        extract(&archive, &dest, &ui).unwrap();
+        extract(&archive, &dest, &ui, Cancel::process()).unwrap();
         assert!(dest.join("jdk/bin/java").exists());
         assert_eq!(ui.position(), 0);
     }
@@ -83,8 +97,13 @@ mod tests {
     #[test]
     fn rejects_unsupported_archive_format() {
         let dir = tempdir().unwrap();
-        let err =
-            extract(&dir.path().join("jdk.7z"), dir.path(), &InstallUi::hidden()).unwrap_err();
+        let err = extract(
+            &dir.path().join("jdk.7z"),
+            dir.path(),
+            &InstallUi::hidden(),
+            Cancel::process(),
+        )
+        .unwrap_err();
         assert!(format!("{err:#}").contains("unsupported archive format"));
     }
 }

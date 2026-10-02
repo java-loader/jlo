@@ -9,16 +9,15 @@ use crate::store::{
 use clap::builder::styling::Styles;
 use console::style;
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressState, ProgressStyle};
-use std::cell::{Cell, RefCell};
 use std::io::{IsTerminal, stderr};
 use std::path::Path;
 use std::process::exit;
+use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 /// One download of an install run, as the progress region names it.
 #[derive(Debug, Clone)]
 pub(crate) struct Download {
-    pub(crate) request: Request,
     pub(crate) version: String,
     /// The API's size in bytes; 0 when it gave none.
     pub(crate) size: u64,
@@ -49,10 +48,24 @@ impl Columns {
     }
 }
 
+/// One download on its way into the store: what its `+` line names once it
+/// lands, carried with the staged package rather than read back from the
+/// region, since the next download has begun by then.
+#[derive(Debug, Clone)]
+pub(crate) struct Job {
+    request: Request,
+    version: String,
+    started: Instant,
+}
+
 /// The live progress region of one install run. Every download shares one
 /// bar, which counts the bytes of the whole run, so "how much is left" has an
 /// answer; each build that lands leaves its `+` line above the bar, and the
 /// region is erased when the run ends.
+///
+/// Called from both stages of the run at once, the downloading one and the
+/// unpacking one, so its state sits behind one lock. At most one download is
+/// in progress at a time.
 ///
 /// Output persists in proportion to how durable the side effect is: a JDK on
 /// disk earns a line; exporting `JAVA_HOME` prints nothing, which matters
@@ -62,20 +75,27 @@ pub(crate) struct InstallUi {
     bar: ProgressBar,
     tty: bool,
     columns: Columns,
-    downloads: RefCell<Vec<Download>>,
-    /// Index into `downloads` of the one in progress.
-    current: Cell<usize>,
+    state: Mutex<RegionState>,
+}
+
+#[derive(Debug)]
+struct RegionState {
+    downloads: Vec<Download>,
+    /// Index into `downloads` of the download in progress, if one is.
+    current: Option<usize>,
     /// How many downloads have begun: the counter's number, which a skipped
     /// or an unplanned download must not reorder.
-    begun: Cell<usize>,
+    begun: usize,
     /// The bar's width for the download in progress: what is left of 80
     /// columns once the counter, the version and the totals are placed.
-    bar_width: Cell<usize>,
-    started: Cell<Instant>,
-    /// Bytes of the downloads already finished.
-    done: Cell<u64>,
+    bar_width: usize,
+    /// Bytes of the downloads already finished and verified.
+    done: u64,
     /// The size of the download in progress: planned, then the response's.
-    length: Cell<u64>,
+    length: u64,
+    /// What the unpacking stage is doing, shown only while no download runs:
+    /// the bar belongs to the download.
+    unpacking: Option<&'static str>,
 }
 
 impl InstallUi {
@@ -107,59 +127,73 @@ impl InstallUi {
             bar,
             tty,
             columns,
-            downloads: RefCell::new(downloads),
-            current: Cell::new(0),
-            begun: Cell::new(0),
-            bar_width: Cell::new(MAX_BAR_WIDTH),
-            started: Cell::new(Instant::now()),
-            done: Cell::new(0),
-            length: Cell::new(0),
+            state: Mutex::new(RegionState {
+                downloads,
+                current: None,
+                begun: 0,
+                bar_width: MAX_BAR_WIDTH,
+                done: 0,
+                length: 0,
+                unpacking: None,
+            }),
         }
     }
 
-    pub(crate) fn begin(&self, request: Request, version: &str, size: u64) {
-        let mut downloads = self.downloads.borrow_mut();
-        let index = if let Some(index) = downloads.iter().position(|d| d.version == version) {
+    /// A panic elsewhere while the lock was held leaves nothing worse than a
+    /// miscounted bar, which is no reason to panic again.
+    fn state(&self) -> MutexGuard<'_, RegionState> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    pub(crate) fn begin(&self, request: Request, version: &str, size: u64) -> Job {
+        let mut state = self.state();
+        let index = if let Some(index) = state.downloads.iter().position(|d| d.version == version) {
             index
         } else {
-            downloads.push(Download {
-                request,
+            state.downloads.push(Download {
                 version: version.to_string(),
                 size,
             });
             self.bar.inc_length(size);
-            downloads.len() - 1
+            state.downloads.len() - 1
         };
-        self.current.set(index);
-        self.begun.set(self.begun.get() + 1);
-        self.started.set(Instant::now());
-        self.length.set(downloads[index].size);
+        state.current = Some(index);
+        state.begun += 1;
+        state.length = state.downloads[index].size;
 
         if self.tty {
-            let width = downloads.iter().map(|d| d.version.len()).max().unwrap_or(0);
-            let counter = self.counter(downloads.len());
+            let width = state
+                .downloads
+                .iter()
+                .map(|d| d.version.len())
+                .max()
+                .unwrap_or(0);
+            let counter = counter(state.begun, state.downloads.len());
             let counter_width = counter.as_ref().map_or(0, |c| c.len() + 1);
             let total = self.bar.length().unwrap_or(0);
-            self.bar_width.set(bar_width(
-                counter_width + width,
-                mib(total).to_string().len(),
-            ));
+            state.bar_width = bar_width(counter_width + width, mib(total).to_string().len());
             let counter = counter
                 .map(|counter| format!("{} ", dim(counter)))
                 .unwrap_or_default();
             self.bar.set_prefix(format!("{counter}{version:<width$}"));
-            self.bar.set_position(self.done.get());
-            self.phase("connecting");
+            self.bar.set_position(state.done);
+            self.show_phase(state.bar_width, "connecting");
             self.bar.enable_steady_tick(TICK);
+        }
+
+        Job {
+            request,
+            version: version.to_string(),
+            started: Instant::now(),
         }
     }
 
     /// A planned download the run no longer needs: the name turned out to be
-    /// current when its turn came.
+    /// current when its turn came, or could not be checked.
     pub(crate) fn skip(&self, version: &str) {
-        let mut downloads = self.downloads.borrow_mut();
-        if let Some(index) = downloads.iter().position(|d| d.version == version) {
-            let skipped = downloads.remove(index);
+        let mut state = self.state();
+        if let Some(index) = state.downloads.iter().position(|d| d.version == version) {
+            let skipped = state.downloads.remove(index);
             let total = self.bar.length().unwrap_or(0);
             self.bar.set_length(total.saturating_sub(skipped.size));
         }
@@ -168,73 +202,108 @@ impl InstallUi {
     /// `content_length` is what is actually read; a planned size that
     /// differs only moves the total, since the bar is all it ever sized.
     pub(crate) fn start_download(&self, content_length: u64) {
-        let planned = self.length.replace(content_length);
+        let mut state = self.state();
+        let planned = std::mem::replace(&mut state.length, content_length);
         let total = corrected_total(self.bar.length().unwrap_or(0), planned, content_length);
         self.bar.set_length(total);
         if self.tty {
-            self.bar.set_style(download_style(self.bar_width.get()));
-        } else {
-            let downloads = self.downloads.borrow();
+            self.bar.set_style(download_style(state.bar_width));
+        } else if let Some(download) = state.current.and_then(|i| state.downloads.get(i)) {
             // Absent only for a download nobody began, which no caller does.
-            if let Some(download) = downloads.get(self.current.get()) {
-                eprintln!(
-                    "{}",
-                    downloading_line(
-                        self.counter(downloads.len()),
-                        &download.version,
-                        content_length,
-                        total
-                    )
-                );
-            }
+            eprintln!(
+                "{}",
+                downloading_line(
+                    counter(state.begun, state.downloads.len()),
+                    &download.version,
+                    content_length,
+                    total
+                )
+            );
         }
     }
 
     pub(crate) fn set_downloaded(&self, bytes: u64) {
-        self.bar.set_position(self.done.get() + bytes);
+        let state = self.state();
+        self.bar.set_position(state.done + bytes);
     }
 
-    /// The bar stands still from here: it counts downloaded bytes only, and
-    /// the steady tick keeps the spinner going while the archive unpacks.
-    pub(crate) fn start_extract(&self) {
-        self.phase("extracting");
+    /// The download in progress arrived whole and matched its checksum: its
+    /// bytes count as done.
+    pub(crate) fn downloaded(&self) {
+        let mut state = self.state();
+        state.done += state.length;
+        self.end_download(&mut state);
     }
 
-    pub(crate) fn start_install(&self) {
-        self.phase("installing");
+    /// The download in progress failed or was cancelled, wherever it was: its
+    /// bytes will not arrive, so they leave the total, and the bar goes back
+    /// to what is done - it never keeps bytes nobody will deliver.
+    pub(crate) fn download_failed(&self) {
+        let mut state = self.state();
+        let total = self.bar.length().unwrap_or(0);
+        self.bar.set_length(total.saturating_sub(state.length));
+        self.end_download(&mut state);
     }
 
-    fn phase(&self, name: &'static str) {
+    fn end_download(&self, state: &mut RegionState) {
+        state.current = None;
+        state.length = 0;
+        self.bar.set_position(state.done);
         if self.tty {
-            self.bar.set_style(phase_style(self.bar_width.get()));
-            self.bar.set_message(name);
+            self.show_phase(state.bar_width, state.unpacking.unwrap_or(""));
         }
     }
 
+    /// The bar stands still for this: it counts downloaded bytes only, and
+    /// the steady tick keeps the spinner going while the archive unpacks.
+    pub(crate) fn start_extract(&self) {
+        self.unpacking(Some("extracting"));
+    }
+
+    pub(crate) fn start_install(&self) {
+        self.unpacking(Some("installing"));
+    }
+
+    /// The unpacking stage is done with its package, however it went.
+    pub(crate) fn unpacked(&self) {
+        self.unpacking(None);
+    }
+
+    fn unpacking(&self, phase: Option<&'static str>) {
+        let mut state = self.state();
+        state.unpacking = phase;
+        if self.tty && state.current.is_none() {
+            self.show_phase(state.bar_width, phase.unwrap_or(""));
+        }
+    }
+
+    fn show_phase(&self, bar_width: usize, name: &'static str) {
+        self.bar.set_style(phase_style(bar_width));
+        self.bar.set_message(name);
+    }
+
     /// The build is in the store: its `+` line goes above the bar.
-    pub(crate) fn landed(&self) {
-        let downloads = self.downloads.borrow();
-        self.done.set(self.done.get() + self.length.get());
-        let Some(download) = downloads.get(self.current.get()) else {
-            return;
-        };
-        let line = added_line(
+    pub(crate) fn landed(&self, job: &Job) {
+        self.print(added_line(
             self.columns,
-            download.request,
-            &download.version,
-            self.started.get().elapsed(),
-        );
+            job.request,
+            &job.version,
+            job.started.elapsed(),
+        ));
+    }
+
+    /// `name` could not be installed: said the moment it is known, above the
+    /// bar like a `+` line, since the run goes on with the other names.
+    pub(crate) fn failed(&self, name: Request, error: &str) {
+        self.print(failed_line(name, error));
+    }
+
+    fn print(&self, line: String) {
         if self.tty {
             self.bar.println(line);
         } else {
             eprintln!("{line}");
         }
-    }
-
-    /// `2/3` once the second of three downloads began; `None` for a run of
-    /// one.
-    fn counter(&self, count: usize) -> Option<String> {
-        (count > 1).then(|| format!("{}/{count}", self.begun.get()))
     }
 
     #[cfg(test)]
@@ -247,10 +316,30 @@ impl InstallUi {
         self.bar.length().unwrap_or(0)
     }
 
+    #[cfg(test)]
+    fn counter_now(&self) -> Option<String> {
+        let state = self.state();
+        counter(state.begun, state.downloads.len())
+    }
+
     /// Erase the live region: at the end of the run, or before its error.
     pub(crate) fn finish(&self) {
         self.bar.finish_and_clear();
     }
+}
+
+/// `2/3` once the second of three downloads began; `None` for a run of one.
+fn counter(begun: usize, count: usize) -> Option<String> {
+    (count > 1).then(|| format!("{begun}/{count}"))
+}
+
+/// `Error: 21: could not install JDK: checksum mismatch: ...` - the label
+/// every error carries, then the name, since the run's other names go on.
+fn failed_line(name: Request, error: &str) -> String {
+    format!(
+        "{} {name}: {error}",
+        style("Error:").red().bold().for_stderr()
+    )
 }
 
 /// The run's total once a download's real size is known: the planned size
@@ -1350,7 +1439,6 @@ mod tests {
         let downloads = sizes
             .iter()
             .map(|&(version, size)| Download {
-                request: request("21"),
                 version: version.to_string(),
                 size,
             })
@@ -1371,16 +1459,67 @@ mod tests {
         assert_eq!(ui.length(), 370, "the response's size wins");
         ui.set_downloaded(60);
         assert_eq!(ui.position(), 60);
-        ui.landed();
+        ui.set_downloaded(120);
+        ui.downloaded();
+        assert_eq!(ui.position(), 120, "the actual length counts as done");
 
         ui.skip("21.0.10+7");
         assert_eq!(ui.length(), 170, "a skipped download leaves the total");
 
         ui.begin(request("21"), "21.0.11+9", 50);
-        assert_eq!(ui.counter(2).as_deref(), Some("2/2"));
+        assert_eq!(ui.counter_now().as_deref(), Some("2/2"));
         ui.start_download(50);
         ui.set_downloaded(10);
         assert_eq!(ui.position(), 130, "offset by the finished download");
+    }
+
+    /// A failed download takes its bytes out of the total - the planned size
+    /// before the response said otherwise, the response's after - and the
+    /// bar goes back to what is done, wherever the download failed: it never
+    /// keeps bytes nobody will deliver, and never undoes finished ones.
+    #[test]
+    fn a_failed_download_leaves_the_total_and_the_bar_goes_back_to_done() {
+        // Before headers: the planned size goes.
+        let ui = planned(&[("21.0.9+10", 100), ("17.0.20+101", 200)]);
+        ui.begin(request("21"), "21.0.9+10", 100);
+        ui.download_failed();
+        assert_eq!((ui.position(), ui.length()), (0, 200));
+
+        // Mid-body, after a corrected size: the response's size goes, and
+        // the bar falls back to the finished download.
+        let ui = planned(&[("21.0.9+10", 100), ("17.0.20+101", 200)]);
+        ui.begin(request("21"), "21.0.9+10", 100);
+        ui.start_download(100);
+        ui.set_downloaded(100);
+        ui.downloaded();
+        ui.begin(request("17"), "17.0.20+101", 200);
+        ui.start_download(250);
+        ui.set_downloaded(180);
+        assert_eq!(ui.position(), 280);
+        ui.download_failed();
+        assert_eq!((ui.position(), ui.length()), (100, 100));
+
+        // Whole but failing its checksum: the same.
+        let ui = planned(&[("21.0.9+10", 100)]);
+        ui.begin(request("21"), "21.0.9+10", 100);
+        ui.start_download(100);
+        ui.set_downloaded(100);
+        ui.download_failed();
+        assert_eq!((ui.position(), ui.length()), (0, 0));
+    }
+
+    /// A package that fails to unpack was still downloaded: the bar counts
+    /// downloaded bytes, so it keeps them.
+    #[test]
+    fn a_failed_unpacking_keeps_the_downloaded_bytes() {
+        let ui = planned(&[("21.0.9+10", 100), ("17.0.20+101", 200)]);
+        ui.begin(request("21"), "21.0.9+10", 100);
+        ui.start_download(100);
+        ui.set_downloaded(100);
+        ui.downloaded();
+        ui.start_extract();
+        ui.unpacked();
+        assert_eq!((ui.position(), ui.length()), (100, 300));
     }
 
     /// A download the up-front plan did not have joins the total and the
@@ -1389,11 +1528,11 @@ mod tests {
     fn an_unplanned_download_counts_on_from_where_the_run_is() {
         let ui = planned(&[("21.0.9+10", 100), ("17.0.20+101", 100)]);
         ui.begin(request("21"), "21.0.9+10", 100);
-        assert_eq!(ui.counter(2).as_deref(), Some("1/2"));
-        ui.landed();
+        assert_eq!(ui.counter_now().as_deref(), Some("1/2"));
+        ui.downloaded();
         ui.begin(request("25"), "25.0.4+101.0.LTS", 130);
         assert_eq!(ui.length(), 330);
-        assert_eq!(ui.counter(3).as_deref(), Some("2/3"));
+        assert_eq!(ui.counter_now().as_deref(), Some("2/3"));
     }
 
     /// The live line fits 80 columns: the bar gives way to a long counter,

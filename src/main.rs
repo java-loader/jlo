@@ -4,6 +4,7 @@
 compile_error!("jlo supports Linux and macOS only");
 
 mod adoptium;
+mod cancel;
 mod cli;
 mod conf;
 mod extract;
@@ -18,6 +19,7 @@ mod ui;
 mod version;
 
 use crate::adoptium::AdoptiumClient;
+use crate::cancel::Cancelled;
 use crate::request::Request;
 use crate::resolve::{Verb, requested_versions};
 use crate::shellenv::parse_exec_args;
@@ -81,11 +83,18 @@ impl From<RemoveError> for CommandError {
     }
 }
 
-/// The one place a command failure becomes a message and exit 1. The other
-/// exits: `shellenv::exec_command`, which cannot return, and `ui::print_lines`,
-/// which fails on the stream it writes to.
+/// The one place a command failure becomes a message and exit 1 - or, for a
+/// run a signal stopped, `128 + signal`, the status a shell reports for a
+/// process the signal killed. The other exits: `shellenv::exec_command`, which
+/// cannot return, and `ui::print_lines`, which fails on the stream it writes
+/// to.
 fn main() {
     if let Err(e) = run() {
+        if let Some(cancelled) = cancelled(&e.error) {
+            // Not an `Error:`: the user asked for it.
+            eprintln!("{cancelled}");
+            exit(cancelled.exit_code());
+        }
         ui::error!("{:#}", e.error);
         if let Some(hint) = e.hint {
             ui::hint!("{hint}");
@@ -387,8 +396,22 @@ fn cmd_update(
     wrapped: bool,
 ) -> Result<(), CommandError> {
     let result = update_jdks(client, versions, wrapped);
-    selfupdate::announce_newer_release();
+    // A run the user stopped does no more network work.
+    if !result
+        .as_ref()
+        .is_err_and(|e| cancelled(&e.error).is_some())
+    {
+        selfupdate::announce_newer_release();
+    }
     result
+}
+
+/// The signal that stopped the command, wherever in the chain it sits.
+fn cancelled(error: &anyhow::Error) -> Option<Cancelled> {
+    error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<Cancelled>())
+        .copied()
 }
 
 /// The names given, or every installed name, pre-release streams included.
@@ -435,7 +458,25 @@ fn install_names(
     if let Some(e) = run.error {
         return Err(e);
     }
-    removal_failed(run.failure_count(), "superseded JDK")
+    // Each failed name already has its own line; this is the exit status's
+    // one-line reason, both counts in it when both apply.
+    let failed = run.failed_count();
+    let not_removed = run.failure_count();
+    let mut reasons = Vec::new();
+    if failed > 0 {
+        reasons.push(format!(
+            "{failed} JDK{} could not be installed",
+            ui::plural(failed)
+        ));
+    }
+    if let Err(e) = removal_failed(not_removed, "superseded JDK") {
+        reasons.push(format!("{:#}", e.error));
+    }
+    if reasons.is_empty() {
+        Ok(())
+    } else {
+        Err(anyhow!("{}", reasons.join("; ")).into())
+    }
 }
 
 #[cfg(test)]

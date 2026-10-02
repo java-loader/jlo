@@ -866,6 +866,333 @@ fn a_payload_that_cannot_be_written_deletes_nothing() {
     assert!(store.join("jlo-temurin-21.0.9+10").exists());
 }
 
+/// `version` as the latest build of `major`, its package `body` served once at
+/// `/jdk-{major}.tar.gz` and announced with `checksum`. Both mocks are
+/// returned, for the caller to keep alive and assert.
+fn package(
+    server: &mut mockito::ServerGuard,
+    major: &str,
+    version: &str,
+    body: Vec<u8>,
+    checksum: &str,
+) -> [mockito::Mock; 2] {
+    let lookup = offer(server, major, version, checksum).create();
+    let download = server
+        .mock("GET", format!("/jdk-{major}.tar.gz").as_str())
+        .with_body(body)
+        .expect(1)
+        .create();
+    [lookup, download]
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    hex::encode(sha2::Sha256::digest(bytes))
+}
+
+/// What is wrong with the first name's package in [`run_with_a_broken_21`].
+#[derive(Debug, Clone, Copy)]
+enum Broken {
+    /// The bytes do not match the announced checksum.
+    Checksum,
+    /// The checksum matches, but the bytes are no gzip stream.
+    Gzip,
+}
+
+/// `jlo-bin <args>` against a store holding `installed`, with Adoptium
+/// offering a `broken` 21 (processed first) and an intact 17.0.9+1. Every
+/// package must be downloaded once.
+fn run_with_a_broken_21(
+    args: &[&str],
+    installed: &[&str],
+    broken: Broken,
+    active: Option<&str>,
+) -> (tempfile::TempDir, std::path::PathBuf, std::process::Output) {
+    let mut server = mockito::Server::new();
+    let (body, checksum) = match broken {
+        Broken::Checksum => {
+            let archive = fake_jdk_archive("jdk-21.0.9+10");
+            (archive, "0".repeat(64))
+        }
+        Broken::Gzip => {
+            let body = b"not a gzip stream".to_vec();
+            let checksum = sha256_hex(&body);
+            (body, checksum)
+        }
+    };
+    let broken_21 = package(&mut server, "21", "21.0.9+10", body, &checksum);
+    let archive_17 = fake_jdk_archive("jdk-17.0.9+1");
+    let checksum_17 = sha256_hex(&archive_17);
+    let intact_17 = package(&mut server, "17", "17.0.9+1", archive_17, &checksum_17);
+
+    let home = tempfile::tempdir().unwrap();
+    for version in installed {
+        install_fake_jdk(home.path(), version);
+    }
+    let mut cmd = hermetic(jlo_bin(), home.path());
+    cmd.args(args).env("JLO_ADOPTIUM_API_URL", server.url());
+    if let Some(version) = active {
+        cmd.env("JAVA_HOME", jdk_entry(home.path(), version));
+    }
+    let out = cmd.output().unwrap();
+    for mock in broken_21.iter().chain(&intact_17) {
+        mock.assert();
+    }
+    let store = jdk_store_in(home.path());
+    (home, store, out)
+}
+
+/// The staging directories left in `store`, by name.
+fn staging_left(store: &std::path::Path) -> Vec<String> {
+    std::fs::read_dir(store)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with(".tmp"))
+        .collect()
+}
+
+/// A name that fails no longer stops the run. 21 is processed first and
+/// fails - its checksum, or with a matching checksum its unpacking - and 17
+/// still installs. The failure has its own line naming 21, nothing of 21's
+/// attempt is left in the store, and the exit status says not everything
+/// went.
+#[test]
+fn a_name_that_fails_first_does_not_stop_the_ones_after_it() {
+    for (broken, reason) in [
+        (Broken::Checksum, "checksum mismatch"),
+        (Broken::Gzip, "could not extract archive"),
+    ] {
+        let (_home, store, out) = run_with_a_broken_21(&["install", "21", "17"], &[], broken, None);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+
+        assert_eq!(out.status.code(), Some(1), "{broken:?}: {stderr}");
+        assert!(
+            stderr.contains(&format!("Error: 21: could not install JDK: {reason}")),
+            "{broken:?}: {stderr}"
+        );
+        assert!(
+            stderr.contains("Error: 1 JDK could not be installed"),
+            "{broken:?}: {stderr}"
+        );
+        assert!(stderr.contains("+ 17  17.0.9+1"), "{broken:?}: {stderr}");
+        assert!(store.join("jlo-temurin-17.0.9+1").exists(), "{broken:?}");
+        assert!(!store.join("jlo-temurin-21.0.9+10").exists(), "{broken:?}");
+        assert_eq!(staging_left(&store), Vec::<String>::new(), "{broken:?}");
+        assert!(out.stdout.is_empty(), "{broken:?}");
+    }
+}
+
+/// Wrapped, a failed name does not keep the others from replacing the live
+/// build: the payload that moves the shell is written, the live build goes,
+/// and the run still exits non-zero - the wrapper evaluates a marked payload
+/// whatever the status.
+#[test]
+fn a_wrapped_run_with_a_failed_name_still_moves_the_shell() {
+    let (_home, store, out) = run_with_a_broken_21(
+        &["__wrapped", "update", "21", "17"],
+        &["21.0.5+11", "17.0.5+8"],
+        Broken::Checksum,
+        Some("17.0.5+8"),
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    let new = store.join("jlo-temurin-17.0.9+1");
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 3, "{stdout:?}");
+    assert_eq!(lines[0], format!("export JAVA_HOME='{}' &&", new.display()));
+    assert_eq!(lines[2], "# jlo'end", "{stdout:?}");
+    assert!(
+        !store.join("jlo-temurin-17.0.5+8").exists(),
+        "live build survived"
+    );
+    assert!(store.join("jlo-temurin-21.0.5+11").exists());
+    assert!(
+        stderr.contains("Error: 21: could not install JDK"),
+        "{stderr}"
+    );
+}
+
+/// A package server that sends the response head and the first `sent` bytes
+/// of a `length`-byte body, waits for the returned gate, sends `sent` bytes
+/// more and then stalls with the connection open: a download caught in the
+/// middle, which only a check before the next read can stop - finishing the
+/// body is not an option. Its URL is the first value.
+fn gated_package_server(length: usize, sent: usize) -> (String, std::sync::mpsc::Sender<()>) {
+    use std::io::{Read, Write};
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let (gate, opened) = std::sync::mpsc::channel::<()>();
+    std::thread::spawn(move || {
+        let Ok((mut stream, _)) = listener.accept() else {
+            return;
+        };
+        let mut head = Vec::new();
+        let mut byte = [0];
+        while !head.ends_with(b"\r\n\r\n") {
+            if stream.read_exact(&mut byte).is_err() {
+                return;
+            }
+            head.push(byte[0]);
+        }
+        // Errors ignored from here: the client is expected to hang up.
+        let _ = write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Length: {length}\r\nConnection: close\r\n\r\n"
+        );
+        let _ = stream.write_all(&vec![0; sent]);
+        let _ = stream.flush();
+        let _ = opened.recv_timeout(std::time::Duration::from_secs(20));
+        let _ = stream.write_all(&vec![0; sent]);
+        let _ = stream.flush();
+        std::thread::sleep(std::time::Duration::from_secs(30));
+        drop(stream);
+    });
+    (url, gate)
+}
+
+/// A wrapped `jlo install 21` caught in the middle of its download: started
+/// against a [`gated_package_server`] and returned once the staging archive
+/// holds data. The store has a live 21.0.5+11.
+struct StalledInstall {
+    _server: mockito::ServerGuard,
+    _lookup: mockito::Mock,
+    gate: std::sync::mpsc::Sender<()>,
+    home: tempfile::TempDir,
+    child: std::process::Child,
+    deadline: std::time::Instant,
+}
+
+impl StalledInstall {
+    fn start() -> Self {
+        let (package_url, gate) = gated_package_server(4 << 20, 256 << 10);
+        let mut server = mockito::Server::new();
+        let lookup = latest(&mut server, "21")
+            .with_body(format!(
+                r#"[{{"version":{{"semver":"21.0.9+10"}},"binary":{{"package":{{"name":"jdk.tar.gz","link":"{package_url}/jdk.tar.gz","checksum":"{}"}}}}}}]"#,
+                "0".repeat(64)
+            ))
+            .create();
+
+        let home = tempfile::tempdir().unwrap();
+        let live = install_fake_jdk(home.path(), "21.0.5+11");
+        let child = hermetic(jlo_bin(), home.path())
+            .args(["__wrapped", "install", "21"])
+            .env("JLO_ADOPTIUM_API_URL", server.url())
+            .env("JAVA_HOME", &live)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+
+        let install = Self {
+            _server: server,
+            _lookup: lookup,
+            gate,
+            home,
+            child,
+            deadline: std::time::Instant::now() + std::time::Duration::from_secs(20),
+        };
+        let store = install.store();
+        let downloading = || {
+            staging_left(&store).iter().any(|name| {
+                std::fs::metadata(store.join(name).join("jdk.tar.gz")).is_ok_and(|m| m.len() > 0)
+            })
+        };
+        while !downloading() {
+            assert!(
+                std::time::Instant::now() < install.deadline,
+                "the download never started"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        install
+    }
+
+    fn store(&self) -> std::path::PathBuf {
+        jdk_store_in(self.home.path())
+    }
+
+    fn live(&self) -> std::path::PathBuf {
+        jdk_entry(self.home.path(), "21.0.5+11")
+    }
+
+    fn signal(&self, signal: &str) {
+        let sent = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("kill -{signal} {}", self.child.id()))
+            .status()
+            .unwrap();
+        assert!(sent.success());
+    }
+
+    /// The child's output once it exits, failing the test if it does not
+    /// within the deadline; and `$HOME`, which must outlive the assertions.
+    fn finish(mut self) -> (std::process::Output, tempfile::TempDir) {
+        while self.child.try_wait().unwrap().is_none() {
+            if std::time::Instant::now() >= self.deadline {
+                self.child.kill().unwrap();
+                panic!("the run did not stop");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        (self.child.wait_with_output().unwrap(), self.home)
+    }
+}
+
+/// SIGINT or SIGTERM in the middle of a download: the run stops at its next
+/// read, deletes its staging directory, deletes nothing from the store and
+/// tells the shell nothing, and exits with the status a shell gives a process
+/// the signal killed.
+#[test]
+fn a_signal_mid_download_cleans_up_and_changes_nothing() {
+    for (signal, code) in [("INT", 130), ("TERM", 143)] {
+        let install = StalledInstall::start();
+        let (store, live) = (install.store(), install.live());
+
+        install.signal(signal);
+        // The next read is the one that notices.
+        install.gate.send(()).unwrap();
+        let (out, _home) = install.finish();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+
+        assert_eq!(out.status.code(), Some(code), "SIG{signal}: {stderr}");
+        assert!(stderr.contains("interrupted"), "SIG{signal}: {stderr}");
+        assert_eq!(staging_left(&store), Vec::<String>::new(), "SIG{signal}");
+        assert!(live.exists(), "SIG{signal}: the live build was deleted");
+        assert!(!store.join("jlo-temurin-21.0.9+10").exists(), "SIG{signal}");
+        assert!(out.stdout.is_empty(), "SIG{signal}: {:?}", out.stdout);
+    }
+}
+
+/// A read that never returns does not see the first signal; the second is
+/// the way out, and it kills. Which of the two the status names depends on
+/// delivery order when both are pending at once, so either counts - what may
+/// not happen is a run that survives both.
+#[test]
+fn a_second_signal_kills_a_stalled_run() {
+    use std::os::unix::process::ExitStatusExt;
+
+    for (first, second) in [("INT", "TERM"), ("TERM", "INT")] {
+        let install = StalledInstall::start();
+        let live = install.live();
+
+        install.signal(first);
+        install.signal(second);
+        let (out, _home) = install.finish();
+
+        assert!(
+            matches!(out.status.signal(), Some(2 | 15)),
+            "SIG{first} then SIG{second}: {:?}",
+            out.status
+        );
+        assert!(live.exists(), "SIG{first} then SIG{second}");
+        assert!(out.stdout.is_empty(), "SIG{first} then SIG{second}");
+    }
+}
+
 /// A `200 []` for the latest build of `major` - Adoptium's answer for a name
 /// it has no build of on this platform.
 fn not_offered_mock(server: &mut mockito::ServerGuard, major: &str) -> mockito::Mock {
