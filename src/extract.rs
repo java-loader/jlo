@@ -1,5 +1,4 @@
 use crate::cancel::Cancel;
-use crate::ui::InstallUi;
 use anyhow::{Context, bail};
 use flate2::bufread::GzDecoder;
 use std::fs::File;
@@ -7,14 +6,9 @@ use std::io::BufReader;
 use std::path::Path;
 use tar::Archive;
 
-pub(crate) fn extract(
-    file: &Path,
-    dest: &Path,
-    ui: &InstallUi,
-    cancel: Cancel,
-) -> anyhow::Result<()> {
+pub(crate) fn extract(file: &Path, dest: &Path, cancel: Cancel) -> anyhow::Result<()> {
     match file.extension().and_then(|s| s.to_str()) {
-        Some("gz") => extract_tar_gz(file, dest, ui, cancel),
+        Some("gz") => extract_tar_gz(file, dest, cancel),
         // Adoptium ships .zip only for Windows: reaching here is a platform
         // detection fault, so the message names that, not the extension.
         Some("zip") => bail!(
@@ -27,14 +21,8 @@ pub(crate) fn extract(
 
 /// The archive is read through `cancel`, so a signal stops the unpacking at its
 /// next read without restructuring `tar::Archive::unpack`.
-fn extract_tar_gz(
-    source: &Path,
-    dest: &Path,
-    ui: &InstallUi,
-    cancel: Cancel,
-) -> anyhow::Result<()> {
+fn extract_tar_gz(source: &Path, dest: &Path, cancel: Cancel) -> anyhow::Result<()> {
     let file = File::open(source).with_context(|| format!("could not open archive {source:?}"))?;
-    ui.start_extract();
 
     let decompressor = GzDecoder::new(BufReader::new(cancel.reader(file)));
     let mut archive = Archive::new(decompressor);
@@ -56,54 +44,16 @@ mod tests {
     #[test]
     fn a_zip_names_the_unsupported_platform_not_the_extension() {
         let dir = tempdir().unwrap();
-        let err = extract(
-            &dir.path().join("jdk.zip"),
-            dir.path(),
-            &InstallUi::hidden(),
-            Cancel::process(),
-        )
-        .unwrap_err();
+        let err = extract(&dir.path().join("jdk.zip"), dir.path(), Cancel::process()).unwrap_err();
         let message = format!("{err:#}");
         assert!(message.contains("Windows"), "{message}");
         assert!(!message.contains("unsupported archive format"), "{message}");
     }
 
-    /// The bar counts downloaded bytes only: unpacking reads the archive
-    /// again, and counting that too would run the bar past its total.
-    #[test]
-    fn extracting_leaves_the_download_count_alone() {
-        let dir = tempdir().unwrap();
-        let archive = dir.path().join("jdk.tar.gz");
-        let mut builder = tar::Builder::new(flate2::write::GzEncoder::new(
-            File::create(&archive).unwrap(),
-            flate2::Compression::default(),
-        ));
-        let mut header = tar::Header::new_gnu();
-        header.set_size(4);
-        header.set_mode(0o755);
-        header.set_cksum();
-        builder
-            .append_data(&mut header, "jdk/bin/java", &b"java"[..])
-            .unwrap();
-        builder.into_inner().unwrap().finish().unwrap();
-
-        let ui = InstallUi::hidden();
-        let dest = dir.path().join("out");
-        extract(&archive, &dest, &ui, Cancel::process()).unwrap();
-        assert!(dest.join("jdk/bin/java").exists());
-        assert_eq!(ui.position(), 0);
-    }
-
     #[test]
     fn rejects_unsupported_archive_format() {
         let dir = tempdir().unwrap();
-        let err = extract(
-            &dir.path().join("jdk.7z"),
-            dir.path(),
-            &InstallUi::hidden(),
-            Cancel::process(),
-        )
-        .unwrap_err();
+        let err = extract(&dir.path().join("jdk.7z"), dir.path(), Cancel::process()).unwrap_err();
         assert!(format!("{err:#}").contains("unsupported archive format"));
     }
 }

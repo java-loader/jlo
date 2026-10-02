@@ -717,7 +717,6 @@ fn install_each_with<W: std::io::Write>(
                         run.names.push((request, NameResult::Failed(error)));
                     }
                 }
-                ui.unpacked();
             }
         },
     );
@@ -1151,11 +1150,14 @@ fn unpack(
         metadata,
         dir,
         archive,
+        job,
         ..
     } = staged;
-    let java_home = extract::extract(&archive, dir.path(), ui, cancel)
-        .and_then(|()| store.install(&metadata, dir.path(), ui))
-        .map_err(|e| cancel.explain(e))?;
+    ui.start_extract(&job);
+    let landed = extract::extract(&archive, dir.path(), cancel)
+        .and_then(|()| store.install(&metadata, dir.path(), ui));
+    ui.unpacked();
+    let java_home = landed.map_err(|e| cancel.explain(e))?;
 
     dir.close().unwrap_or_else(|err| {
         ui::warning!("could not delete temporary directory: {err}");
