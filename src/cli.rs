@@ -307,12 +307,19 @@ on one line after available:.
 
 A JDK is a directory named jlo-temurin-<version> in the install
 directory, however it got there. Every other directory there is listed
-after not managed: - jlo never uses, updates or deletes it."
+after not managed: - jlo never uses, updates or deletes it.
+
+With --json, stdout is one JSON document instead, described in the
+README; its keys are only ever added to."
     )]
     List {
         /// List only what is installed; never touch the network
         #[arg(long)]
         offline: bool,
+
+        /// Print one JSON document instead of the table
+        #[arg(long)]
+        json: bool,
     },
 
     #[command(

@@ -520,6 +520,90 @@ fn list_remote_network_failure_points_at_offline() {
         .stderr(predicate::str::contains("jlo list --offline"));
 }
 
+/// The wiring and the stderr rule: the table's annotations (the "not managed"
+/// note here) are not printed under `--json`, and the path is a real
+/// `JAVA_HOME`.
+#[test]
+fn list_offline_json_prints_one_document_and_no_annotations() {
+    let home = tempfile::tempdir().unwrap();
+    let jdk = install_fake_jdk(home.path(), "21.0.9+10");
+    std::fs::create_dir_all(jdk_store_in(home.path()).join("temurin-21.0.1")).unwrap();
+
+    let out = jlo(home.path())
+        .args(["list", "--offline", "--json"])
+        .env("JAVA_HOME", &jdk)
+        .assert()
+        .success()
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+
+    assert!(out.ends_with(b"}\n"));
+    let doc: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(
+        doc,
+        serde_json::json!({"names": [
+            {"name": "21", "major": 21, "distribution": "temurin",
+             "installed": [{"version": "21.0.9+10", "path": jdk.to_str().unwrap(),
+                            "active": true, "status": "installed"}],
+             "offered": null, "update": null}
+        ]})
+    );
+}
+
+/// An empty store is an empty document, not the human "No JDKs installed".
+#[test]
+fn list_offline_json_of_an_empty_store_is_an_empty_list() {
+    let home = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(jdk_store_in(home.path()).join("temurin-21.0.1")).unwrap();
+
+    jlo(home.path())
+        .args(["list", "--offline", "--json"])
+        .assert()
+        .success()
+        .stdout("{\"names\":[]}\n")
+        .stderr("");
+}
+
+/// The human listing carries on past a failed lookup with a warning; a JSON
+/// document must not pass off an incomplete catalogue as complete.
+#[test]
+fn list_json_refuses_an_incomplete_catalogue() {
+    let mut server = mockito::Server::new();
+    let _r = server
+        .mock("GET", "/v3/info/available_releases")
+        .with_body(r#"{"available_releases":[17,21],"available_lts_releases":[17,21]}"#)
+        .create();
+    let _a21 = latest(&mut server, "21")
+        .with_body(include_str!("fixtures/assets_latest.json"))
+        .create();
+    let _a17 = latest(&mut server, "17")
+        .with_status(500)
+        .with_body("boom")
+        .create();
+    let home = tempfile::tempdir().unwrap();
+
+    jlo(home.path())
+        .args(["list", "--json"])
+        .env("JLO_ADOPTIUM_API_URL", server.url())
+        .assert()
+        .failure()
+        .code(1)
+        .stdout("")
+        .stderr(predicate::str::contains("could not look up JDK 17"))
+        .stderr(predicate::str::contains("jlo list --offline --json"));
+
+    // Same catalogue, the table: still printed, the failure a warning.
+    jlo(home.path())
+        .arg("list")
+        .env("JLO_ADOPTIUM_API_URL", server.url())
+        .assert()
+        .success()
+        .stdout("  available:    21\n")
+        .stderr(predicate::str::contains("could not look up JDK 17"));
+}
+
 // -- the three tests that really talk to Adoptium --
 //
 // The fixtures can drift silently from the live API, and these are

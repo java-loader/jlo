@@ -985,13 +985,34 @@ pub(crate) fn print_lines(lines: impl IntoIterator<Item = String>) {
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
     for line in lines {
-        match writeln!(out, "{line}") {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => return,
-            Err(e) => {
-                error!("could not write to stdout: {e}");
-                exit(1);
-            }
+        if !stdout_ok(writeln!(out, "{line}")) {
+            return;
+        }
+    }
+}
+
+/// A `--json` document: built whole, then handed to stdout in one write with
+/// its newline, so nothing reaches stdout before the document is complete.
+pub(crate) fn print_document(document: &str) {
+    use std::io::Write;
+
+    let mut bytes = Vec::with_capacity(document.len() + 1);
+    bytes.extend_from_slice(document.as_bytes());
+    bytes.push(b'\n');
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    let _ = stdout_ok(out.write_all(&bytes).and_then(|()| out.flush()));
+}
+
+/// `false` on a closed pipe, which ends output quietly; any other write
+/// error exits 1.
+fn stdout_ok(result: std::io::Result<()>) -> bool {
+    match result {
+        Ok(()) => true,
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => false,
+        Err(e) => {
+            error!("could not write to stdout: {e}");
+            exit(1);
         }
     }
 }

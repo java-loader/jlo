@@ -10,6 +10,7 @@ mod conf;
 mod extract;
 mod home;
 mod install;
+mod json;
 mod request;
 mod resolve;
 mod selfupdate;
@@ -152,7 +153,7 @@ fn run() -> Result<(), CommandError> {
         // Kept in `cli` only so help and the completion scripts list it.
         cli::Command::Exec { .. } => unreachable!("exec is intercepted from raw argv before clap"),
         cli::Command::Current => cmd_current(),
-        cli::Command::List { offline } => cmd_list(&client, offline),
+        cli::Command::List { offline, json } => cmd_list(&client, offline, json),
         cli::Command::Install { versions } => cmd_install(&client, versions, wrapped),
         cli::Command::Update { versions } => cmd_update(&client, versions, wrapped),
         cli::Command::Remove {
@@ -269,30 +270,60 @@ fn cmd_exec(client: &AdoptiumClient, args: &[String]) -> Result<(), CommandError
     shellenv::exec_command(&java_home, &command)
 }
 
-fn cmd_list(client: &AdoptiumClient, offline: bool) -> Result<(), CommandError> {
+fn cmd_list(client: &AdoptiumClient, offline: bool, json: bool) -> Result<(), CommandError> {
     let store = JdkStore::discover()?;
     let installed = store.list().context("could not list installed JDKs")?;
 
     let active = store.active_version(&installed, active_java_home().as_deref());
     let groups = store::group_by_name(&installed);
-    let names = store
-        .foreign()
-        .context("could not list the other directories in the JDK store")?;
-    let foreign = ui::Foreign {
-        names: &names,
-        base: store.base(),
+    // Scanned before the fetch, as always: the table's footer reflects the
+    // store as listed, and a failed scan stops before any network warning.
+    // The document does not carry the foreign directories.
+    let foreign_names = if json {
+        Vec::new()
+    } else {
+        store
+            .foreign()
+            .context("could not list the other directories in the JDK store")?
     };
 
-    if offline {
-        ui::offline_list(&groups, active.as_deref(), &foreign);
+    let catalogue = if offline {
+        None
     } else {
-        let available = client.available_jdks().map_err(|e| {
+        Some(client.available_jdks().map_err(|e| {
             CommandError::with_hint(
                 e,
                 "Use 'jlo list --offline' to list the JDKs already installed.",
             )
-        })?;
-        ui::remote_list(&available, &groups, active.as_deref(), &foreign);
+        })?)
+    };
+
+    if json {
+        // The table carries on past a failed lookup; a document cannot say
+        // which of its `null`s is an error, so it is not printed at all.
+        if let Some(catalogue) = &catalogue
+            && !catalogue.failed.is_empty()
+        {
+            let n = catalogue.failed.len();
+            return Err(CommandError::with_hint(
+                anyhow!("{n} Adoptium lookup{} failed", ui::plural(n)),
+                "Use 'jlo list --offline --json' to list the JDKs already installed.",
+            ));
+        }
+        let doc = json::list(catalogue.as_ref(), &groups, active.as_deref(), &store)?;
+        ui::print_document(&doc);
+        return Ok(());
+    }
+
+    let foreign = ui::Foreign {
+        names: &foreign_names,
+        base: store.base(),
+    };
+    match &catalogue {
+        None => ui::offline_list(&groups, active.as_deref(), &foreign),
+        Some(catalogue) => {
+            ui::remote_list(&catalogue.jdks, &groups, active.as_deref(), &foreign);
+        }
     }
 
     Ok(())

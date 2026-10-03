@@ -200,6 +200,21 @@ pub(crate) struct RemoteJdk {
     pub request: Request,
 }
 
+/// What a catalogue lookup found, and what it could not ask. The listing
+/// renders `jdks` and carries on past a failure; `--json` needs the other two
+/// to tell "no build here" from "never asked" and to refuse an incomplete
+/// answer.
+#[derive(Debug)]
+pub(crate) struct Catalogue {
+    /// Newest first: the build of every name that has one here.
+    pub jdks: Vec<RemoteJdk>,
+    /// Every name whose lookup answered, with a build or without, in the order
+    /// asked.
+    pub asked: Vec<Request>,
+    /// Every name whose lookup failed; each has already been warned about.
+    pub failed: Vec<Request>,
+}
+
 /// The only point of contact with Adoptium. `base_url` covers the API;
 /// downloads follow whatever URL the metadata hands back.
 pub(crate) struct AdoptiumClient {
@@ -266,7 +281,7 @@ impl AdoptiumClient {
     /// The newest build of each released major and of each unreleased
     /// major's EA stream, newest first. One request per name, ~4s serially,
     /// hence the threads.
-    pub(crate) fn available_jdks(&self) -> anyhow::Result<Vec<RemoteJdk>> {
+    pub(crate) fn available_jdks(&self) -> anyhow::Result<Catalogue> {
         let releases = self.fetch_available_releases()?;
         let names: Vec<Request> = releases
             .available_releases
@@ -300,21 +315,33 @@ impl AdoptiumClient {
             });
 
         let mut jdks = Vec::new();
+        let mut asked = Vec::new();
+        let mut failed = Vec::new();
         for (name, result) in looked_up {
             match result {
-                Ok(Some(version)) => jdks.push(RemoteJdk {
-                    version,
-                    request: name,
-                }),
+                Ok(Some(version)) => {
+                    asked.push(name);
+                    jdks.push(RemoteJdk {
+                        version,
+                        request: name,
+                    });
+                }
                 // No build for this OS/architecture - nothing to offer.
-                Ok(None) => {}
+                Ok(None) => asked.push(name),
                 // One name failing should not cost the user the whole listing.
-                Err(e) => crate::ui::warning!("could not look up JDK {name}: {e:#}"),
+                Err(e) => {
+                    crate::ui::warning!("could not look up JDK {name}: {e:#}");
+                    failed.push(name);
+                }
             }
         }
 
         jdks.sort_by(|a, b| cmp_desc(&a.version, &b.version));
-        Ok(jdks)
+        Ok(Catalogue {
+            jdks,
+            asked,
+            failed,
+        })
     }
 
     /// Only the version: a pre-release with no binary for this platform still
@@ -667,7 +694,7 @@ mod tests {
         let _a25 = major_mock(&mut server, 25, 200, &asset_body("25.0.4+101.0.LTS"));
 
         let client = AdoptiumClient::new(server.url());
-        let jdks = client.available_jdks().unwrap();
+        let jdks = client.available_jdks().unwrap().jdks;
 
         let rows: Vec<_> = jdks
             .iter()
@@ -696,10 +723,13 @@ mod tests {
         let _a21 = major_mock(&mut server, 21, 200, &asset_body("21.0.12+101.0.LTS"));
 
         let client = AdoptiumClient::new(server.url());
-        let jdks = client.available_jdks().unwrap();
+        let catalogue = client.available_jdks().unwrap();
 
-        assert_eq!(jdks.len(), 1);
-        assert_eq!(jdks[0].version, "21.0.12+101.0.LTS");
+        assert_eq!(catalogue.jdks.len(), 1);
+        assert_eq!(catalogue.jdks[0].version, "21.0.12+101.0.LTS");
+        // Asked and answered "nothing here" - distinct from never asked.
+        assert_eq!(catalogue.asked, vec![request("16"), request("21")]);
+        assert!(catalogue.failed.is_empty());
     }
 
     #[test]
@@ -713,10 +743,13 @@ mod tests {
         let _a21 = major_mock(&mut server, 21, 200, &asset_body("21.0.12+101.0.LTS"));
 
         let client = AdoptiumClient::new(server.url());
-        let jdks = client.available_jdks().unwrap();
+        let catalogue = client.available_jdks().unwrap();
 
-        assert_eq!(jdks.len(), 1);
-        assert_eq!(jdks[0].version, "21.0.12+101.0.LTS");
+        assert_eq!(catalogue.jdks.len(), 1);
+        assert_eq!(catalogue.jdks[0].version, "21.0.12+101.0.LTS");
+        // A failure is not an answer: `--json` must be able to refuse.
+        assert_eq!(catalogue.asked, vec![request("21")]);
+        assert_eq!(catalogue.failed, vec![request("17")]);
     }
 
     const EA_FIXTURE: &str = include_str!("../tests/fixtures/feature_releases_28_ea.json");
@@ -770,7 +803,7 @@ mod tests {
         let _ea28 = ea_mock(&mut server, 28, 200, EA_FIXTURE);
 
         let client = AdoptiumClient::new(server.url());
-        let jdks = client.available_jdks().unwrap();
+        let jdks = client.available_jdks().unwrap().jdks;
 
         let rows: Vec<_> = jdks
             .iter()
@@ -803,7 +836,7 @@ mod tests {
         let _ea28 = ea_mock(&mut server, 28, 200, "[]");
 
         let client = AdoptiumClient::new(server.url());
-        let jdks = client.available_jdks().unwrap();
+        let jdks = client.available_jdks().unwrap().jdks;
 
         let versions: Vec<_> = jdks.iter().map(|j| j.version.as_str()).collect();
         assert_eq!(versions, vec!["26.0.1+9"]);

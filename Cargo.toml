@@ -27,7 +27,6 @@ assert_cmd = "2"
 mockito = "1"
 predicates = "3"
 serial_test = "4"
-serde_json = "1.0.145"
 # Already compiled as normal dependencies; repeated here so the integration
 # tests can build the release tarball `selfupdate` downloads and checksum it
 # the same way the release workflow does, instead of shelling out to tools
@@ -53,6 +52,9 @@ tempfile = "3.23.0"
 sha2 = "0.11.0"
 hex = "0.4.3"
 serde = { version = "1", features = ["derive"] }
+# `jlo list --json` / `jlo current --json`. Already compiled in through
+# ureq's `json` feature, so no new package.
+serde_json = "1.0.145"
 # Hand-written parser with no dependencies of its own. `semver_rs` pulled the
 # whole `regex` engine into the release binary just to compare version strings.
 semver = "1"

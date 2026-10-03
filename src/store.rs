@@ -282,6 +282,11 @@ impl JdkStore {
         self.base.join(entry_name(&jdk.version))
     }
 
+    /// The `JAVA_HOME` of `jdk`: what `jlo home` prints for it.
+    pub(crate) fn java_home(&self, jdk: &InstalledJdk) -> PathBuf {
+        java_home_in(&self.entry(jdk))
+    }
+
     /// The installed version `$JAVA_HOME` points at; `None` when it is unset
     /// or points outside the store.
     pub(crate) fn active_version(
