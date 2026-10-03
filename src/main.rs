@@ -152,7 +152,7 @@ fn run() -> Result<(), CommandError> {
         cli::Command::Home { version, offline } => cmd_home(&client, version, offline),
         // Kept in `cli` only so help and the completion scripts list it.
         cli::Command::Exec { .. } => unreachable!("exec is intercepted from raw argv before clap"),
-        cli::Command::Current => cmd_current(),
+        cli::Command::Current { json } => cmd_current(json),
         cli::Command::List { offline, json } => cmd_list(&client, offline, json),
         cli::Command::Install { versions } => cmd_install(&client, versions, wrapped),
         cli::Command::Update { versions } => cmd_update(&client, versions, wrapped),
@@ -334,7 +334,7 @@ fn cmd_list(client: &AdoptiumClient, offline: bool, json: bool) -> Result<(), Co
 ///
 /// Exit 1 exactly when stdout is empty, so `VER=$(jlo current)` never hands
 /// back an empty string over a success code.
-fn cmd_current() -> Result<(), CommandError> {
+fn cmd_current(json: bool) -> Result<(), CommandError> {
     let Some(java_home) = active_java_home() else {
         return Err(CommandError::with_hint(
             anyhow!("No JDK is active."),
@@ -344,7 +344,11 @@ fn cmd_current() -> Result<(), CommandError> {
 
     let store = JdkStore::discover()?;
     let active = resolve::provenance(&store, java_home, conf::find)?;
-    ui::print_lines([ui::provenance_line(&active)]);
+    if json {
+        ui::print_document(&json::current(&active)?);
+    } else {
+        ui::print_lines([ui::provenance_line(&active)]);
+    }
 
     // After the answer and with exit 0: "what is active" has an answer, and a
     // stale shell in a pinned project is when it is most wanted.

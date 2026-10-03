@@ -7,7 +7,9 @@
 //! when unknown.
 
 use crate::adoptium::Catalogue;
+use crate::conf::{Resolved, Source};
 use crate::request::Request;
+use crate::resolve::Active;
 use crate::shellenv::path_str;
 use crate::store::{InstalledJdk, JdkStore, NameGroup, Status, supersedes_every_install};
 use anyhow::Context;
@@ -137,14 +139,83 @@ fn build(
     })
 }
 
+#[derive(Serialize)]
+struct CurrentDoc {
+    name: Option<String>,
+    major: Option<i64>,
+    distribution: Option<&'static str>,
+    version: Option<String>,
+    /// `$JAVA_HOME` as the shell spells it: not normalized.
+    path: String,
+    source: Option<SourceDoc>,
+    pinned_elsewhere: Option<Pinned>,
+}
+
+/// The variant tags are `conf::Source`'s, committed as wire names.
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum SourceDoc {
+    ProjectConfig { path: String },
+    DefaultConfig { path: String },
+    NewestInstalled,
+    Foreign,
+}
+
+#[derive(Serialize)]
+struct Pinned {
+    name: String,
+    major: i64,
+    distribution: &'static str,
+    source: SourceDoc,
+}
+
+/// `jlo current --json`.
+pub(crate) fn current(active: &Active) -> anyhow::Result<String> {
+    let doc = CurrentDoc {
+        name: active.request.map(|request| request.to_string()),
+        major: active.request.map(|request| request.major),
+        distribution: active.request.map(|_| DISTRIBUTION),
+        version: active.version.clone(),
+        path: path_str(&active.path)?.to_string(),
+        source: active.source.as_ref().map(source).transpose()?,
+        pinned_elsewhere: active.pinned_elsewhere.as_ref().map(pinned).transpose()?,
+    };
+    Ok(serde_json::to_string(&doc)?)
+}
+
+fn source(source: &Source) -> anyhow::Result<SourceDoc> {
+    Ok(match source {
+        Source::ProjectConfig(path) => SourceDoc::ProjectConfig {
+            path: computed_path(path)?,
+        },
+        Source::DefaultConfig(path) => SourceDoc::DefaultConfig {
+            path: computed_path(path)?,
+        },
+        Source::NewestInstalled => SourceDoc::NewestInstalled,
+        Source::Foreign => SourceDoc::Foreign,
+    })
+}
+
+fn pinned(pinned: &Resolved) -> anyhow::Result<Pinned> {
+    Ok(Pinned {
+        name: pinned.request.to_string(),
+        major: pinned.request.major,
+        distribution: DISTRIBUTION,
+        source: source(&pinned.source)?,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::adoptium::RemoteJdk;
+    use crate::conf::{Resolved, Source};
     use crate::request::request;
+    use crate::resolve::Active;
     use crate::store::{entry_name, group_by_name};
     use serde_json::{Value, json};
     use std::path::Path;
+    use std::path::PathBuf;
     use tempfile::tempdir;
 
     fn store_holding(base: &Path, versions: &[&str]) -> JdkStore {
@@ -253,5 +324,79 @@ mod tests {
 
         assert_eq!(doc["names"][0]["offered"], Value::Null);
         assert_eq!(doc["names"][0]["update"], Value::Null);
+    }
+
+    fn current_doc(active: &Active) -> Value {
+        serde_json::from_str(&current(active).unwrap()).unwrap()
+    }
+
+    fn jlos(source: Option<Source>, pinned: Option<Resolved>) -> Active {
+        Active {
+            path: PathBuf::from("/s/jlo-temurin-21.0.5+11"),
+            version: Some("21.0.5+11".to_string()),
+            request: Some(request("21")),
+            source,
+            pinned_elsewhere: pinned,
+        }
+    }
+
+    /// `source.path` exists for the two config kinds and for no other.
+    #[test]
+    fn current_names_each_source_kind() {
+        let cases = [
+            (
+                Source::ProjectConfig(PathBuf::from("/p/.jlorc")),
+                json!({"kind": "project_config", "path": "/p/.jlorc"}),
+            ),
+            (
+                Source::DefaultConfig(PathBuf::from("/h/.jlo/default.jlorc")),
+                json!({"kind": "default_config", "path": "/h/.jlo/default.jlorc"}),
+            ),
+            (Source::NewestInstalled, json!({"kind": "newest_installed"})),
+        ];
+        for (source, expected) in cases {
+            assert_eq!(current_doc(&jlos(Some(source), None))["source"], expected);
+        }
+    }
+
+    #[test]
+    fn current_reports_a_jlo_jdk_and_the_pin_it_disagrees_with() {
+        let pinned = Resolved {
+            request: request("25"),
+            source: Source::ProjectConfig(PathBuf::from("/p/.jlorc")),
+        };
+        assert_eq!(
+            current_doc(&jlos(None, Some(pinned))),
+            json!({
+                "name": "21", "major": 21, "distribution": "temurin",
+                "version": "21.0.5+11", "path": "/s/jlo-temurin-21.0.5+11",
+                "source": null,
+                "pinned_elsewhere": {
+                    "name": "25", "major": 25, "distribution": "temurin",
+                    "source": {"kind": "project_config", "path": "/p/.jlorc"}
+                }
+            })
+        );
+    }
+
+    /// Not jlo's: what jlo cannot know is `null`, and the path is reported
+    /// exactly as the shell set it.
+    #[test]
+    fn current_reports_a_foreign_jdk_verbatim() {
+        let active = Active {
+            path: PathBuf::from("jdk/../jdk"),
+            version: None,
+            request: None,
+            source: Some(Source::Foreign),
+            pinned_elsewhere: None,
+        };
+        assert_eq!(
+            current_doc(&active),
+            json!({
+                "name": null, "major": null, "distribution": null,
+                "version": null, "path": "jdk/../jdk",
+                "source": {"kind": "foreign"}, "pinned_elsewhere": null
+            })
+        );
     }
 }

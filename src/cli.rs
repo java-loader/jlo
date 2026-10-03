@@ -284,7 +284,8 @@ legitimately disagree - a shell left over from before you entered the
 project, say - and saying so is most of what this command is for.
 
 One line on stdout names the active version and where it came from; any
-advisory goes to stderr. Exits 1 when there is no answer at all: no
+advisory goes to stderr. With --json, stdout is one JSON document
+instead, described in the README; its keys are only ever added to. Exits 1 when there is no answer at all: no
 JAVA_HOME, or a JAVA_HOME pointing at a jlo install that has since been
 removed.
 
@@ -292,7 +293,11 @@ Never touches the network, so there is no --offline flag to pass, and
 takes no version argument - current means the active one. To ask where
 some other version lives, see jlo home."
     )]
-    Current,
+    Current {
+        /// Print one JSON document instead of the line
+        #[arg(long)]
+        json: bool,
+    },
 
     #[command(
         visible_alias = "ls",

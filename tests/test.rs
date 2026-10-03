@@ -1548,6 +1548,35 @@ fn current_labels_the_project_config_against_the_logical_directory() {
         .stdout("25.0.4+101  (from ./.jlorc)\n");
 }
 
+/// From the `.jlorc`'s own directory, where the human line says `./.jlorc`:
+/// the document carries the absolute path a consumer elsewhere can open.
+#[test]
+fn current_json_names_the_project_config_by_its_absolute_path() {
+    let (home, project) = store_fixture(&["25.0.4+101"]);
+    std::fs::write(project.join(".jlorc"), "25\n").unwrap();
+    let jdk = jdk_entry(home.path(), "25.0.4+101");
+
+    let out = fixture_cmd(home.path(), &project, &["current", "--json"])
+        .env("PWD", &project)
+        .env("JAVA_HOME", &jdk)
+        .assert()
+        .success()
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+
+    let doc: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(doc["version"], "25.0.4+101");
+    assert_eq!(
+        doc["source"],
+        serde_json::json!({
+            "kind": "project_config",
+            "path": project.join(".jlorc").to_str().unwrap()
+        })
+    );
+}
+
 // -- jlo env's output channel --
 
 /// On success `env` writes export statements to stdout and nothing
