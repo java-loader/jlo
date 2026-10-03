@@ -34,10 +34,19 @@ pub(crate) enum Source {
 }
 
 impl Source {
-    /// Pure: [`find_in`] already shortened a project path against the cwd.
+    /// For people: a project config in the current directory reads
+    /// `./.jlorc`, one further up keeps its absolute path, so it is clear the
+    /// pin comes from somewhere else. Shortened against the same logical cwd
+    /// [`find`] walked from.
     pub(crate) fn label(&self) -> String {
         match self {
-            Self::ProjectConfig(path) | Self::DefaultConfig(path) => path.display().to_string(),
+            Self::ProjectConfig(path) => match logical_current_dir().ok() {
+                Some(cwd) => shorten_against(path, &cwd),
+                None => path.clone(),
+            }
+            .display()
+            .to_string(),
+            Self::DefaultConfig(path) => path.display().to_string(),
             Self::NewestInstalled => "the newest installed JDK".to_string(),
             Self::Foreign => "$JAVA_HOME".to_string(),
         }
@@ -47,13 +56,22 @@ impl Source {
 /// Cascade stages 1 and 2. `Ok(None)` when nothing is configured, which is
 /// where the later stages take over.
 pub(crate) fn find() -> anyhow::Result<Option<Resolved>> {
-    let physical = std::env::current_dir()
+    let cwd = logical_current_dir()
         .map_err(|e| anyhow!("could not determine the current directory: {e}"))?;
     find_in(
-        &logical_cwd(std::env::var_os("PWD").map(PathBuf::from), physical),
+        &cwd,
         std::env::home_dir().as_deref(),
         &default_jlorc_path()?,
     )
+}
+
+/// [`logical_cwd`] of this process.
+fn logical_current_dir() -> std::io::Result<PathBuf> {
+    let physical = std::env::current_dir()?;
+    Ok(logical_cwd(
+        std::env::var_os("PWD").map(PathBuf::from),
+        physical,
+    ))
 }
 
 /// The directory the user believes they are in (`$PWD`), not the one
@@ -100,7 +118,7 @@ fn find_in(
         let request = load(&path).map_err(|e| anyhow!("could not load configuration: {e}"))?;
         return Ok(Some(Resolved {
             request,
-            source: Source::ProjectConfig(shorten_against(&path, cwd)),
+            source: Source::ProjectConfig(path),
         }));
     }
 
@@ -538,11 +556,11 @@ mod tests {
             .unwrap()
             .expect("the project .jlorc answers");
         assert_eq!(resolved.request.to_string(), "21");
-        // Shortened against the cwd, so a status line reads `./.jlorc`
-        // rather than an absolute path the user never typed.
+        // Absolute: `--json` hands it out. `Source::label` shortens it for
+        // people.
         assert_eq!(
             resolved.source,
-            Source::ProjectConfig(PathBuf::from("./.jlorc"))
+            Source::ProjectConfig(project.join(".jlorc"))
         );
     }
 

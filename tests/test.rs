@@ -1445,6 +1445,25 @@ fn current_never_touches_the_network() {
         .stdout("25.0.4+101  (from the newest installed JDK)\n");
 }
 
+/// The pin's label is shortened against the directory the user is standing in
+/// as the shell spells it (`$PWD`), not as `getcwd` resolves it: inside a
+/// symlinked project the two differ, and only the logical one says
+/// `./.jlorc`.
+#[test]
+fn current_labels_the_project_config_against_the_logical_directory() {
+    let (home, project) = store_fixture(&["25.0.4+101"]);
+    std::fs::write(project.join(".jlorc"), "25\n").unwrap();
+    let link = home.path().join("link");
+    std::os::unix::fs::symlink(&project, &link).unwrap();
+
+    fixture_cmd(home.path(), &link, &["current"])
+        .env("PWD", &link)
+        .env("JAVA_HOME", jdk_entry(home.path(), "25.0.4+101"))
+        .assert()
+        .success()
+        .stdout("25.0.4+101  (from ./.jlorc)\n");
+}
+
 // -- jlo env's output channel --
 
 /// On success `env` writes export statements to stdout and nothing
