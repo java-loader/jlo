@@ -315,6 +315,25 @@ mod tests {
         );
     }
 
+    /// A macOS bundle's `JAVA_HOME` is `Contents/Home`, not the entry: the
+    /// path must be one a consumer can export as is.
+    #[test]
+    fn list_path_is_the_java_home_inside_a_bundle() {
+        let dir = tempdir().unwrap();
+        let entry = dir.path().join(entry_name("21.0.9+10"));
+        let bundled = entry.join("Contents").join("Home");
+        std::fs::create_dir_all(bundled.join("bin")).unwrap();
+        std::fs::write(bundled.join("bin").join("java"), "").unwrap();
+        let store = JdkStore::at(dir.path());
+
+        let doc = list_doc(None, &store, None);
+
+        assert_eq!(
+            doc["names"][0]["installed"][0]["path"],
+            bundled.to_str().unwrap()
+        );
+    }
+
     #[test]
     fn list_offline_knows_no_offer() {
         let dir = tempdir().unwrap();

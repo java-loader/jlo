@@ -126,7 +126,7 @@ jlo current --json | jq -r .version
 ```
 
 - `path` — `JAVA_HOME` exactly as set, so compare `version`, not paths, against `jlo list`.
-- `name`, `major`, `distribution`, `version` — `null` when `JAVA_HOME` is not a JDK J'Lo installed.
+- `name`, `major`, `distribution`, `version` — `null` when `JAVA_HOME` is not a JDK J'Lo manages.
 - `source` — why this JDK: `kind` is `project_config` or `default_config` (each with the file's absolute `path`),
   `newest_installed`, or `foreign` (`JAVA_HOME` set outside J'Lo); `null` when nothing accounts for it.
 - `pinned_elsewhere` — `null`, or `{name, major, distribution, source}` of a config that asks for a different JDK.
