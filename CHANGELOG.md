@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.9.0](https://github.com/java-loader/jlo/compare/jlo-bin-v0.8.0...jlo-bin-v0.9.0) (2026-10-19)
+
+
+### ⚠ BREAKING CHANGES
+
+* **install:** a failed name no longer stops `jlo install`/`jlo update` with several names; the names after it are installed and replaced too, and the run exits 1. A run stopped by SIGINT or SIGTERM now cleans up and exits 130 or 143 instead of dying of the signal.
+* **install:** report a store diff under one progress bar for the run
+* **list:** name each state in words and drop the section headings
+
+### Features
+
+* **current:** add --json, sharing list's vocabulary ([8212871](https://github.com/java-loader/jlo/commit/82128712f0b3516f9f025656bb1b6a0001167a61))
+* **install:** download the next JDK while the previous one unpacks ([8c6829e](https://github.com/java-loader/jlo/commit/8c6829e79426acd87aa7d62aba6840f83d445fd1))
+* **install:** report a store diff under one progress bar for the run ([ebb2af6](https://github.com/java-loader/jlo/commit/ebb2af62b1f5e7990c360621b2ac90d2736505d5))
+* **list:** add --json, one document per listing ([c489d3f](https://github.com/java-loader/jlo/commit/c489d3f79194d6b06cd9d5a5411ba33c13275090))
+* **list:** name each state in words and drop the section headings ([9f648ae](https://github.com/java-loader/jlo/commit/9f648aedcc47dd421c470f3249368b1abbbba99f))
+* **progress:** show the download in progress and the package unpacking ([29cbf58](https://github.com/java-loader/jlo/commit/29cbf5854c312f46ea4a04cc5cb3830073bca15b))
+* **ui:** bold the commands a hint quotes ([de38d98](https://github.com/java-loader/jlo/commit/de38d98f07d3fb5ad6113b1196ca5f91f88ec360))
+
+
+### Bug Fixes
+
+* **homebrew:** caveats print both profile lines as one block ([313bfe5](https://github.com/java-loader/jlo/commit/313bfe556f45fbd1191ea8a761fe9ce5fcb1b3ea))
+* **progress:** count downloads in the order they begin and fit 80 columns ([c1fb4f0](https://github.com/java-loader/jlo/commit/c1fb4f0c1669724df32a78c9f165a2e0c611fa2c))
+
 ## [0.8.0](https://github.com/java-loader/jlo/compare/jlo-bin-v0.7.0...jlo-bin-v0.8.0) (2026-09-29)
 
 
