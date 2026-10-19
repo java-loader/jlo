@@ -281,7 +281,8 @@ impl InstallUi {
     }
 
     /// The download in progress arrived whole and matched its checksum: its
-    /// line stays, full and still, until the next download begins.
+    /// line stays, full and still, until the next download begins or its
+    /// package starts unpacking.
     pub(crate) fn downloaded(&self) {
         let mut state = self.state();
         self.bar.set_position(state.length);
@@ -308,11 +309,18 @@ impl InstallUi {
     }
 
     /// The unpacking stage takes `job`'s package: its line appears above the
-    /// download's.
+    /// download's. With no download in progress the download line stands
+    /// full for this very package, so it goes, until `begin` brings it back.
     pub(crate) fn start_extract(&self, job: &Job) {
         let mut state = self.state();
         if !self.tty {
             return;
+        }
+        if state.current.is_none() && state.shown {
+            // Before the new line goes in: the other order draws a frame
+            // with the version on both lines.
+            state.shown = false;
+            self.region.remove(&self.bar);
         }
         let blank = " ".repeat(state.counter_width);
         let width = state.version_width.max(job.version.len());
@@ -1842,6 +1850,38 @@ mod tests {
         assert!(full[0].ends_with("100%  100/100 MiB"), "{full:#?}");
         settle();
         assert_eq!(screen.visible(), full, "the line still moves");
+    }
+
+    /// A package handed to the unpacking stage while no download is in
+    /// progress - always the last one - shows once: its extracting line
+    /// replaces the full bar instead of standing above it. The next
+    /// download, if any, brings the bar back below.
+    #[test]
+    fn a_package_that_unpacks_between_downloads_shows_once() {
+        let (ui, screen) = on_screen(&[("21.0.9+10", 200 * MIB), ("17.0.20+101", 100 * MIB)]);
+        let job = ui.begin(request("21"), "21.0.9+10", 200 * MIB);
+        ui.start_download(200 * MIB);
+        ui.downloaded();
+        settle();
+        screen.take_frames();
+
+        ui.start_extract(&job);
+        settle();
+
+        for frame in screen.take_frames() {
+            let rows = frame.iter().filter(|l| l.contains("21.0.9+10")).count();
+            assert!(rows <= 1, "the version shows twice: {frame:#?}");
+        }
+        let lines = screen.visible();
+        assert_eq!(lines.len(), 1, "{lines:#?}");
+        assert!(lines[0].ends_with("21.0.9+10    extracting"), "{lines:#?}");
+
+        ui.begin(request("17"), "17.0.20+101", 100 * MIB);
+        settle();
+        let lines = screen.visible();
+        assert_eq!(lines.len(), 2, "{lines:#?}");
+        assert!(lines[0].ends_with("extracting"), "{lines:#?}");
+        assert!(lines[1].contains("2/2 17.0.20+101"), "{lines:#?}");
     }
 
     /// A failed download leaves nothing of the region behind: its error
