@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.1](https://github.com/java-loader/jlo/compare/jlo-bin-v0.9.0...jlo-bin-v0.9.1) (2026-10-19)
+
+
+### Bug Fixes
+
+* **progress:** show a package once when it unpacks with no download in progress ([77d0a64](https://github.com/java-loader/jlo/commit/77d0a6489f08ab8e0ebe546443b906ad59125f06))
+
 ## [0.9.0](https://github.com/java-loader/jlo/compare/jlo-bin-v0.8.0...jlo-bin-v0.9.0) (2026-10-19)
 
 
