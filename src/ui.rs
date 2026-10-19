@@ -1880,7 +1880,7 @@ mod tests {
         settle();
 
         let frames = screen.take_frames();
-        assert!(!frames.is_empty());
+        assert_ne!(frames, Vec::<Vec<String>>::new());
         for line in frames.iter().flatten().filter(|line| line.contains("MiB")) {
             assert_eq!(
                 line.contains("21.0.9+10"),

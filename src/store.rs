@@ -1551,7 +1551,7 @@ mod tests {
     fn foreign_of_a_missing_store_is_empty() {
         let dir = tempdir().unwrap();
         let store = JdkStore::at(dir.path().join("absent"));
-        assert!(store.foreign().unwrap().is_empty());
+        assert_eq!(store.foreign().unwrap(), Vec::<String>::new());
     }
 
     /// A removal goes through a staging directory; a successful one must not
@@ -1598,7 +1598,7 @@ mod tests {
 
         let store = JdkStore::at(dir.path());
         assert!(store.list().unwrap().is_empty());
-        assert!(store.foreign().unwrap().is_empty());
+        assert_eq!(store.foreign().unwrap(), Vec::<String>::new());
         let remnants: Vec<PathBuf> = fs::read_dir(dir.path())
             .unwrap()
             .map(|e| e.unwrap().path())
@@ -2256,7 +2256,7 @@ mod tests {
                 "17.0.0+1"
             ]
         );
-        assert!(report.failures.is_empty());
+        assert_eq!(report.failures, Vec::<String>::new());
     }
 
     /// An earlier jlo's bare-version installs are older builds of a name
@@ -2269,7 +2269,7 @@ mod tests {
 
         let report = JdkStore::at(dir.path()).prune(None).unwrap();
 
-        assert!(report.removed.is_empty());
+        assert_eq!(report.removed, Vec::<String>::new());
         assert!(dir.path().join("21.0.1+12").exists());
     }
 
@@ -2306,7 +2306,7 @@ mod tests {
 
         // Newest first, the order `list` and `jlo list --offline` use.
         assert_eq!(report.removed, vec!["17.0.9+9", "17.0.2+8"]);
-        assert!(report.failures.is_empty());
+        assert_eq!(report.failures, Vec::<String>::new());
         assert!(!entry(dir.path(), "17.0.2+8").exists());
         assert!(!entry(dir.path(), "17.0.9+9").exists());
         assert!(entry(dir.path(), "21.0.3+9").exists());
@@ -2940,8 +2940,8 @@ mod tests {
             "{error:?}"
         );
         // Named in the error, so not skipped one by one as well.
-        assert!(run.names.is_empty());
-        assert!(out.is_empty());
+        assert_eq!(run.names, []);
+        assert_eq!(out, b"");
         assert!(fs::read_dir(dir.path()).unwrap().next().is_none());
     }
 
@@ -2972,7 +2972,7 @@ mod tests {
             format!("{:#}", error.error).contains("HTTP 500"),
             "{error:?}"
         );
-        assert!(run.names.is_empty());
+        assert_eq!(run.names, []);
         assert!(out.is_empty(), "the shell was told something");
         assert!(entry(dir.path(), "21.0.5+11").exists());
         assert!(!entry(dir.path(), "21.0.9+10").exists());

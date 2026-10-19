@@ -278,7 +278,7 @@ fn a_newer_release_runs_its_own_installer_pinned_to_the_tag() {
         before,
         "the installer did not publish a new binary"
     );
-    assert!(staging_leftovers(&install).is_empty());
+    assert_eq!(staging_leftovers(&install), Vec::<PathBuf>::new());
     release.assert();
 }
 

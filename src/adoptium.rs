@@ -729,7 +729,7 @@ mod tests {
         assert_eq!(catalogue.jdks[0].version, "21.0.12+101.0.LTS");
         // Asked and answered "nothing here" - distinct from never asked.
         assert_eq!(catalogue.asked, vec![request("16"), request("21")]);
-        assert!(catalogue.failed.is_empty());
+        assert_eq!(catalogue.failed, []);
     }
 
     #[test]
@@ -1047,8 +1047,8 @@ mod tests {
             "an EA build carries a prerelease: {}",
             metadata.semver
         );
-        assert!(!metadata.checksum.is_empty());
-        assert!(!metadata.download_link.is_empty());
+        assert_ne!(metadata.checksum, "");
+        assert_ne!(metadata.download_link, "");
     }
 
     /// An empty array is a 200, not an error: it means Adoptium has no EA
