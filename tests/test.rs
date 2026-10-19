@@ -1099,10 +1099,13 @@ fn a_wrapped_run_with_a_failed_name_still_moves_the_shell() {
 }
 
 /// A package server that sends the response head and the first `sent` bytes
-/// of a `length`-byte body, waits for the returned gate, sends `sent` bytes
-/// more and then stalls with the connection open: a download caught in the
-/// middle, which only a check before the next read can stop - finishing the
-/// body is not an option. Its URL is the first value.
+/// of a `length`-byte body, waits for the returned gate, then trickles more
+/// until the client hangs up, never the body's last byte: a download caught
+/// in the middle, which only a check before the next read can stop -
+/// finishing the body is not an option. Trickled, not one more batch: `kill`
+/// returns before the handler has run, so the gate can open first, and a
+/// client that drained a batch before the flag was set would sit in a read
+/// no data ever wakes. Its URL is the first value.
 fn gated_package_server(length: usize, sent: usize) -> (String, std::sync::mpsc::Sender<()>) {
     use std::io::{Read, Write};
 
@@ -1129,8 +1132,12 @@ fn gated_package_server(length: usize, sent: usize) -> (String, std::sync::mpsc:
         let _ = stream.write_all(&vec![0; sent]);
         let _ = stream.flush();
         let _ = opened.recv_timeout(std::time::Duration::from_secs(20));
-        let _ = stream.write_all(&vec![0; sent]);
-        let _ = stream.flush();
+        let chunk = [0; 8 << 10];
+        let mut written = sent;
+        while written + chunk.len() < length && stream.write_all(&chunk).is_ok() {
+            written += chunk.len();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
         std::thread::sleep(std::time::Duration::from_secs(30));
         drop(stream);
     });
