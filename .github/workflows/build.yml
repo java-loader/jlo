@@ -61,7 +61,7 @@ jobs:
       # the runner's $HOME, so it is a path that can be carried between runs:
       # without this every job downloads ~200 MB from Adoptium.
       - name: Cache the JDK store used by the real-network tests
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: target/tmp/network-home
           key: jdk-store-${{ matrix.os }}-${{ matrix.arch }}
