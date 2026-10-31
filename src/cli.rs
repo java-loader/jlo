@@ -269,8 +269,13 @@ the child only; the current shell is untouched.",
         override_usage = EXEC_USAGE
     )]
     Exec {
-        /// [VERSION] -- <COMMAND>...
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        // `help`, not a doc comment: rustdoc would read `[VERSION]` as a broken
+        // intra-doc link and `<COMMAND>` as an unclosed HTML tag.
+        #[arg(
+            trailing_var_arg = true,
+            allow_hyphen_values = true,
+            help = "[VERSION] -- <COMMAND>..."
+        )]
         args: Vec<String>,
     },
 
