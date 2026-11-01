@@ -6,6 +6,7 @@
 ### Bug Fixes
 
 * **progress:** show a package once when it unpacks with no download in progress ([77d0a64](https://github.com/java-loader/jlo/commit/77d0a6489f08ab8e0ebe546443b906ad59125f06))
+* **deps:** update webpki-root-certs to 1.0.11, which drops the distrusted emSign roots (RUSTSEC-2025-0141) ([8cd51d0](https://github.com/java-loader/jlo/commit/8cd51d00a54c5d9e7e94f2a6ea604f4eb9e15f42))
 
 ## [0.9.0](https://github.com/java-loader/jlo/compare/jlo-bin-v0.8.0...jlo-bin-v0.9.0) (2026-10-19)
 
