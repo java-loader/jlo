@@ -3,11 +3,12 @@
 # CI runs the same check on every push and pull request.
 
 [graph]
-# jlo ships Linux x86_64 and macOS arm64 binaries; ignore deps that only ever
-# get pulled in for other targets (Windows, wasm, ...) so their advisories and
-# licenses don't gate a release we never build.
+# jlo ships Linux x86_64/aarch64 and macOS arm64 binaries; ignore deps that
+# only ever get pulled in for other targets (Windows, wasm, ...) so their
+# advisories and licenses don't gate a release we never build.
 targets = [
     "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
     "aarch64-apple-darwin",
 ]
 
