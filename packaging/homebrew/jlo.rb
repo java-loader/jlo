@@ -1,7 +1,8 @@
 # The Homebrew formula, as the release workflow renders it into
-# java-loader/homebrew-tap: @VERSION@ and @SHA256@ are filled in from the
-# release. It lives here, not in the tap, because it calls the binary's hidden
-# install verb, whose arguments change with the binary.
+# java-loader/homebrew-tap, with the version and checksum filled in from the
+# release. The placeholders go unnamed here because the rendering would fill
+# them into this comment too. It lives here, not in the tap, because it calls
+# the binary's hidden install verb, whose arguments change with the binary.
 class Jlo < Formula
   desc "Install and switch Eclipse Temurin JDKs by major version"
   homepage "https://github.com/java-loader/jlo"
