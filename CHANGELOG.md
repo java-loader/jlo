@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.3](https://github.com/java-loader/jlo/compare/jlo-bin-v0.9.2...jlo-bin-v0.9.3) (2026-11-22)
+
+
+### Bug Fixes
+
+* **homebrew:** keep the rendered formula within brew style's line limit ([ec3fddd](https://github.com/java-loader/jlo/commit/ec3fddd3831f7469c8e3af54c7f0d5feba9b07ac))
+
 ## [0.9.2](https://github.com/java-loader/jlo/compare/jlo-bin-v0.9.1...jlo-bin-v0.9.2) (2026-11-22)
 
 
