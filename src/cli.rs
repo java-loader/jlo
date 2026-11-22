@@ -6,6 +6,60 @@
 use crate::ui;
 use clap::{Parser, Subcommand, ValueEnum};
 
+// Help paragraphs that several commands share. Macros rather than consts,
+// because the `long_about` attributes join them with `concat!`, which only
+// takes literals.
+
+macro_rules! resolution_steps {
+    () => {
+        "  1. the nearest .jlorc at or above the current directory
+  2. ~/.jlo/default.jlorc
+  3. the newest JDK already installed
+  4. the latest release, which is downloaded"
+    };
+}
+
+macro_rules! omitted_version {
+    () => {
+        concat!(
+            "When VERSION is omitted, it resolves in four steps:\n\n",
+            resolution_steps!()
+        )
+    };
+}
+
+macro_rules! version_grammar {
+    () => {
+        "VERSION is a major (21) or a pre-release stream (28-ea), not an
+exact build: 21, not 21.0.5."
+    };
+}
+
+macro_rules! json_output {
+    () => {
+        "With --json, stdout is one JSON document instead, described in
+JSON.md in the jlo repository; its keys are only ever added to."
+    };
+}
+
+macro_rules! install_and_update {
+    () => {
+        "Downloads the latest build Adoptium offers of every name given. A
+name already on that build or a newer one is reported and left alone -
+never moved back; one Adoptium has no build of for this machine is
+skipped with a warning.
+
+install and update are one operation. They differ only when no version
+is given: install resolves one version the way jlo env does, while
+update takes every installed name, pre-release streams included.
+
+The new build replaces the old one: J'Lo keeps one build per name, so
+each download deletes the builds it supersedes - including the one
+JAVA_HOME points at, in which case this shell moves to the new build.
+Other shells still on it need 'jlo env' again."
+    };
+}
+
 /// `jlo -h` and a bare `jlo`: enough to get going.
 fn after_help() -> String {
     format!(
@@ -32,10 +86,12 @@ pre-release stream (28-ea):
   jlo init <VERSION>
 
 When VERSION is omitted, env, home, exec and install resolve it in four
-steps: the nearest .jlorc at or above the current directory, then
-~/.jlo/default.jlorc, then the newest JDK already installed, then the latest
-release, which is downloaded. --offline stops after the third step rather
-than downloading. update instead takes every installed name.
+steps:
+
+{steps}
+
+--offline stops after the third step rather than downloading. update
+instead takes every installed name.
 
 {examples}
 
@@ -46,6 +102,7 @@ than downloading. update instead takes every installed name.
              go to the IntelliJ IDEA directory
              (~/Library/Java/JavaVirtualMachines on macOS, ~/.jdks
              elsewhere), which is not configurable.",
+        steps = resolution_steps!(),
         examples = examples(EXAMPLES.iter()),
         environment = ui::help_heading("Environment:"),
     )
@@ -53,6 +110,10 @@ than downloading. update instead takes every installed name.
 
 /// `jlo exec`'s usage line, shared by `-h` and the argument error's hint.
 pub(crate) const EXEC_USAGE: &str = "jlo exec [VERSION] -- <COMMAND> [ARGS]...";
+
+/// The help of the VERSION argument that `env`, `home` and `install` resolve.
+const RESOLVED_VERSION_HELP: &str = "Java version: a major (21) or a pre-release stream (28-ea). \
+Default: .jlorc, ~/.jlo/default.jlorc, the newest installed JDK, then the latest release";
 
 /// Command, what it does, and whether the short help shows it too.
 const EXAMPLES: &[(&str, &str, bool)] = &[
@@ -188,7 +249,8 @@ pub(crate) enum Command {
     #[command(
         visible_alias = "use",
         about = "Set JAVA_HOME and PATH in the current shell",
-        long_about = "\
+        long_about = concat!(
+            "\
 Set JAVA_HOME and PATH in the current shell
 
 Prints export statements on stdout; the jlo shell function sources
@@ -200,23 +262,27 @@ the JDK is there, exit status 1 and no exports if it is not, and no
 network access either way. That is how the autoload hook calls it, so
 entering a directory never starts a download.
 
-When VERSION is omitted, it resolves in four steps: the nearest
-.jlorc at or above the current directory, then ~/.jlo/default.jlorc,
-then the newest JDK already installed, then the latest release, which
-is downloaded. The third step does not ask Adoptium whether something
-newer exists, so a machine holding only Java 17 resolves to 17.
---offline stops after that step instead of downloading. A major
-version (21) or a pre-release stream (28-ea) is accepted, not an
-exact build: 21, not 21.0.5.
+",
+            omitted_version!(),
+            "
+
+The third step does not ask Adoptium whether something newer exists,
+so a machine holding only Java 17 resolves to 17. --offline stops
+after that step instead of downloading.
+
+",
+            version_grammar!(),
+            "
 
 On success stdout carries the export statements and nothing else.
 Anything else jlo has to say - download progress, a warning - goes to
 stderr, where the shell will not try to execute it. To see which JDK
 is active and where the version came from, run jlo current - it starts
 from the live JAVA_HOME, so it can also say when the two disagree."
+        )
     )]
     Env {
-        /// Java version: a major (21) or a pre-release stream (28-ea). Default: .jlorc, the newest installed JDK, then the latest release
+        #[arg(help = RESOLVED_VERSION_HELP)]
         version: Option<String>,
 
         /// Only look at installed JDKs; never download, never touch the network
@@ -226,7 +292,8 @@ from the live JAVA_HOME, so it can also say when the two disagree."
 
     #[command(
         about = "Print the JAVA_HOME path for a version",
-        long_about = "\
+        long_about = concat!(
+            "\
 Print the JAVA_HOME path for a version
 
 Writes the path and nothing else to stdout, so $(jlo home 21) stays
@@ -237,14 +304,14 @@ Pass --offline to answer from what is already installed instead: the
 path if it is there, exit status 1 if it is not, and no network access
 either way.
 
-When VERSION is omitted, it resolves in four steps: the nearest
-.jlorc at or above the current directory, then ~/.jlo/default.jlorc,
-then the newest JDK already installed, then the latest release, which
-is downloaded. A major version (21) or a pre-release stream (28-ea)
-is accepted, not an exact build: 21, not 21.0.5."
+",
+            omitted_version!(),
+            "\n\n",
+            version_grammar!()
+        )
     )]
     Home {
-        /// Java version: a major (21) or a pre-release stream (28-ea). Default: .jlorc, the newest installed JDK, then the latest release
+        #[arg(help = RESOLVED_VERSION_HELP)]
         version: Option<String>,
 
         /// Only look at installed JDKs; never download, never touch the network
@@ -281,7 +348,8 @@ the child only; the current shell is untouched.",
 
     #[command(
         about = "Show which JDK is active in this shell, and why",
-        long_about = "\
+        long_about = concat!(
+            "\
 Show which JDK is active in this shell, and why
 
 Starts from the live JAVA_HOME, not from .jlorc. The two can
@@ -289,14 +357,18 @@ legitimately disagree - a shell left over from before you entered the
 project, say - and saying so is most of what this command is for.
 
 One line on stdout names the active version and where it came from; any
-advisory goes to stderr. With --json, stdout is one JSON document
-instead, described in JSON.md in the jlo repository; its keys are only ever
-added to. Exits 1 when there is no answer at all: no JAVA_HOME, or a
-JAVA_HOME pointing at a jlo install that has since been removed.
+advisory goes to stderr. Exits 1 when there is no answer at all: no
+JAVA_HOME, or a JAVA_HOME pointing at a jlo install that has since been
+removed.
+
+",
+            json_output!(),
+            "
 
 Never touches the network, so there is no --offline flag to pass, and
 takes no version argument - current means the active one. To ask where
 some other version lives, see jlo home."
+        )
     )]
     Current {
         /// Print one JSON document instead of the line
@@ -307,7 +379,8 @@ some other version lives, see jlo home."
     #[command(
         visible_alias = "ls",
         about = "Show available and installed JDKs",
-        long_about = "\
+        long_about = concat!(
+            "\
 Show available and installed JDKs
 
 One row per name (25, 28-ea), with its state in words: active, update,
@@ -319,8 +392,9 @@ A JDK is a directory named jlo-temurin-<version> in the install
 directory, however it got there. Every other directory there is listed
 after not managed: - jlo never uses, updates or deletes it.
 
-With --json, stdout is one JSON document instead, described in
-JSON.md in the jlo repository; its keys are only ever added to."
+",
+            json_output!()
+        )
     )]
     List {
         /// List only what is installed; never touch the network
@@ -334,56 +408,46 @@ JSON.md in the jlo repository; its keys are only ever added to."
 
     #[command(
         about = "Install JDKs; without a version, the one jlo env would use",
-        long_about = "\
+        long_about = concat!(
+            "\
 Install JDKs; without a version, the one jlo env would use
 
-Downloads the latest build Adoptium offers of every name given - a
-major (21) or a pre-release stream (28-ea), not an exact build: 21, not
-21.0.5. A name already on that build or a newer one is reported and
-left alone - never moved back; one Adoptium has no build of for this
-machine is skipped with a warning.
+",
+            install_and_update!(),
+            "
 
-install and update are one operation. They differ only when no version
-is given: install resolves one in four steps - the nearest .jlorc at or
-above the current directory, then ~/.jlo/default.jlorc, then the newest
-JDK already installed, then the latest release - while update takes
-every installed name.
+",
+            version_grammar!(),
+            "
 
-The new build replaces the old one: J'Lo keeps one build per name, so
-each download deletes the builds it supersedes - including the one
-JAVA_HOME points at, in which case this shell moves to the new build.
-Other shells still on it need 'jlo env' again. Otherwise no shell is
-touched.
+",
+            omitted_version!(),
+            "
 
 The usual route is jlo env, which switches the current shell and
 downloads the JDK on demand if it is missing, so an explicit install
 is for the cases that come before that - warming a CI cache, preparing
 for offline work, or seeding a machine without switching it."
+        )
     )]
     Install {
-        /// Java version: a major (21) or a pre-release stream (28-ea). Default: .jlorc, the newest installed JDK, then the latest release
+        #[arg(help = RESOLVED_VERSION_HELP)]
         versions: Vec<String>,
     },
 
     #[command(
         about = "Update JDKs; without a version, every installed one",
-        long_about = "\
+        long_about = concat!(
+            "\
 Update JDKs; without a version, every installed one
 
-Downloads the latest build Adoptium offers of every name given - a
-major (21) or a pre-release stream (28-ea), not an exact build: 21, not
-21.0.5. A name already on that build or a newer one is reported and
-left alone - never moved back; one Adoptium has no build of for this
-machine is skipped with a warning.
+",
+            install_and_update!(),
+            "
 
-install and update are one operation. They differ only when no version
-is given: update takes every installed name, pre-release streams
-included, while install resolves one version the way jlo env does.
-
-The new build replaces the old one: J'Lo keeps one build per name, so
-each download deletes the builds it supersedes - including the one
-JAVA_HOME points at, in which case this shell moves to the new build.
-Other shells still on it need 'jlo env' again."
+",
+            version_grammar!()
+        )
     )]
     Update {
         /// Java version: a major (21) or a pre-release stream (28-ea). Default: every installed name
@@ -427,14 +491,21 @@ rule is the selector."
         superseded: bool,
     },
 
-    /// Write .jlorc pinning this project's Java version
-    ///
-    /// A major version (21) or a pre-release stream (28-ea), not an exact
-    /// build: 21, not 21.0.5.
-    ///
-    /// --global writes ~/.jlo/default.jlorc instead: the version jlo env
-    /// falls back to when no .jlorc is found, ahead of the newest JDK
-    /// already installed.
+    #[command(
+        about = "Write .jlorc pinning this project's Java version",
+        long_about = concat!(
+            "\
+Write .jlorc pinning this project's Java version
+
+",
+            version_grammar!(),
+            "
+
+--global writes ~/.jlo/default.jlorc instead: the version jlo env
+falls back to when no .jlorc is found, ahead of the newest JDK
+already installed."
+        )
+    )]
     Init {
         // No default: a committed .jlorc pins a choice, not whatever was
         // newest. A default can be added after 1.0; taking one back cannot.
