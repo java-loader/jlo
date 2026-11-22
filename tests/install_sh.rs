@@ -339,7 +339,7 @@ fn generated_entries_parse_under_every_supported_shell() {
 
 /// The printed instructions are the whole manual step: three lines the user
 /// adds to their profile, and one that loads jlo into the shell they are
-/// sitting in. If that shape grows, the regression is user-visible.
+/// sitting in.
 #[test]
 fn the_printed_snippet_is_three_profile_lines_and_one_source_line() {
     let (dir, out) = install(None);
@@ -409,9 +409,8 @@ fn add_to(home: &Path, file: &str, lines: &[String]) {
 /// The PATH hint exists for shells that never read the interactive profile.
 /// Its line, added to `~/.zshenv` as printed, has to put `jlo` on PATH for a
 /// clean `zsh -c` - and for one nested in it, exactly once - and it must
-/// *append*: the old hint prepended, so a revert to that shape is plausible
-/// and has to fail this test - hence checking that `~/.local/bin` lands last,
-/// not merely that it is present.
+/// *append*, so the test checks that `~/.local/bin` lands last, not merely
+/// that it is present.
 #[test]
 fn the_printed_path_line_reaches_a_non_interactive_zsh() {
     if skip_missing("the_printed_path_line_reaches_a_non_interactive_zsh", "zsh") {
@@ -568,8 +567,7 @@ fn the_installer_prints_a_line_that_activates_the_current_shell() {
 ///
 /// Indentation is invisible in review and fatal in use: double-click and
 /// shift-select take the leading spaces with them, so an indented command is
-/// one that gets pasted broken. The block was indented four spaces for four
-/// releases and nobody noticed.
+/// one that gets pasted broken.
 ///
 /// Colour is forced on for half of this, because that is the shape the check
 /// is easiest to get wrong in: with escape bytes in front of it, a command

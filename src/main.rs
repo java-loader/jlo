@@ -530,9 +530,6 @@ mod tests {
     }
 
     // -- cmd_* error paths --
-    //
-    // These used to be reachable only by spawning the binary, because each one
-    // ended in `exit(1)`.
 
     #[test]
     fn cmd_env_rejects_an_unsupported_version() {

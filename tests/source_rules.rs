@@ -1,6 +1,6 @@
-//! Guards over the source tree itself, for two rules the compiler cannot see.
+//! Guards over the source tree itself, for rules the compiler cannot see.
 //!
-//! Both are decisions whose failure mode is silent: a `println!` on an
+//! The first two are decisions whose failure mode is silent: a `println!` on an
 //! untested path is sourced by the user's shell, and a `style()` call outside
 //! `ui.rs` gives one command a palette nobody agreed to. Individual commands
 //! assert `stdout("")` and individual lines assert their colours, but neither
@@ -91,10 +91,9 @@ fn writes_to_stdout(code: &str) -> bool {
 /// Styling is chosen in `ui.rs` and nowhere else. Commands
 /// say what a line *is* by calling a named helper; they never pick a colour.
 ///
-/// Indicatif templates count, and are named here explicitly because that is
-/// where the fourth palette hid last time: a template string is styling by
-/// another name, and `{spinner:.cyan}` reads as configuration rather than as
-/// a colour decision.
+/// Indicatif templates count: a template string is styling by another name,
+/// and `{spinner:.cyan}` reads as configuration rather than as a colour
+/// decision.
 #[test]
 fn styling_is_chosen_only_in_ui_rs() {
     const MARKERS: [&str; 6] = [
@@ -122,4 +121,71 @@ fn styling_is_chosen_only_in_ui_rs() {
         found.is_empty(),
         "styling belongs in ui.rs behind a named helper (ADR-0007 rule 6):\n{found:#?}"
     );
+}
+
+/// Every `.rs` file under `src/` and `tests/` except this one, as
+/// (path, source).
+fn sources_and_tests() -> Vec<(String, String)> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut out = Vec::new();
+    let mut dirs = vec![root.join("src"), root.join("tests")];
+    while let Some(dir) = dirs.pop() {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                dirs.push(path);
+            } else if path.extension().and_then(|e| e.to_str()) == Some("rs")
+                && !path.ends_with("tests/source_rules.rs")
+            {
+                let name = path.strip_prefix(root).unwrap().display().to_string();
+                out.push((name, std::fs::read_to_string(&path).unwrap()));
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// A comment explains the code as it is now. How it came to be - the bug,
+/// the earlier behaviour - belongs in the commit message, where it stays
+/// attached to the change instead of aging beside the code.
+#[test]
+fn comments_describe_the_present() {
+    const HISTORY: [&str; 5] = [
+        "used to",
+        "previously",
+        "formerly",
+        "last time",
+        "nobody noticed",
+    ];
+
+    let mut found = Vec::new();
+    for (name, source) in sources_and_tests() {
+        for (i, line) in source.lines().enumerate() {
+            let Some((_, comment)) = line.split_once("//") else {
+                continue;
+            };
+            let comment = comment.to_lowercase();
+            if let Some(word) = HISTORY.iter().find(|w| contains_phrase(&comment, w)) {
+                found.push(format!("{name}:{}: {word:?} in {}", i + 1, line.trim()));
+            }
+        }
+    }
+
+    assert!(
+        found.is_empty(),
+        "comments describe the code as it is; move the history into the commit \
+         message:\n{found:#?}"
+    );
+}
+
+/// `phrase` in `text` as whole words: "used to" is not in "refused to".
+fn contains_phrase(text: &str, phrase: &str) -> bool {
+    text.match_indices(phrase).any(|(at, _)| {
+        let before = text[..at].chars().next_back();
+        let after = text[at + phrase.len()..].chars().next();
+        [before, after]
+            .iter()
+            .all(|c| c.is_none_or(|c| !c.is_alphanumeric()))
+    })
 }

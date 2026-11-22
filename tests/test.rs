@@ -38,7 +38,7 @@ fn fixture_cmd(home: &std::path::Path, project: &std::path::Path, args: &[&str])
     cmd
 }
 
-/// The names jlo used to have, and the two it hides.
+/// The retired command names, and the two hidden ones.
 ///
 /// `clean` became `prune`, `prune` became `jlo remove --superseded`,
 /// `default` folded into `jlo init --global`, `version` became `-V`, and
@@ -476,9 +476,8 @@ fn list_remote_shows_available_versions() {
         .stderr("");
 }
 
-/// The case `jlo remove 17.0.11+10` had nowhere to read its argument from:
-/// a build older than the newest of its name used to collapse into a
-/// parenthetical on the row above it. It is an indented line of its own, and
+/// A build older than the newest of its name gets an indented line of its
+/// own, so `jlo remove 17.0.11+10` has a place to read its argument from, and
 /// the `active` word follows it there.
 #[test]
 fn list_remote_gives_a_superseded_build_its_own_line() {
@@ -610,11 +609,9 @@ fn list_json_refuses_an_incomplete_catalogue() {
 // the only thing that would notice. Everything else runs against mockito or a
 // dead port.
 //
-// They install a real ~200 MB JDK, so `$HOME` has to move: `JdkStore::base()`
-// is $HOME-derived, and without this they wrote into the
-// developer's own ~/Library/Java/JavaVirtualMachines and read back whatever
-// was already there - `cargo test --release` mutated the machine, and the
-// result depended on what had been installed beforehand.
+// They install a real ~200 MB JDK into a `$HOME` of their own:
+// `JdkStore::base()` is $HOME-derived, and the developer's own
+// ~/Library/Java/JavaVirtualMachines must stay untouched.
 //
 // The replacement is one directory under `target/`, not a fresh temp dir per
 // test: all three share it, so a run downloads at most once, and CI can cache
@@ -752,9 +749,7 @@ fn exec() {
 
     // Only the *first* `--` is the separator; a second, user-typed `--`
     // belongs to the command and must survive - whether or not a version
-    // precedes it. Both try to execute a program literally named "--"
-    // (regression test: the version-omitted path used to drop the second
-    // `--`).
+    // precedes it. Both try to execute a program literally named "--".
     let mut cmd = jlo();
     cmd.args([
         "exec",
@@ -1035,7 +1030,7 @@ fn staging_left(store: &std::path::Path) -> Vec<String> {
         .collect()
 }
 
-/// A name that fails no longer stops the run. 21 is processed first and
+/// A name that fails does not stop the run. 21 is processed first and
 /// fails - its checksum, or with a matching checksum its unpacking - and 17
 /// still installs. The failure has its own line naming 21, nothing of 21's
 /// attempt is left in the store, and the exit status says not everything
@@ -1290,8 +1285,8 @@ fn not_offered_mock(server: &mut mockito::ServerGuard, major: &str) -> mockito::
     latest(server, major).with_body("[]").create()
 }
 
-/// On Apple silicon `jlo install 8 21` used to stop at 8 and fail. A name
-/// Adoptium does not offer is skipped with a warning, and the others still go.
+/// A name Adoptium does not offer (8 on Apple silicon) is skipped with a
+/// warning, and the others still go.
 #[test]
 fn a_name_adoptium_does_not_offer_is_skipped_not_a_stop() {
     let mut server = mockito::Server::new();
@@ -1587,11 +1582,8 @@ fn current_json_names_the_project_config_by_its_absolute_path() {
 // -- jlo env's output channel --
 
 /// On success `env` writes export statements to stdout and nothing
-/// anywhere else. `--verbose` used to add a stderr line here; it is gone,
-/// because `jlo current` answers the same question from the live `JAVA_HOME`
-/// and can therefore also report drift. What must not come back is a second
-/// writer on this path - the autoload hook runs it on every new shell and
-/// every cd.
+/// anywhere else: the autoload hook runs it on every new shell and every cd.
+/// `jlo current` is the command that reports what is active.
 #[test]
 fn env_writes_exports_to_stdout_and_nothing_to_stderr() {
     let (home, project) = store_fixture(&["25.0.4+101"]);

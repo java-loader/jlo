@@ -539,9 +539,8 @@ mod tests {
 
     // -- find_in: the walk, plus where the answer came from --
     //
-    // Same temp-dir fixtures as the `find_project_config` tests above; the
-    // only addition is that the `Source` variant is asserted, because that is
-    // the fact the bare `String` used to drop.
+    // Same temp-dir fixtures as the `find_project_config` tests above, plus an
+    // assertion on the `Source` variant.
 
     #[test]
     fn find_in_reports_a_project_config_as_its_source() {

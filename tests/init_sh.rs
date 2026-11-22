@@ -89,10 +89,9 @@ fn run_in(sh: &str, home: &Path, body: &str) -> Output {
 // The exports must actually land in the calling shell, under every shell
 // ---------------------------------------------------------------------------
 
-/// The regression this file exists for. `. <(jlo-bin env)` silently set
-/// nothing under bash 3.2 - the shell opened the `/dev/fd/N` pipe, read no
-/// seekable content, and returned 0 - so `jlo env` was a no-op for every macOS
-/// user on the system bash. Capture-then-eval works in every supported shell.
+/// The case this file exists for. `. <(jlo-bin env)` sets nothing under
+/// bash 3.2, macOS's system bash, and still returns 0; capture-then-eval works
+/// in every supported shell.
 #[test]
 fn env_exports_reach_the_calling_shell() {
     for sh in shells("env_exports_reach_the_calling_shell", INTERPRETERS) {
@@ -460,7 +459,7 @@ fn a_marked_payload_is_evaluated_without_interactive_comments() {
 }
 
 /// Help and version text is on stdout without the marker: printed, never
-/// evaluated, status 0 - the argument scan that used to guard this is gone.
+/// evaluated, status 0.
 /// A bare `--help` takes the other branch, and has to reach the terminal too.
 #[test]
 fn help_through_the_eval_branch_is_printed_not_evaluated() {

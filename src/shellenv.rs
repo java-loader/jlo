@@ -432,13 +432,11 @@ mod tests {
         assert_eq!(exec_failure_code(ErrorKind::Other), 127);
     }
 
-    /// `env::var(..).unwrap_or_default()` used to sit where `current_path`
-    /// does, and it maps an undecodable `PATH` to the empty string - which
-    /// `update_path` reads as "nothing on PATH". `jlo env` then emitted
-    /// `export PATH='<jdk>/bin:'`: the user's whole PATH gone, and a trailing
-    /// empty component that makes the shell search the working directory.
-    /// Neither the compiler nor clippy sees the difference between the two
-    /// `VarError` arms, which is the whole reason this is pinned.
+    /// An undecodable `PATH` must not read as an empty one: `update_path`
+    /// would then emit `export PATH='<jdk>/bin:'`, dropping the user's whole
+    /// PATH and adding an empty entry that searches the working directory.
+    /// `env::var(..).unwrap_or_default()` merges the two `VarError` arms
+    /// without the compiler or clippy noticing.
     #[test]
     fn an_empty_path_is_not_the_same_as_an_undecodable_one() {
         // Unset is genuinely empty, and the JDK's bin is the whole answer.
@@ -535,8 +533,7 @@ mod tests {
     /// An empty `PATH` must not become `<jdk>/bin:`. The trailing separator
     /// leaves an empty entry, and an empty `PATH` entry is the working
     /// directory - so the shell would search whatever directory the user is
-    /// standing in, ahead of nothing at all. The assertion here used to spell
-    /// out the wrong answer.
+    /// standing in, ahead of nothing at all.
     #[test]
     fn update_path_handles_empty_path() {
         let jdk_base = Path::new("/home/u/.jdks");
@@ -546,8 +543,8 @@ mod tests {
 
     /// A `java_path` carrying a `:` is two `PATH` entries once the shell reads
     /// it back, and the second of them is relative. `join_paths` refuses it -
-    /// but only if it is reached, and an empty `PATH` used to return before
-    /// the join, so the check applied to some callers and not others.
+    /// but only if it is reached, so an empty `PATH` has to go through the
+    /// join as well.
     #[test]
     fn a_colon_in_the_jdk_path_is_refused_whether_or_not_path_is_set() {
         let jdk_base = Path::new("/home/u/.jdks");

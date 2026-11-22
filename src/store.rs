@@ -2063,10 +2063,9 @@ mod tests {
     }
 
     /// Two builds of one patch differ only in build metadata, which semver
-    /// leaves out of precedence. `prune` used to sort them Equal and delete
-    /// whichever `read_dir` happened to yield second - a coin toss over a JDK,
-    /// and one that took the *newer* build about half the time. Either input
-    /// order gives the same answer.
+    /// leaves out of precedence. Sorted as Equal, `prune` would delete
+    /// whichever `read_dir` yields second, so the build metadata has to
+    /// decide. Either input order gives the same answer.
     #[test]
     fn the_lower_build_of_one_patch_is_superseded() {
         for order in [
