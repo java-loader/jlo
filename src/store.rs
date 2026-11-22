@@ -179,12 +179,12 @@ pub(crate) fn group_by_name(installed: &[InstalledJdk]) -> Vec<NameGroup<'_>> {
         .collect()
 }
 
-/// The newest *released* build at or above the version floor: cascade stage 3.
+/// The newest *released* build at or above the version floor: resolution step 3.
 ///
 /// GA only: a machine that once tried `28-ea` must not answer a bare `jlo env`
 /// with a beta. Below the floor is a version that cannot be asked for.
 ///
-/// Takes the list so `jlo current` cannot answer differently from the cascade.
+/// Takes the list so `jlo current` cannot answer differently from resolution.
 /// `installed` is newest first, as [`JdkStore::list`] leaves it.
 pub(crate) fn newest_ga(installed: &[InstalledJdk]) -> Option<&InstalledJdk> {
     installed
@@ -1779,7 +1779,7 @@ mod tests {
 
     // -- newest_ga_request --
 
-    /// Cascade stage 3's input. A machine that once tried a pre-release must
+    /// The input of resolution step 3. A machine that once tried a pre-release must
     /// not have that build become the answer to a bare `jlo env`.
     #[test]
     fn newest_ga_request_ignores_pre_releases() {
@@ -1802,7 +1802,7 @@ mod tests {
     }
 
     /// The version floor sits inside the selector, so `jlo current` cannot
-    /// answer differently from the cascade.
+    /// answer differently from resolution.
     #[test]
     fn newest_ga_request_skips_a_store_below_the_floor() {
         let dir = tempdir().unwrap();

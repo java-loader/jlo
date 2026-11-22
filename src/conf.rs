@@ -53,8 +53,8 @@ impl Source {
     }
 }
 
-/// Cascade stages 1 and 2. `Ok(None)` when nothing is configured, which is
-/// where the later stages take over.
+/// Resolution steps 1 and 2. `Ok(None)` when nothing is configured, which is
+/// where the later steps take over.
 pub(crate) fn find() -> anyhow::Result<Option<Resolved>> {
     let cwd = logical_current_dir()
         .map_err(|e| anyhow!("could not determine the current directory: {e}"))?;
@@ -98,7 +98,7 @@ fn logical_cwd(pwd: Option<PathBuf>, physical: PathBuf) -> PathBuf {
     }
 }
 
-/// The whole cascade ran dry, which only `--offline` reaches. No configured
+/// Resolution found nothing, which only `--offline` reaches. No configured
 /// name or eligible installed GA build was found, so the remedy is an
 /// install, not a config.
 pub(crate) fn nothing_configured() -> anyhow::Error {

@@ -42,7 +42,7 @@ pub(crate) struct Active {
     pub pinned_elsewhere: Option<conf::Resolved>,
 }
 
-/// The explicit version or the cascade's answer, then its java home: from the
+/// The explicit version or what resolution picks, then its java home: from the
 /// store alone when `offline`, installing on demand otherwise.
 pub(crate) fn java_home(
     client: &AdoptiumClient,
@@ -67,7 +67,7 @@ fn resolve_java_version_from(
 ) -> anyhow::Result<Request> {
     match explicit {
         Some(version) => Request::parse(&version),
-        None => cascade(
+        None => resolution(
             conf::find()?,
             || newest_installed(store),
             offline,
@@ -80,8 +80,8 @@ fn resolve_java_version_from(
     }
 }
 
-/// Stages 1-3 of the cascade, written once: `cascade` goes on to stage 4,
-/// `provenance` stops here.
+/// Steps 1-3 of resolution, written once: `resolution` goes on to step 4,
+/// `active` stops here.
 fn on_disk(
     configured: Option<conf::Resolved>,
     newest_installed: impl FnOnce() -> Option<conf::Resolved>,
@@ -89,7 +89,7 @@ fn on_disk(
     configured.or_else(newest_installed)
 }
 
-/// The version cascade, once the explicit argument is out of the way:
+/// Resolution, once the explicit argument is out of the way:
 ///
 /// 1. the nearest `.jlorc` at or above the cwd,
 /// 2. `$JLO_HOME/default.jlorc`,
@@ -100,9 +100,9 @@ fn on_disk(
 /// *not* download - are testable without a store, a network or a temp
 /// directory.
 ///
-/// Stage 3 is a closure, called only when stages 1 and 2 answer nothing: an
+/// Step 3 is a closure, called only when steps 1 and 2 answer nothing: an
 /// eager one would list the store twice on every autoload `cd`.
-fn cascade(
+fn resolution(
     configured: Option<conf::Resolved>,
     newest_installed: impl FnOnce() -> Option<conf::Resolved>,
     offline: bool,
@@ -112,7 +112,7 @@ fn cascade(
         return Ok(request);
     }
 
-    // One stage short of the download: this is why the autoload hook's
+    // One step short of the download: this is why the autoload hook's
     // `jlo env --offline` never starts one.
     if offline {
         return Err(conf::nothing_configured());
@@ -121,7 +121,7 @@ fn cascade(
     latest_release()
 }
 
-/// Stage 3. Deliberately no comparison against Adoptium: that would put a
+/// Step 3. Deliberately no comparison against Adoptium: that would put a
 /// network round trip on every bare `jlo env` to answer what `jlo update` is
 /// for. A machine holding only an outdated 17 resolves to 17.
 fn newest_installed(store: &JdkStore) -> Option<conf::Resolved> {
@@ -151,7 +151,7 @@ fn offline_java_home(
     Ok(java_home)
 }
 
-/// The list given, or the version the cascade resolves when it is empty - so
+/// The list given, or the version resolution picks when it is empty - so
 /// a bare `jlo install` means what `env` would pick.
 ///
 /// An invalid entry is warned about and skipped, so one typo in a list of four
@@ -200,12 +200,12 @@ fn resolve_java_home(
 }
 
 /// `$JAVA_HOME` read against the store and, for a JDK the store recognizes,
-/// against the cascade stopped after stage 3. Never touches the network.
+/// against resolution stopped after step 3. Never touches the network.
 ///
-/// `configured` is stages 1 and 2, a closure so a foreign or vanished
+/// `configured` is steps 1 and 2, a closure so a foreign or vanished
 /// `$JAVA_HOME` is answered without reading config: a broken `.jlorc` cannot
 /// fail it.
-pub(crate) fn provenance(
+pub(crate) fn active(
     store: &JdkStore,
     java_home: PathBuf,
     configured: impl FnOnce() -> anyhow::Result<Option<conf::Resolved>>,
@@ -237,7 +237,7 @@ pub(crate) fn provenance(
         });
     };
 
-    // Stage 3 is credited only to the *exact* build a bare `jlo env` would
+    // Step 3 is credited only to the *exact* build a bare `jlo env` would
     // hand back: a shell on 21.0.5 beside 21.0.6 agrees on the name but is
     // not it. Asked of `newest_ga` rather than re-derived, so its GA-only and
     // floor rules apply here too.
@@ -302,7 +302,7 @@ mod tests {
     }
 
     /// A store rooted at a path that does not exist, i.e. one holding no
-    /// JDKs. Enough for the tests that never reach stage 3 of the cascade.
+    /// JDKs. Enough for the tests that never reach step 3 of resolution.
     fn empty_store() -> JdkStore {
         JdkStore::at("/nonexistent/jlo-test-store")
     }
@@ -341,11 +341,11 @@ mod tests {
         assert_eq!(home, entry(dir.path(), "21.0.3+9"));
     }
 
-    // -- cascade --
+    // -- resolution --
     //
     // Every input is passed in, so these run without a store, a network or a
     // temp directory. `refuse_network` is the assertion that matters most in
-    // half of them: stage 4 is a several-hundred-megabyte download, and the
+    // half of them: step 4 is a several-hundred-megabyte download, and the
     // cases below are exactly the ones in which it must not be reached.
 
     fn configured(version: &str) -> conf::Resolved {
@@ -362,24 +362,24 @@ mod tests {
         }
     }
 
-    /// A stage 4 that fails if it is ever called, so "no network access" is an
+    /// A step 4 that fails if it is ever called, so "no network access" is an
     /// assertion rather than a comment.
     fn refuse_network() -> anyhow::Result<Request> {
         Err(anyhow!("the network was consulted"))
     }
 
-    /// A stage 3 that fails if it is ever called: listing the store is what it
+    /// A step 3 that fails if it is ever called: listing the store is what it
     /// costs, and a pin makes that listing wasted work.
     fn refuse_store_listing() -> Option<conf::Resolved> {
-        panic!("the store was listed for stage 3")
+        panic!("the store was listed for step 3")
     }
 
-    /// A pin answers before stage 3 is even asked. Offline, because that is
+    /// A pin answers before step 3 is even asked. Offline, because that is
     /// the autoload hook's case: `jlo env --offline` on every `cd` into a
     /// pinned directory, which then lists the store once to find the JDK.
     #[test]
-    fn cascade_does_not_list_the_store_when_a_config_answers() {
-        let resolved = cascade(
+    fn resolution_does_not_list_the_store_when_a_config_answers() {
+        let resolved = resolution(
             Some(configured("21")),
             refuse_store_listing,
             true,
@@ -390,12 +390,12 @@ mod tests {
         assert_eq!(resolved, request("21"));
     }
 
-    /// Stage 2 beats stage 3: `jlo init --global` is how a user asks for a
+    /// Step 2 beats step 3: `jlo init --global` is how a user asks for a
     /// stable answer on neutral ground, and a JDK installed for some other
     /// project must not quietly override it.
     #[test]
-    fn cascade_prefers_a_config_over_the_newest_install() {
-        let resolved = cascade(
+    fn resolution_prefers_a_config_over_the_newest_install() {
+        let resolved = resolution(
             Some(configured("21")),
             || Some(installed("25")),
             false,
@@ -406,45 +406,45 @@ mod tests {
         assert_eq!(resolved, request("21"));
     }
 
-    /// Stage 3: no config anywhere, so the newest JDK on disk answers - and
+    /// Step 3: no config anywhere, so the newest JDK on disk answers - and
     /// answers without a round trip to Adoptium, however outdated it is.
     /// Whether something newer exists is `jlo update`'s question, not this
     /// one's.
     #[test]
-    fn cascade_falls_back_to_the_newest_installed_jdk() {
-        let resolved = cascade(None, || Some(installed("25")), false, refuse_network)
+    fn resolution_falls_back_to_the_newest_installed_jdk() {
+        let resolved = resolution(None, || Some(installed("25")), false, refuse_network)
             .expect("the installed JDK answers");
 
         assert_eq!(resolved, request("25"));
     }
 
-    /// Stage 4, reached only when nothing is configured *and* nothing is
+    /// Step 4, reached only when nothing is configured *and* nothing is
     /// installed.
     #[test]
-    fn cascade_downloads_the_latest_release_when_nothing_is_installed() {
-        let resolved = cascade(None, || None, false, || Ok(request("26")))
+    fn resolution_downloads_the_latest_release_when_nothing_is_installed() {
+        let resolved = resolution(None, || None, false, || Ok(request("26")))
             .expect("the latest release answers");
 
         assert_eq!(resolved, request("26"));
     }
 
-    /// `--offline` stops one stage short of the download. This is the whole of
+    /// `--offline` stops one step short of the download. This is the whole of
     /// why the autoload hook - which calls `jlo env --offline` on every `cd` -
     /// can never start one.
     #[test]
-    fn cascade_refuses_to_download_when_offline() {
-        let err = cascade(None, || None, true, refuse_network)
+    fn resolution_refuses_to_download_when_offline() {
+        let err = resolution(None, || None, true, refuse_network)
             .expect_err("offline has nowhere left to go");
 
         assert!(err.to_string().contains(".jlorc"), "{err}");
         assert!(err.to_string().contains("jlo install"), "{err}");
     }
 
-    /// `--offline` stops *after* stage 3, not before it: an installed JDK is
+    /// `--offline` stops *after* step 3, not before it: an installed JDK is
     /// already on disk, so handing it back costs no network at all.
     #[test]
-    fn cascade_still_uses_an_installed_jdk_when_offline() {
-        let resolved = cascade(None, || Some(installed("21")), true, refuse_network)
+    fn resolution_still_uses_an_installed_jdk_when_offline() {
+        let resolved = resolution(None, || Some(installed("21")), true, refuse_network)
             .expect("the installed JDK needs no network");
 
         assert_eq!(resolved, request("21"));
@@ -484,7 +484,7 @@ mod tests {
         JdkStore::at(base)
     }
 
-    // -- provenance --
+    // -- active --
 
     fn store_holding(base: &Path, versions: &[&str]) -> JdkStore {
         for version in versions {
@@ -508,11 +508,10 @@ mod tests {
     }
 
     #[test]
-    fn provenance_names_the_config_when_it_agrees() {
+    fn active_names_the_config_when_it_agrees() {
         let dir = tempdir().unwrap();
         let store = store_holding(dir.path(), &["25.0.4+101"]);
-        let active =
-            provenance(&store, entry(dir.path(), "25.0.4+101"), project_pins("25")).unwrap();
+        let active = active(&store, entry(dir.path(), "25.0.4+101"), project_pins("25")).unwrap();
         assert_eq!(active.version.as_deref(), Some("25.0.4+101"));
         assert!(matches!(
             active.source,
@@ -522,11 +521,10 @@ mod tests {
     }
 
     #[test]
-    fn provenance_reports_a_config_that_pins_another_name() {
+    fn active_reports_a_config_that_pins_another_name() {
         let dir = tempdir().unwrap();
         let store = store_holding(dir.path(), &["25.0.4+101"]);
-        let active =
-            provenance(&store, entry(dir.path(), "25.0.4+101"), project_pins("21")).unwrap();
+        let active = active(&store, entry(dir.path(), "25.0.4+101"), project_pins("21")).unwrap();
         assert_eq!(active.source, None);
         assert_eq!(
             active.pinned_elsewhere.map(|p| p.request),
@@ -535,33 +533,33 @@ mod tests {
     }
 
     #[test]
-    fn provenance_credits_stage_3_only_for_the_exact_newest_build() {
+    fn active_credits_step_3_only_for_the_exact_newest_build() {
         let dir = tempdir().unwrap();
         let store = store_holding(dir.path(), &["21.0.5+11", "21.0.6+7"]);
 
-        let newest = provenance(&store, entry(dir.path(), "21.0.6+7"), || Ok(None)).unwrap();
+        let newest = active(&store, entry(dir.path(), "21.0.6+7"), || Ok(None)).unwrap();
         assert_eq!(newest.source, Some(conf::Source::NewestInstalled));
 
         // Same name, older build: a bare `jlo env` would hand back 21.0.6+7.
-        let older = provenance(&store, entry(dir.path(), "21.0.5+11"), || Ok(None)).unwrap();
+        let older = active(&store, entry(dir.path(), "21.0.5+11"), || Ok(None)).unwrap();
         assert_eq!(older.source, None);
         assert!(older.pinned_elsewhere.is_none());
     }
 
     #[test]
-    fn provenance_says_nothing_pinned_when_stage_3_picks_another_major() {
+    fn active_says_nothing_pinned_when_step_3_picks_another_major() {
         let dir = tempdir().unwrap();
         let store = store_holding(dir.path(), &["17.0.11+9", "25.0.4+101"]);
-        let active = provenance(&store, entry(dir.path(), "17.0.11+9"), || Ok(None)).unwrap();
+        let active = active(&store, entry(dir.path(), "17.0.11+9"), || Ok(None)).unwrap();
         assert_eq!(active.source, None);
         assert!(active.pinned_elsewhere.is_none());
     }
 
     #[test]
-    fn provenance_never_calls_a_pre_release_the_newest_install() {
+    fn active_never_calls_a_pre_release_the_newest_install() {
         let dir = tempdir().unwrap();
         let store = store_holding(dir.path(), &["21.0.5+11", "28.0.0-beta+16.0.ea"]);
-        let active = provenance(&store, entry(dir.path(), "28.0.0-beta+16.0.ea"), || {
+        let active = active(&store, entry(dir.path(), "28.0.0-beta+16.0.ea"), || {
             Ok(None)
         })
         .unwrap();
@@ -571,10 +569,10 @@ mod tests {
     }
 
     #[test]
-    fn provenance_reports_a_foreign_java_home_by_path_without_reading_config() {
+    fn active_reports_a_foreign_java_home_by_path_without_reading_config() {
         let dir = tempdir().unwrap();
         let store = store_holding(dir.path(), &["25.0.4+101"]);
-        let active = provenance(
+        let active = active(
             &store,
             PathBuf::from("/opt/jdk-21"),
             config_must_not_be_read,
@@ -587,34 +585,33 @@ mod tests {
     /// A vendor-named directory is inside the store and present, but
     /// unlistable: foreign, not gone.
     #[test]
-    fn provenance_calls_a_vendor_named_jdk_in_the_store_foreign() {
+    fn active_calls_a_vendor_named_jdk_in_the_store_foreign() {
         let dir = tempdir().unwrap();
         let store = store_holding(dir.path(), &["25.0.4+101"]);
         let vendor = dir.path().join("temurin-17.0.9");
         std::fs::create_dir_all(vendor.join("bin")).unwrap();
-        let active = provenance(&store, vendor, config_must_not_be_read).unwrap();
+        let active = active(&store, vendor, config_must_not_be_read).unwrap();
         assert_eq!(active.source, Some(conf::Source::Foreign));
     }
 
     /// A bare-version directory an earlier jlo left, since deleted by hand:
     /// in the store, gone, and still not jlo's.
     #[test]
-    fn provenance_calls_a_vanished_foreign_directory_foreign() {
+    fn active_calls_a_vanished_foreign_directory_foreign() {
         let dir = tempdir().unwrap();
         let store = store_holding(dir.path(), &["25.0.4+101"]);
         let gone = dir.path().join("21.0.3+9");
-        let active = provenance(&store, gone, config_must_not_be_read).unwrap();
+        let active = active(&store, gone, config_must_not_be_read).unwrap();
         assert_eq!(active.source, Some(conf::Source::Foreign));
     }
 
     #[test]
-    fn provenance_refuses_a_removed_install_without_reading_config() {
+    fn active_refuses_a_removed_install_without_reading_config() {
         let dir = tempdir().unwrap();
         let store = store_holding(dir.path(), &["25.0.4+101"]);
         let gone = entry(dir.path(), "25.0.4+101");
         std::fs::remove_dir_all(&gone).unwrap();
-        let err =
-            provenance(&store, gone, config_must_not_be_read).expect_err("the install is gone");
+        let err = active(&store, gone, config_must_not_be_read).expect_err("the install is gone");
         assert!(format!("{:#}", err.error).contains("no longer there"));
         assert_eq!(err.hint.as_deref(), Some(ui::NO_ACTIVE_JDK_HINT));
     }
@@ -622,10 +619,10 @@ mod tests {
     /// A config the user wrote and meant fails the command rather than being
     /// answered around.
     #[test]
-    fn provenance_fails_when_the_config_cannot_be_read() {
+    fn active_fails_when_the_config_cannot_be_read() {
         let dir = tempdir().unwrap();
         let store = store_holding(dir.path(), &["25.0.4+101"]);
-        let err = provenance(&store, entry(dir.path(), "25.0.4+101"), || {
+        let err = active(&store, entry(dir.path(), "25.0.4+101"), || {
             Err(anyhow!("bad .jlorc"))
         })
         .expect_err("config failure propagates");

@@ -1598,16 +1598,16 @@ fn env_writes_exports_to_stdout_and_nothing_to_stderr() {
         .stderr(predicate::str::is_empty());
 }
 
-// -- the cascade is wired into every verb that resolves a version --
+// -- resolution is wired into every verb that resolves a version --
 //
-// The rule itself - which of the four stages wins, and where `--offline`
-// stops - is unit-tested in `src/resolve.rs` (`cascade_*`) against the same
+// The rule itself - which of the four steps wins, and where `--offline`
+// stops - is unit-tested in `src/resolve.rs` (`resolution_*`) against the same
 // cases, without a process spawn or a temp store. What a unit test cannot
-// reach is the wiring: each verb has to call the cascade rather than grow a
+// reach is the wiring: each verb has to call resolution rather than grow a
 // lookup of its own. That is what this section covers, one case per verb.
 //
-// Stage 3 (the newest installed JDK) is the probe, because it is the last
-// stage every verb can reach without the network - and every command below
+// Step 3 (the newest installed JDK) is the probe, because it is the last
+// step every verb can reach without the network - and every command below
 // points `JLO_ADOPTIUM_API_URL` at a port nothing listens on, which turns
 // "no network access" into an assertion rather than a claim.
 
@@ -1615,7 +1615,7 @@ fn installed_path(home: &std::path::Path, version: &str) -> String {
     format!("{}\n", jdk_entry(home, version).display())
 }
 
-/// Stage 4, reached only when nothing is configured *and* nothing is
+/// Step 4, reached only when nothing is configured *and* nothing is
 /// installed. The download is what fails here, which is the point: the old
 /// behaviour refused to resolve at all and sent the user to `jlo init`.
 #[test]
@@ -1675,8 +1675,8 @@ fn env_resolves_the_newest_installed_jdk_and_exports_only_that() {
         );
 }
 
-/// `exec` had no cascade coverage at all: the version is optional there too,
-/// and the child is where the answer shows up.
+/// `exec` takes an optional version too, and the child is where the answer
+/// shows up.
 #[test]
 fn exec_resolves_the_newest_installed_jdk_for_the_child() {
     let (home, project) = store_fixture(&["21.0.5+11"]);
@@ -1708,9 +1708,9 @@ fn bare_env_offline_ignores_an_ea_install() {
         ));
 }
 
-/// A bare `install` resolves through the cascade, then asks Adoptium about
-/// whatever it produced: stage 3 answers 21, the installed major, so 21 is
-/// the one name looked up. Falling through to stage 4 would ask for the
+/// A bare `install` goes through resolution, then asks Adoptium about
+/// whatever it produced: step 3 answers 21, the installed major, so 21 is
+/// the one name looked up. Falling through to step 4 would ask for the
 /// latest release instead.
 #[test]
 fn install_resolves_the_newest_installed_jdk() {
@@ -1740,8 +1740,8 @@ fn install_resolves_the_newest_installed_jdk() {
 }
 
 /// A bare `update` is every installed name, pre-release streams included -
-/// not the cascade `install` runs. The `.jlorc` pinning 25 is the trap: were
-/// the cascade consulted, 25 would be the one name asked about.
+/// not the resolution `install` runs. The `.jlorc` pinning 25 is the trap: were
+/// resolution consulted, 25 would be the one name asked about.
 #[test]
 fn a_bare_update_asks_about_every_installed_name() {
     let mut server = mockito::Server::new();

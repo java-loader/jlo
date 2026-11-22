@@ -385,7 +385,7 @@ impl AdoptiumClient {
         Ok(self.fetch_available_releases()?.available_releases)
     }
 
-    /// The cascade's last stage. Parsed rather than assumed, so the one
+    /// The last step of resolution. Parsed rather than assumed, so the one
     /// grammar, floor included, stays in one place.
     pub(crate) fn latest_major(&self) -> anyhow::Result<Request> {
         let releases = self.fetch_available_releases()?;

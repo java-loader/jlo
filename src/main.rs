@@ -343,11 +343,11 @@ fn cmd_current(json: bool) -> Result<(), CommandError> {
     };
 
     let store = JdkStore::discover()?;
-    let active = resolve::provenance(&store, java_home, conf::find)?;
+    let active = resolve::active(&store, java_home, conf::find)?;
     if json {
         ui::print_document(&json::current(&active)?);
     } else {
-        ui::print_lines([ui::provenance_line(&active)]);
+        ui::print_lines([ui::active_line(&active)]);
     }
 
     // After the answer and with exit 0: "what is active" has an answer, and a
@@ -411,7 +411,7 @@ fn cmd_init(version: &str, global: bool, force: bool) -> Result<(), CommandError
     })
 }
 
-/// The names given, or the one the cascade resolves.
+/// The names given, or the one resolution picks.
 fn cmd_install(
     client: &AdoptiumClient,
     versions: Vec<String>,

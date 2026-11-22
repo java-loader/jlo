@@ -882,7 +882,7 @@ fn print_listing(rows: &[NameRow], foreign: &Foreign) {
 }
 
 /// `jlo current`'s stdout line: which JDK, and why.
-pub(crate) fn provenance_line(active: &Active) -> String {
+pub(crate) fn active_line(active: &Active) -> String {
     // A JDK that is not jlo's has no version to name; the path says "not
     // mine", and usually holds the version anyway.
     let subject = match &active.version {
@@ -1975,7 +1975,7 @@ mod tests {
         assert!(bare.contains("\"$(jlo home)\""), "{bare}");
     }
 
-    // -- provenance_line --
+    // -- active_line --
     //
     // The six states `jlo current` distinguishes. Pure formatting: no store,
     // no config, no environment. Cases 1 and 6 never reach a formatter - they
@@ -2001,28 +2001,28 @@ mod tests {
 
     /// Case 2: active, and the config that pins it is named.
     #[test]
-    fn provenance_line_names_the_config_the_active_jdk_came_from() {
+    fn active_line_names_the_config_the_active_jdk_came_from() {
         let mut a = active("25.0.4+101", 25);
         a.source = Some(pinned("25", "./.jlorc").source);
-        assert_eq!(provenance_line(&a), "25.0.4+101  (from ./.jlorc)");
+        assert_eq!(active_line(&a), "25.0.4+101  (from ./.jlorc)");
     }
 
     /// Case 3: the config pins a different major. The stdout line still
     /// answers "what is active" - the disagreement is `pin_mismatch`'s job,
     /// on stderr - so it must not turn into an apology here.
     #[test]
-    fn provenance_line_stays_an_answer_when_the_config_disagrees() {
+    fn active_line_stays_an_answer_when_the_config_disagrees() {
         let mut a = active("25.0.4+101", 25);
         a.pinned_elsewhere = Some(pinned("21", "./.jlorc"));
-        assert_eq!(provenance_line(&a), "25.0.4+101  (active)");
+        assert_eq!(active_line(&a), "25.0.4+101  (active)");
     }
 
     /// Case 4: nothing pins anything, which is a different statement from
     /// case 3 and has to read as one.
     #[test]
-    fn provenance_line_says_so_when_nothing_is_pinned() {
+    fn active_line_says_so_when_nothing_is_pinned() {
         assert_eq!(
-            provenance_line(&active("25.0.4+101", 25)),
+            active_line(&active("25.0.4+101", 25)),
             "25.0.4+101  (active, nothing pinned)"
         );
     }
@@ -2031,7 +2031,7 @@ mod tests {
     /// "not mine" completely, and naming a version would claim knowledge jlo
     /// does not have.
     #[test]
-    fn provenance_line_prints_the_path_for_a_foreign_java_home() {
+    fn active_line_prints_the_path_for_a_foreign_java_home() {
         let a = Active {
             path: PathBuf::from("/opt/jdk-21"),
             version: None,
@@ -2040,7 +2040,7 @@ mod tests {
             pinned_elsewhere: None,
         };
         assert_eq!(
-            provenance_line(&a),
+            active_line(&a),
             "/opt/jdk-21  ($JAVA_HOME, set outside jlo)"
         );
     }
