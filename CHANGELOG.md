@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.2](https://github.com/java-loader/jlo/compare/jlo-bin-v0.9.1...jlo-bin-v0.9.2) (2026-11-22)
+
+
+### Bug Fixes
+
+* **cli:** name default.jlorc in the version help and share repeated paragraphs ([719c19c](https://github.com/java-loader/jlo/commit/719c19c17efa0e3ef7370dd15579d0cbea112949))
+
 ## [0.9.1](https://github.com/java-loader/jlo/compare/jlo-bin-v0.9.0...jlo-bin-v0.9.1) (2026-11-01)
 
 
