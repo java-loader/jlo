@@ -1,3 +1,5 @@
+# A fixed version rather than "stable", so a release is built with a known
+# compiler and can be rebuilt with the same one. Raised by hand.
 [toolchain]
-channel = "stable"
+channel = "1.100.0"
 components = ["rustfmt", "clippy", "rust-src"]

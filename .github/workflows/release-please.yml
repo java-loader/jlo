@@ -98,8 +98,8 @@ jobs:
         with:
           ref: refs/tags/${{ needs.resolve.outputs.tag_name }}
 
-      - name: Install Rust (if needed)
-        run: rustup update
+      - name: Install the Rust toolchain of rust-toolchain.toml
+        run: rustup toolchain install
 
       - name: Install zsh (autoload tests source the hook in a real zsh)
         if: runner.os == 'Linux'

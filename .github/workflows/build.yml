@@ -15,8 +15,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Install Rust (if needed)
-        run: rustup update
+      - name: Install the Rust toolchain of rust-toolchain.toml
+        run: rustup toolchain install
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -57,8 +57,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Install Rust (if needed)
-        run: rustup update
+      - name: Install the Rust toolchain of rust-toolchain.toml
+        run: rustup toolchain install
 
       - name: Install zsh (autoload tests source the hook in a real zsh)
         if: runner.os == 'Linux'
