@@ -119,7 +119,7 @@ fn styling_is_chosen_only_in_ui_rs() {
 
     assert!(
         found.is_empty(),
-        "styling belongs in ui.rs behind a named helper (ADR-0007 rule 6):\n{found:#?}"
+        "styling belongs in ui.rs behind a named helper:\n{found:#?}"
     );
 }
 

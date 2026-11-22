@@ -1,11 +1,2 @@
 target
 .idea/
-
-# superpowers subagent-driven-development scratch
-.superpowers/
-
-.scratch/
-
-# agent-facing working docs: local only
-CONTEXT.md
-docs/
