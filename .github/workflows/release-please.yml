@@ -27,7 +27,7 @@ jobs:
       releases_created: ${{ steps.release.outputs.releases_created }}
       tag_name: ${{ steps.release.outputs.tag_name }}
     steps:
-      - uses: googleapis/release-please-action@v5
+      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         id: release
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -94,7 +94,7 @@ jobs:
     steps:
       # Build the tagged source, not whatever main happens to be: on a manual
       # dispatch the workflow file comes from main but the sources must not.
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: refs/tags/${{ needs.resolve.outputs.tag_name }}
 
@@ -129,12 +129,12 @@ jobs:
       # No key management on our side; verifiable with
       #   gh attestation verify jlo-<platform>.tar.gz --repo java-loader/jlo
       - name: Attest build provenance
-        uses: actions/attest-build-provenance@v4
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: ${{ matrix.package }}.tar.gz
 
       - name: Upload package
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ matrix.package }}-artifact
           path: jlo-*.tar.gz*
@@ -179,7 +179,7 @@ jobs:
       # build is: on a manual dispatch the workflow file comes from main, and
       # the script must not.
       - name: Check out install.sh of the tag
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: refs/tags/${{ needs.resolve.outputs.tag_name }}
           path: tagged
@@ -191,12 +191,12 @@ jobs:
       # with
       #   gh attestation verify install.sh --repo java-loader/jlo
       - name: Attest install.sh
-        uses: actions/attest-build-provenance@v4
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: tagged/install.sh
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           merge-multiple: true
           path: .
@@ -205,7 +205,7 @@ jobs:
       # to - and makes it latest, whichever release that is. Publishing is the
       # next step's call.
       - name: Upload to versioned release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
         with:
           tag_name: ${{ needs.resolve.outputs.tag_name }}
           draft: true
@@ -289,7 +289,7 @@ jobs:
       # install verb, so it must be the one written for that binary.
       - name: Check out the formula of the tag
         if: steps.latest.outputs.bump == 'true'
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: refs/tags/${{ needs.resolve.outputs.tag_name }}
           path: tagged

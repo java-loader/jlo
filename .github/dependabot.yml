@@ -1,0 +1,28 @@
+version: 2
+
+# Version updates: one pull request per ecosystem and month, on the first Friday. New releases are only considered
+# after a week. Security updates are not held back by this and arrive as soon as an advisory is published.
+updates:
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "cron"
+      cronjob: "0 6 * * fri#1"
+      timezone: "Europe/Berlin"
+    cooldown:
+      default-days: 7
+    groups:
+      cargo:
+        patterns: ["*"]
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "cron"
+      cronjob: "0 6 * * fri#1"
+      timezone: "Europe/Berlin"
+    cooldown:
+      default-days: 7
+    groups:
+      github-actions:
+        patterns: ["*"]
