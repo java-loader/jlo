@@ -202,9 +202,7 @@ impl InstallUi {
                 .max()
                 .unwrap_or(0);
             let width = state.version_width;
-            let counter = counter
-                .map(|counter| format!("{} ", dim(counter)))
-                .unwrap_or_default();
+            let counter = counter.map_or_default(|counter| format!("{} ", dim(counter)));
             state.label = format!("{counter}{version:<width$}");
             self.fit_bar(&state);
         }
@@ -463,9 +461,7 @@ fn added_line(columns: Columns, request: Request, version: &str, elapsed: Durati
 /// it - which is also what tells a replaced pre-release (`28-ea`) apart.
 fn removed_line(columns: Columns, version: &str) -> String {
     let name_width = columns.name;
-    let name = build_name(version)
-        .map(|r| r.to_string())
-        .unwrap_or_default();
+    let name = build_name(version).map_or_default(|r| r.to_string());
     format!(
         "{}{}",
         dim(format!("- {name:<name_width$}  ")),
@@ -933,7 +929,7 @@ pub(crate) const UNSOURCED_ENV_ERROR: &str =
 /// and - when this install has a profile line to name - where it goes. The
 /// line itself follows on its own, as a command.
 pub(crate) fn unsourced_env_hint(version: Option<&str>, has_profile_line: bool) -> String {
-    let v = version.map(|v| format!(" {v}")).unwrap_or_default();
+    let v = version.map_or_default(|v| format!(" {v}"));
     let alternatives = format!(
         "For one command instead: 'jlo exec{v} -- <command>', or \
          'export JAVA_HOME=\"$(jlo home{v})\"'."
@@ -1082,7 +1078,7 @@ fn name_row(
     group: Option<&NameGroup>,
     active_version: Option<&str>,
 ) -> NameRow {
-    let builds = group.map(NameGroup::builds).unwrap_or_default();
+    let builds = group.map_or_default(NameGroup::builds);
 
     // `latest` is any offer not already on disk, so a catalogue behind the
     // store stays visible; only `update` claims an improvement, by the rule
@@ -1095,19 +1091,17 @@ fn name_row(
 
     let head = group.map(|group| group.head);
     let is_active = |version: &str| active_version == Some(version);
-    let others = group
-        .map(|group| {
-            group
-                .others
-                .iter()
-                .map(|(jdk, status)| Build {
-                    version: jdk.version.clone(),
-                    status: *status,
-                    active: is_active(&jdk.version),
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+    let others = group.map_or_default(|group| {
+        group
+            .others
+            .iter()
+            .map(|(jdk, status)| Build {
+                version: jdk.version.clone(),
+                status: *status,
+                active: is_active(&jdk.version),
+            })
+            .collect()
+    });
 
     NameRow {
         name,

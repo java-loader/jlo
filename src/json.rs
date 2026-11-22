@@ -61,7 +61,7 @@ pub(crate) fn list(
     active_version: Option<&str>,
     store: &JdkStore,
 ) -> anyhow::Result<String> {
-    let offers = catalogue.map(|c| c.jdks.as_slice()).unwrap_or_default();
+    let offers = catalogue.map_or_default(|c| c.jdks.as_slice());
     let mut names: Vec<Request> = offers
         .iter()
         .map(|jdk| jdk.request)
@@ -78,7 +78,7 @@ pub(crate) fn list(
                 .iter()
                 .find(|jdk| jdk.request == name)
                 .map(|jdk| jdk.version.as_str());
-            let builds = group.map(NameGroup::builds).unwrap_or_default();
+            let builds = group.map_or_default(NameGroup::builds);
             // The one rule the table's `update` and `jlo update` use.
             let update = catalogue.filter(|c| c.asked.contains(&name)).map(|_| {
                 !builds.is_empty() && offered.is_some_and(|v| supersedes_every_install(v, &builds))
